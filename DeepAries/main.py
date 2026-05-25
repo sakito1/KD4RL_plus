@@ -42,6 +42,8 @@ def main():
                         help='CSV filename of the dataset. Defaults to "<market>_data.csv" if not provided')
     parser.add_argument('--checkpoints', type=str, default='./checkpoints/',
                         help='Directory to save model checkpoints')
+    parser.add_argument('--results_root', type=str, default='./results',
+                        help='Directory to save backtest output and logs')
     parser.add_argument('--checkpoint_dir', type=str, default=None,
                         help='Checkpoint directory name for loading pre-trained model. If not specified, will auto-search for matching checkpoint.')
 
@@ -87,6 +89,10 @@ def main():
                         help='Number of experiment iterations')
     parser.add_argument('--train_epochs', type=int, default=1,
                         help='Number of training epochs')
+    parser.add_argument('--max_train_steps', type=int, default=None,
+                        help='Optional per-epoch training step cap for smoke tests')
+    parser.add_argument('--rollout_len', type=int, default=30,
+                        help='Transitions collected before each PPO update')
     parser.add_argument('--patience', type=int, default=3,
                         help='Early stopping patience')
     parser.add_argument('--learning_rate', type=float, default=1e-5,
@@ -189,7 +195,7 @@ def main():
     setting = "_".join(setting_components)
     unique_id = uuid.uuid4().hex[:8]
     unique_setting = f"{setting}_{unique_id}"
-    result_dir = os.path.join("./results", unique_setting)
+    result_dir = os.path.join(args.results_root, unique_setting)
     os.makedirs(result_dir, exist_ok=True)
 
     # --- Initialize logger ---

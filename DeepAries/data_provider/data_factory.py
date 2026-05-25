@@ -58,6 +58,6 @@ def data_provider(args, flag):
         shuffle=shuffle_flag,
         num_workers=args.num_workers,
         drop_last=drop_last,
-        persistent_workers=True
+        persistent_workers=(args.num_workers > 0)
     )
     return dataset, data_loader

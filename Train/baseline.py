@@ -12,8 +12,9 @@ import matplotlib.pyplot as plt
 import os
 from glob import glob
 import pandas as pd
+from Train.deep_baseline import deep_baseline
 
-def baseline(cun_path,logger):
+def baseline(cun_path, logger, include_deep=True, deep_smoke=False):
     baseline_ssm(cun_path, logger)
     baseline_anticor(cun_path, logger)
     baseline_BH(cun_path, logger)
@@ -21,6 +22,8 @@ def baseline(cun_path,logger):
     baseline_olmar(cun_path, logger)
     baseline_ucrp(cun_path, logger)
     baseline_wmamr(cun_path, logger)
+    if include_deep:
+        deep_baseline(cun_path, logger, smoke=deep_smoke)
     raw_path = config.dataset['feature_path']
     start_train = config.train_start_date
     end_train = config.train_end_date

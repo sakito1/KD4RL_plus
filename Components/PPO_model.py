@@ -386,32 +386,30 @@ class InnerAC(nn.Module):
 
 class MonitorAC(nn.Module):
     """
-    Monitor 层：共享 backbone，actor/critic 头分离；提供 pi/value/forward。
+    Monitor layer for hold/rebalance decisions.
+
+    Each asset's SSM output is transformed independently, then aggregated
+    with the currently held portfolio weights.  The monitor never observes
+    the candidate outer action directly; its job is to decide whether the
+    current SSM state warrants asking the outer policy to rebalance.
     """
 
     def __init__(self, z_dim, h_dim, port_state_dim, hidden_dim=32, action_dim=None):
         super().__init__()
         self.asset_feat_dim = z_dim + h_dim + 3
         self.port_state_dim = port_state_dim
-        self.action_dim = action_dim
         self.hidden_dim = hidden_dim
 
-        self.action_encoder = None
-        if action_dim is not None:
-            self.action_encoder = nn.Sequential(
-                nn.Linear(action_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-            )
-
-        self.risk_feat_dim = 6
-        global_in = self.asset_feat_dim + port_state_dim + self.risk_feat_dim
-        if self.action_encoder is not None:
-            global_in += hidden_dim
+        self.asset_encoder = nn.Sequential(
+            nn.Linear(self.asset_feat_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
 
         self.backbone = nn.Sequential(
-            nn.Linear(global_in, hidden_dim),
+            nn.Linear(hidden_dim + port_state_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -423,25 +421,10 @@ class MonitorAC(nn.Module):
 
     def encode(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None):
         p_, q_bear_, q_bull_ = p.unsqueeze(-1), q_bear.unsqueeze(-1), q_bull.unsqueeze(-1)
-        asset_feats = torch.cat([z, h, p_, q_bear_, q_bull_], dim=-1)       # [B, N, F]
-        portfolio_ssm_feat = torch.sum(asset_feats * weights_drift.unsqueeze(-1), dim=1)
-
-        cur_bear = torch.sum(weights_drift * q_bear, dim=1, keepdim=True)
-        cur_bull = torch.sum(weights_drift * q_bull, dim=1, keepdim=True)
-
-        cand_weights = switch_action if switch_action is not None else weights_drift
-        cand_bear = torch.sum(cand_weights * q_bear, dim=1, keepdim=True)
-        cand_bull = torch.sum(cand_weights * q_bull, dim=1, keepdim=True)
-
-        l1_cost = torch.sum(torch.abs(weights_drift - cand_weights), dim=1, keepdim=True)
-        cos_sim = F.cosine_similarity(weights_drift, cand_weights, dim=1).unsqueeze(1)
-        risk_feats = torch.cat([cur_bear, cur_bull, cand_bear, cand_bull, l1_cost, cos_sim], dim=-1)
-
-        global_feat_list = [portfolio_ssm_feat, port_state, risk_feats]
-        if self.action_encoder is not None and switch_action is not None:
-            global_feat_list.append(self.action_encoder(switch_action))
-
-        global_feat = torch.cat(global_feat_list, dim=-1)
+        asset_feats = torch.cat([z, h, p_, q_bear_, q_bull_], dim=-1)
+        asset_emb = self.asset_encoder(asset_feats)
+        portfolio_emb = torch.sum(asset_emb * weights_drift.unsqueeze(-1), dim=1)
+        global_feat = torch.cat([portfolio_emb, port_state], dim=-1)
         return self.backbone(global_feat)
 
     def pi(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None):

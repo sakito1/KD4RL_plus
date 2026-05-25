@@ -5,6 +5,7 @@ import copy
 import time
 from datetime import datetime
 import logging
+import configparser
 from tqdm import *
 import pandas as pd
 import numpy as np
@@ -26,8 +27,8 @@ def run(func_args):
 
     start_time = datetime.now().strftime('%m%d/%H:%M:%S')
     if func_args.mode == 'train':
-        PREFIX = 'outputs/'
-        PREFIX = os.path.join(PREFIX, start_time)
+        output_root = getattr(func_args, 'output_dir', None) or 'outputs/'
+        PREFIX = os.path.join(output_root, start_time)
         img_dir = os.path.join(PREFIX, 'img_file')
         save_dir = os.path.join(PREFIX, 'log_file')
         model_save_dir = os.path.join(PREFIX, 'model_file')
@@ -70,9 +71,12 @@ def run(func_args):
         market_history = None
         assert stocks_data.shape[:-1] == rate_of_return.shape, 'file size error'
         A = torch.from_numpy(np.load(matrix_path)).float().to(func_args.device)
-        test_idx = 4852
-        val_idx = 4365
-        test_end_idx = 6100
+        split_config = configparser.ConfigParser()
+        split_path = os.path.join(data_prefix, 'split_idx.txt')
+        split_config.read(split_path)
+        val_idx = split_config.getint('valid', 'start')
+        test_idx = split_config.getint('test', 'start')
+        test_end_idx = split_config.getint('test', 'end_excl')
         allow_short = False
 
 
@@ -87,8 +91,12 @@ def run(func_args):
         agent = RLAgent(env, actor, func_args)
 
         mini_batch_num = int(np.ceil(len(env.src.order_set) / func_args.batch_size))
+        max_batches = getattr(func_args, 'max_batches', None)
+        if max_batches is not None:
+            mini_batch_num = min(mini_batch_num, int(max_batches))
         try:
             max_cr = 0
+            metric_rows = []
             for epoch in range(func_args.epochs):
                 epoch_return = 0
                 for j in tqdm(range(mini_batch_num)):
@@ -107,8 +115,19 @@ def run(func_args):
                 #     np.save(os.path.join(save_dir, f'val_daily_ret_epoch{epoch}.npy'), agent.val_daily_ret)
                 # if getattr(agent, 'test_daily_ret', None) is not None:
                 #     np.save(os.path.join(save_dir, f'test_daily_ret_epoch{epoch}.npy'), agent.test_daily_ret)
-                val_metrics = calculate_daliy_metrics(val_wealth_list, func_args.trade_mode)
-                test_metrics = calculate_daliy_metrics(test_wealth_list, func_args.trade_mode)
+                val_metrics = {
+                    key: float(np.asarray(value).squeeze())
+                    for key, value in calculate_daliy_metrics(val_wealth_list, func_args.trade_mode).items()
+                }
+                test_metrics = {
+                    key: float(np.asarray(value).squeeze())
+                    for key, value in calculate_daliy_metrics(test_wealth_list, func_args.trade_mode).items()
+                }
+                metric_rows.append({
+                    'epoch': epoch,
+                    **{f'val_{key}': value for key, value in val_metrics.items()},
+                    **{f'test_{key}': value for key, value in test_metrics.items()},
+                })
 
                 print('Val/APR', val_metrics['APR'])
                 print('Val/MDD', val_metrics['MDD'])
@@ -148,6 +167,9 @@ def run(func_args):
                         100 * test_metrics['MDD'], test_metrics['CR'], test_metrics['DDR'],
                     )
                 )
+            pd.DataFrame(metric_rows).to_csv(os.path.join(save_dir, 'performance.csv'), index=False)
+            torch.save(actor, os.path.join(model_save_dir, 'final_model.pkl'))
+            torch.save(agent.optimizer.state_dict(), os.path.join(model_save_dir, 'final_optimizer.pkl'))
         except KeyboardInterrupt:
             torch.save(actor, os.path.join(model_save_dir, 'final_model.pkl'))
             torch.save(agent.optimizer.state_dict(), os.path.join(model_save_dir, 'final_optimizer.pkl'))
@@ -166,6 +188,7 @@ if __name__ == '__main__':
     parser.add_argument('--no_msu', dest='msu_bool', action='store_true')
     parser.add_argument('--relation_file', type=str)
     parser.add_argument('--addaptiveadj', dest='addaptive_adj_bool', action='store_false')
+    parser.add_argument('--output_dir', type=str)
 
     opts = parser.parse_args()
 

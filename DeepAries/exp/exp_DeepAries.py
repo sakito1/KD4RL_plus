@@ -41,7 +41,7 @@ class TradingEnvironment:
         self.weights_memory = [self.w_old]
         self.transaction_cost_memory = []
         self.rollout = []
-        self.rollout_len = 30
+        self.rollout_len = args.rollout_len
 
     def reset(self):
         """Reset the environment to initial conditions."""
@@ -195,10 +195,13 @@ class Exp_DeepAries(Exp_Basic):
             self.model.train()
             self.env.reset()
             i = 0
+            train_steps = 0
             epoch_loss = []
             epoch_time = time.time()
 
-            while i < n_data:
+            while i < n_data and (
+                self.args.max_train_steps is None or train_steps < self.args.max_train_steps
+            ):
                 batch_x, batch_y, batch_x_mark, batch_y_mark, ground_true = \
                     self.env.get_sample(train_dataset, i, self.device)
                 dec_zeros = torch.zeros_like(batch_y[:, -self.args.pred_len:, :])
@@ -247,6 +250,7 @@ class Exp_DeepAries(Exp_Basic):
                 )
                 self.env.rollout.append(transition)
                 i = next_i
+                train_steps += 1
                 if len(self.env.rollout) >= self.env.rollout_len:
                     self.put_data(self.env.rollout)
                     self.env.rollout = []

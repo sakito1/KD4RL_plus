@@ -265,14 +265,12 @@ class HRL_PPO_Agent:
         act_mon_samp, logp_mon_samp, _, _ = self.net.mon.pi(
             obs['ssm']['z'], obs['ssm']['h'], obs['ssm']['p'],
             obs['ssm']['q_bear'], obs['ssm']['q_bull'],
-            weight_drift, obs['port_state'],
-            switch_action=act_out
+            weight_drift, obs['port_state']
         )
         val_mon = self.net.mon.value(
             obs['ssm']['z'], obs['ssm']['h'], obs['ssm']['p'],
             obs['ssm']['q_bear'], obs['ssm']['q_bull'],
-            weight_drift, obs['port_state'],
-            switch_action=act_out
+            weight_drift, obs['port_state']
         )
 
         if force_switch is not None:
@@ -504,7 +502,6 @@ class HRL_PPO_Agent:
             ssm['z'], ssm['h'], ssm['p'], ssm['q_bear'], ssm['q_bull'],
             data['weights_drift'][mask],
             data['port_state'][mask],
-            switch_action=data['act_out'][mask] if isinstance(data['act_out'], torch.Tensor) else None,
         )
         logits = self.net.mon.actor_head(feat)
         dist = Categorical(logits=logits)

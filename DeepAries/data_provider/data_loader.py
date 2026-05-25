@@ -77,8 +77,7 @@ class TimeSeriesDataset(Dataset):
 
     def __read_data__(self):
         market = os.path.basename(os.path.normpath(self.root_path))
-        # Construct the file path: data/{market}_{data}_data.csv
-        file_path = os.path.join("data", market, f"{market}_{self.data}_data.csv")
+        file_path = os.path.join(self.root_path, f"{market}_{self.data}_data.csv")
         df_raw = pd.read_csv(file_path)
         df_raw.fillna(0, inplace=True)
         df_raw['date'] = pd.to_datetime(df_raw['date']).dt.tz_localize(None)

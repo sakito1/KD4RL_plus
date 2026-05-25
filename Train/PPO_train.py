@@ -292,6 +292,21 @@ class HRL_Trainer:
             outer_action = out['act_out']
             is_switch_action = (out['act_mon'].item() == 1)
 
+            # Counterfactual monitor reward: prefer the decision whose base
+            # portfolio is valued higher by the trained outer critic.
+            with torch.no_grad():
+                value_hold = self.agent.net.outer.value(obs['outer_state'], obs['base_drift']).squeeze(-1)
+                value_switch = self.agent.net.outer.value(obs['outer_state'], outer_action).squeeze(-1)
+                cf_switch_advantage = value_switch - value_hold
+                selected_sign = torch.where(
+                    out['act_mon'] == 1,
+                    torch.ones_like(cf_switch_advantage),
+                    -torch.ones_like(cf_switch_advantage),
+                )
+                monitor_reward = (
+                    selected_sign * cf_switch_advantage * float(getattr(self.cfg, 'reward_scale_monitor', 1.0))
+                ).item()
+
             # === Update Counters ===
             is_scheduled_active = (
                     spec.use_schedule and switch_schedule is not None and step_idx < len(switch_schedule))
@@ -334,6 +349,8 @@ class HRL_Trainer:
 
             next_obs, _, done, info = env.step(weights_exec, base_used, outer_action=outer_action,
                                                is_switch=is_switch_action)
+            info['rewards']['monitor_reward'] = monitor_reward
+            info['rewards']['monitor_cf_switch_advantage'] = cf_switch_advantage.item()
 
             if is_train:
                 self.buffer.store_daily({
@@ -828,13 +845,14 @@ class HRL_Trainer:
         self.agent.net.train()
 
 
-def train_warmup_then_joint_no_monitor(trainer,
-                                       warmup_outer_episodes: int = 50,
-                                       warmup_inner_episodes: int = 50,
-                                       joint_episodes: int = 100,
-                                       fixed_cycle: int = 60,
-                                       val_interval: int = None,
-                                       save_prefix: str = "nm60"):
+def train_warmup_then_joint_with_monitor(trainer,
+                                         warmup_outer_episodes: int = 50,
+                                         warmup_inner_episodes: int = 50,
+                                         warmup_monitor_episodes: int = 20,
+                                         joint_episodes: int = 100,
+                                         fixed_cycle: int = 60,
+                                         val_interval: int = None,
+                                         save_prefix: str = "cf_monitor"):
     import numpy as np
     import os
 
@@ -849,12 +867,13 @@ def train_warmup_then_joint_no_monitor(trainer,
     final_last_ckpt = f"last_model.pth"
     warmup_out_best_ckpt = f"temp_warmup_outer.pth"
     warmup_inn_best_ckpt = f"temp_warmup_inner.pth"
+    warmup_mon_best_ckpt = f"temp_warmup_monitor.pth"
 
     def _do_validate(tag: str):
         trainer.env.set_mode("val")
         trainer.agent.net.eval()
-        val_ret = trainer.run_episode(trainer.env, mode="eval", phase="round_outer",
-                                      fixed_cycle=fixed_cycle, disable_inner=False)
+        val_ret = trainer.run_episode(trainer.env, mode="eval", phase="joint",
+                                      disable_inner=False)
         val_metrics = trainer._compute_metrics(val_ret["history"])
         trainer.env.set_mode("train")
         trainer.agent.net.train()
@@ -865,7 +884,7 @@ def train_warmup_then_joint_no_monitor(trainer,
     # =========================================================
     # 1) Warmup Outer
     # =========================================================
-    trainer.logger.info(f"### [1/3] Warmup OUTER: {warmup_outer_episodes} eps (Min Warmup: {MIN_WARMUP_STEPS}) ###")
+    trainer.logger.info(f"### [1/4] Warmup OUTER: {warmup_outer_episodes} eps (Min Warmup: {MIN_WARMUP_STEPS}) ###")
     trainer.agent.set_module_status("outer")
     phase_best_sharpe = -np.inf
 
@@ -894,7 +913,7 @@ def train_warmup_then_joint_no_monitor(trainer,
     # =========================================================
     # 2) Warmup Inner
     # =========================================================
-    trainer.logger.info(f"### [2/3] Warmup INNER: {warmup_inner_episodes} eps (Min Warmup: {MIN_WARMUP_STEPS}) ###")
+    trainer.logger.info(f"### [2/4] Warmup INNER: {warmup_inner_episodes} eps (Min Warmup: {MIN_WARMUP_STEPS}) ###")
     trainer.agent.set_module_status("inner")
     phase_best_sharpe = -np.inf
 
@@ -913,29 +932,53 @@ def train_warmup_then_joint_no_monitor(trainer,
                 trainer.save_model(warmup_inn_best_ckpt)
                 trainer.logger.info(f"       (New Warmup-Inner Best: {phase_best_sharpe:.4f})")
 
-    # 回滚至该阶段最优，进入联合训练
+    # 回滚至该阶段最优，进入 Monitor 预热
     if os.path.exists(os.path.join(trainer.model_dir, warmup_inn_best_ckpt)):
         trainer._load_model(warmup_inn_best_ckpt)
         trainer.logger.info(f"   ↺ Phase Inner finished. Loaded best warmup_inner model.")
 
     # =========================================================
-    # 3) Joint Finetune
+    # 3) Warmup Monitor with outer-critic counterfactual reward
     # =========================================================
-    trainer.logger.info(f"### [3/3] JOINT (Outer+Inner): {joint_episodes} eps ###")
+    trainer.logger.info(f"### [3/4] Warmup MONITOR: {warmup_monitor_episodes} eps ###")
+    trainer.agent.set_module_status("monitor")
+    phase_best_sharpe = -np.inf
+
+    for ep in range(warmup_monitor_episodes):
+        trainer.run_episode(trainer.env, mode="train", phase="warmup_monitor")
+        loss_log = trainer.agent.update(trainer.buffer.get_batch(), phase="warmup_monitor")
+        trainer.buffer.clear()
+        trainer.logger.info(
+            f"[{save_prefix}] W-Mon {ep + 1}/{warmup_monitor_episodes} | "
+            f"L_mon:{loss_log.get('mon_pi', 0):.3f}")
+        if (ep + 1) % val_interval == 0:
+            m = _do_validate("warmup_monitor")
+            if float(m["sharpe"]) > phase_best_sharpe:
+                phase_best_sharpe = float(m["sharpe"])
+                trainer.save_model(warmup_mon_best_ckpt)
+
+    if os.path.exists(os.path.join(trainer.model_dir, warmup_mon_best_ckpt)):
+        trainer._load_model(warmup_mon_best_ckpt)
+        trainer.logger.info("   ↺ Phase Monitor finished. Loaded best warmup_monitor model.")
+
+    # =========================================================
+    # 4) Joint Finetune
+    # =========================================================
+    trainer.logger.info(f"### [4/4] JOINT (Outer+Inner+Monitor): {joint_episodes} eps ###")
     trainer.agent.set_module_status("all")
     global_best_sharpe = -np.inf
 
     for ep in range(joint_episodes):
-        ret = trainer.run_episode(trainer.env, mode="train", phase="round_outer", fixed_cycle=fixed_cycle)
+        ret = trainer.run_episode(trainer.env, mode="train", phase="joint")
         batch = trainer.buffer.get_batch()
 
-        # 联合训练中，两个模块均在每个 Episode 后更新
-        loss_out = trainer.agent.update(batch, phase="round_outer")
-        loss_inn = trainer.agent.update(batch, phase="round_inner")
+        loss = trainer.agent.update(batch, phase="joint")
         trainer.buffer.clear()
 
         trainer.logger.info(
-            f"[{save_prefix}] Joint {ep + 1}/{joint_episodes} | L_out:{loss_out.get('out_pi', 0):.3f} L_in:{loss_inn.get('inn_pi', 0):.3f}")
+            f"[{save_prefix}] Joint {ep + 1}/{joint_episodes} | "
+            f"L_out:{loss.get('out_pi', 0):.3f} L_in:{loss.get('inn_pi', 0):.3f} "
+            f"L_mon:{loss.get('mon_pi', 0):.3f}")
 
         # 联合训练阶段始终开启验证
         m = _do_validate("joint")
@@ -1006,13 +1049,14 @@ def main(cun_path, logger_ignored, seed_list=None):
         trainer = HRL_Trainer(agent, env, buffer, cfg, local_logger)
         env.set_mode('train')
 
-        res = train_warmup_then_joint_no_monitor(
+        res = train_warmup_then_joint_with_monitor(
             trainer,
             warmup_outer_episodes=46,
             warmup_inner_episodes=46,
+            warmup_monitor_episodes=20,
             joint_episodes=20,
             fixed_cycle=cfg.max_hold,
-            save_prefix="exp_nm",
+            save_prefix="exp_cf_mon",
 
         )
 
@@ -1089,10 +1133,11 @@ def run_single_seed_single_threshold(
 
     if (not os.path.exists(best_model_path)) and train_if_needed:
         logger.info("未发现 best_model.pth，先执行训练...")
-        res = train_warmup_then_joint_no_monitor(
+        res = train_warmup_then_joint_with_monitor(
             trainer,
             warmup_outer_episodes=warmup_outer_episodes,
             warmup_inner_episodes=warmup_inner_episodes,
+            warmup_monitor_episodes=max(1, joint_episodes // 4),
             joint_episodes=joint_episodes,
             fixed_cycle=cfg.max_hold,
             save_prefix=f"single_seed_{seed}",
