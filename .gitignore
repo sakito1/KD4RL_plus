@@ -1,0 +1,10 @@
+Dataset/
+data/
+*.pth
+*.pt
+*.ckpt
+runs/
+results/
+ckpts/
+checkpoints/
+__pycache__/

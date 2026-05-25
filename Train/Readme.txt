@@ -1,0 +1,1 @@
+offline_KD_Dou_V2 ：表示将特征提取组件加入到actor，critic中，分开来识别投资组合时序特征。

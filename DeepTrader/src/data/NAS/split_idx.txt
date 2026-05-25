@@ -1,0 +1,23 @@
+# 0-based, python slicing (end_excl)
+# data_tensor: (N,T,F)=(39, 6425, 7)
+# prices:      (N,T,P)=(39, 6425, 2)
+# rets:        (N,T)  =(39, 6425)  (adjopen-based)
+
+[train]
+start=87
+end_excl=4465
+date_start=2000-04-07 00:00:00
+date_end=2017-12-29 00:00:00
+
+[valid]
+start=4465
+end_excl=5045
+date_start=2018-01-02 00:00:00
+date_end=2020-04-22 00:00:00
+
+[test]
+start=5045
+end_excl=6415
+date_start=2020-04-23 00:00:00
+date_end=2025-10-03 00:00:00
+

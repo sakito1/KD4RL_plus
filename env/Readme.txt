@@ -1,0 +1,3 @@
+BaseEnv为基类
+Baseline_env用于基线环境，单纯的SAC
+PretrainEnv用来做预训练方式的知识蒸馏，先预训练好一个teacher模型，在state中加入未来十天的信息，然后用来训练teacher model。用于提供特权信息。

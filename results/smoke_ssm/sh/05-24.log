@@ -1,0 +1,35 @@
+2026-05-24 17:08:01,513 INFO: [SSM3] Init HazardFusionDSSM x_dim=7, num_assets=3 
+2026-05-24 17:08:11,149 INFO: Ep 001 [P3:All] | EncLoss 0.70460 | SSMLoss 121.5875 | Val 107.8866 Val_EncLoss 0.70942 
+2026-05-24 17:08:25,028 INFO: [all Raw Acc=0.503 PredSw=0 TrueSw=138 | Monitor Acc=0.503 Sw=0 | q_avg=0.514 
+2026-05-24 17:08:26,765 INFO: [SSM3 Done] 000001.SZ 
+2026-05-24 17:08:27,075 INFO: Acc at Turning Points: 0.6667 
+2026-05-24 17:08:27,077 INFO: [train] Raw Acc=0.798 PredSw=0 TrueSw=3 | Monitor Acc=0.798 Sw=0 | q_mean=0.513 
+2026-05-24 17:08:28,239 INFO: [train] plot saved: results/smoke_ssm/sh/feature_ssm/000001.SZ_train_trendlabel.png 
+2026-05-24 17:08:28,890 INFO: Acc at Turning Points: 0.0000 
+2026-05-24 17:08:28,896 INFO: [val] Raw Acc=0.328 PredSw=0 TrueSw=1 | Monitor Acc=0.328 Sw=0 | q_mean=0.514 
+2026-05-24 17:08:32,963 INFO: [val] plot saved: results/smoke_ssm/sh/feature_ssm/000001.SZ_val_trendlabel.png 
+2026-05-24 17:08:33,272 INFO: Acc at Turning Points: 0.0000 
+2026-05-24 17:08:33,274 INFO: [test] Raw Acc=0.000 PredSw=0 TrueSw=0 | Monitor Acc=0.000 Sw=0 | q_mean=0.514 
+2026-05-24 17:08:34,408 INFO: [test] plot saved: results/smoke_ssm/sh/feature_ssm/000001.SZ_test_trendlabel.png 
+2026-05-24 17:08:50,917 INFO: [all Raw Acc=0.496 PredSw=16 TrueSw=140 | Monitor Acc=0.495 Sw=0 | q_avg=0.522 
+2026-05-24 17:08:53,607 INFO: [SSM3 Done] 000002.SZ 
+2026-05-24 17:08:53,783 INFO: Acc at Turning Points: 0.6667 
+2026-05-24 17:08:53,787 INFO: [train] Raw Acc=0.917 PredSw=0 TrueSw=3 | Monitor Acc=0.917 Sw=0 | q_mean=0.522 
+2026-05-24 17:08:55,285 INFO: [train] plot saved: results/smoke_ssm/sh/feature_ssm/000002.SZ_train_trendlabel.png 
+2026-05-24 17:08:55,474 INFO: Acc at Turning Points: 0.0000 
+2026-05-24 17:08:55,482 INFO: [val] Raw Acc=1.000 PredSw=0 TrueSw=0 | Monitor Acc=1.000 Sw=0 | q_mean=0.522 
+2026-05-24 17:08:56,871 INFO: [val] plot saved: results/smoke_ssm/sh/feature_ssm/000002.SZ_val_trendlabel.png 
+2026-05-24 17:08:56,963 INFO: Acc at Turning Points: 0.5000 
+2026-05-24 17:08:56,965 INFO: [test] Raw Acc=0.847 PredSw=0 TrueSw=2 | Monitor Acc=0.847 Sw=0 | q_mean=0.523 
+2026-05-24 17:08:57,814 INFO: [test] plot saved: results/smoke_ssm/sh/feature_ssm/000002.SZ_test_trendlabel.png 
+2026-05-24 17:09:10,801 INFO: [all Raw Acc=0.482 PredSw=0 TrueSw=101 | Monitor Acc=0.482 Sw=0 | q_avg=0.544 
+2026-05-24 17:09:14,926 INFO: [SSM3 Done] 000063.SZ 
+2026-05-24 17:09:15,335 INFO: Acc at Turning Points: 0.6667 
+2026-05-24 17:09:15,338 INFO: [train] Raw Acc=0.512 PredSw=0 TrueSw=3 | Monitor Acc=0.512 Sw=0 | q_mean=0.544 
+2026-05-24 17:09:16,305 INFO: [train] plot saved: results/smoke_ssm/sh/feature_ssm/000063.SZ_train_trendlabel.png 
+2026-05-24 17:09:16,918 INFO: Acc at Turning Points: 0.0000 
+2026-05-24 17:09:16,922 INFO: [val] Raw Acc=0.448 PredSw=0 TrueSw=1 | Monitor Acc=0.448 Sw=0 | q_mean=0.545 
+2026-05-24 17:09:21,345 INFO: [val] plot saved: results/smoke_ssm/sh/feature_ssm/000063.SZ_val_trendlabel.png 
+2026-05-24 17:09:21,516 INFO: Acc at Turning Points: 1.0000 
+2026-05-24 17:09:21,523 INFO: [test] Raw Acc=0.492 PredSw=0 TrueSw=1 | Monitor Acc=0.492 Sw=0 | q_mean=0.544 
+2026-05-24 17:09:23,237 INFO: [test] plot saved: results/smoke_ssm/sh/feature_ssm/000063.SZ_test_trendlabel.png 

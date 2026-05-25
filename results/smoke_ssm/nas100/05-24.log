@@ -1,0 +1,35 @@
+2026-05-24 17:08:04,214 INFO: [SSM3] Init HazardFusionDSSM x_dim=7, num_assets=3 
+2026-05-24 17:08:18,325 INFO: Ep 001 [P3:All] | EncLoss 0.70204 | SSMLoss 149.5170 | Val 136.1495 Val_EncLoss 0.69410 
+2026-05-24 17:08:28,563 INFO: [all Raw Acc=0.477 PredSw=0 TrueSw=125 | Monitor Acc=0.477 Sw=0 | q_avg=0.544 
+2026-05-24 17:08:30,330 INFO: [SSM3 Done] CMCSA.O 
+2026-05-24 17:08:31,657 INFO: Acc at Turning Points: 0.5000 
+2026-05-24 17:08:31,666 INFO: [train] Raw Acc=0.332 PredSw=0 TrueSw=4 | Monitor Acc=0.332 Sw=0 | q_mean=0.544 
+2026-05-24 17:08:33,016 INFO: [train] plot saved: results/smoke_ssm/nas100/feature_ssm/CMCSA.O_train_trendlabel.png 
+2026-05-24 17:08:33,095 INFO: Acc at Turning Points: 1.0000 
+2026-05-24 17:08:33,098 INFO: [val] Raw Acc=0.639 PredSw=0 TrueSw=1 | Monitor Acc=0.639 Sw=0 | q_mean=0.545 
+2026-05-24 17:08:40,925 INFO: [val] plot saved: results/smoke_ssm/nas100/feature_ssm/CMCSA.O_val_trendlabel.png 
+2026-05-24 17:08:41,098 INFO: Acc at Turning Points: 0.0000 
+2026-05-24 17:08:41,108 INFO: [test] Raw Acc=1.000 PredSw=0 TrueSw=0 | Monitor Acc=1.000 Sw=0 | q_mean=0.544 
+2026-05-24 17:08:44,041 INFO: [test] plot saved: results/smoke_ssm/nas100/feature_ssm/CMCSA.O_test_trendlabel.png 
+2026-05-24 17:09:00,799 INFO: [all Raw Acc=0.485 PredSw=0 TrueSw=140 | Monitor Acc=0.485 Sw=0 | q_avg=0.625 
+2026-05-24 17:09:05,570 INFO: [SSM3 Done] AMGN.O 
+2026-05-24 17:09:06,036 INFO: Acc at Turning Points: 0.3333 
+2026-05-24 17:09:06,039 INFO: [train] Raw Acc=0.456 PredSw=0 TrueSw=3 | Monitor Acc=0.456 Sw=0 | q_mean=0.628 
+2026-05-24 17:09:07,268 INFO: [train] plot saved: results/smoke_ssm/nas100/feature_ssm/AMGN.O_train_trendlabel.png 
+2026-05-24 17:09:07,399 INFO: Acc at Turning Points: 1.0000 
+2026-05-24 17:09:07,406 INFO: [val] Raw Acc=0.607 PredSw=0 TrueSw=1 | Monitor Acc=0.607 Sw=0 | q_mean=0.628 
+2026-05-24 17:09:08,401 INFO: [val] plot saved: results/smoke_ssm/nas100/feature_ssm/AMGN.O_val_trendlabel.png 
+2026-05-24 17:09:08,461 INFO: Acc at Turning Points: 0.0000 
+2026-05-24 17:09:08,462 INFO: [test] Raw Acc=0.302 PredSw=0 TrueSw=1 | Monitor Acc=0.302 Sw=0 | q_mean=0.628 
+2026-05-24 17:09:09,707 INFO: [test] plot saved: results/smoke_ssm/nas100/feature_ssm/AMGN.O_test_trendlabel.png 
+2026-05-24 17:09:18,688 INFO: [all Raw Acc=0.462 PredSw=0 TrueSw=143 | Monitor Acc=0.462 Sw=0 | q_avg=0.630 
+2026-05-24 17:09:22,183 INFO: [SSM3 Done] INTU.O 
+2026-05-24 17:09:22,777 INFO: Acc at Turning Points: 0.4545 
+2026-05-24 17:09:22,780 INFO: [train] Raw Acc=0.348 PredSw=0 TrueSw=11 | Monitor Acc=0.348 Sw=0 | q_mean=0.631 
+2026-05-24 17:09:24,566 INFO: [train] plot saved: results/smoke_ssm/nas100/feature_ssm/INTU.O_train_trendlabel.png 
+2026-05-24 17:09:24,878 INFO: Acc at Turning Points: 1.0000 
+2026-05-24 17:09:24,882 INFO: [val] Raw Acc=0.279 PredSw=0 TrueSw=1 | Monitor Acc=0.279 Sw=0 | q_mean=0.632 
+2026-05-24 17:09:29,246 INFO: [val] plot saved: results/smoke_ssm/nas100/feature_ssm/INTU.O_val_trendlabel.png 
+2026-05-24 17:09:29,371 INFO: Acc at Turning Points: 0.3333 
+2026-05-24 17:09:29,376 INFO: [test] Raw Acc=0.683 PredSw=0 TrueSw=3 | Monitor Acc=0.683 Sw=0 | q_mean=0.631 
+2026-05-24 17:09:32,441 INFO: [test] plot saved: results/smoke_ssm/nas100/feature_ssm/INTU.O_test_trendlabel.png 
