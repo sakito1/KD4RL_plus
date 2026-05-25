@@ -386,52 +386,37 @@ class InnerAC(nn.Module):
 
 class MonitorAC(nn.Module):
     """
-    Monitor layer for hold/rebalance decisions.
+    EmbMonitor-ZH for hold/rebalance decisions.
 
-    Each asset's SSM output is transformed independently, then aggregated
-    with the currently held portfolio weights.  The monitor never observes
-    the candidate outer action directly; its job is to decide whether the
-    current SSM state warrants asking the outer policy to rebalance.
+    The pretrained SSM latent pair [z, h] is projected per asset and pooled
+    with the live holding weights.  Only the resulting portfolio embedding is
+    used for the hold/switch action and its monitor value estimate.
     """
 
     def __init__(self, z_dim, h_dim, port_state_dim, hidden_dim=32, action_dim=None):
         super().__init__()
-        self.asset_feat_dim = z_dim + h_dim + 3
-        self.port_state_dim = port_state_dim
+        self.asset_feat_dim = z_dim + h_dim
         self.hidden_dim = hidden_dim
 
-        self.asset_encoder = nn.Sequential(
+        self.asset_projection = nn.Sequential(
             nn.Linear(self.asset_feat_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-        )
-
-        self.backbone = nn.Sequential(
-            nn.Linear(hidden_dim + port_state_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
         )
 
         self.actor_head = nn.Linear(hidden_dim, 2)
         self.v_head = nn.Linear(hidden_dim, 1)
 
     def encode(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None):
-        p_, q_bear_, q_bull_ = p.unsqueeze(-1), q_bear.unsqueeze(-1), q_bull.unsqueeze(-1)
-        asset_feats = torch.cat([z, h, p_, q_bear_, q_bull_], dim=-1)
-        asset_emb = self.asset_encoder(asset_feats)
-        portfolio_emb = torch.sum(asset_emb * weights_drift.unsqueeze(-1), dim=1)
-        global_feat = torch.cat([portfolio_emb, port_state], dim=-1)
-        return self.backbone(global_feat)
+        asset_emb = self.asset_projection(torch.cat([z, h], dim=-1))
+        return torch.sum(asset_emb * weights_drift.unsqueeze(-1), dim=1)
 
-    def pi(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None):
+    def pi(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None,
+           deterministic=False):
         feat = self.encode(z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=switch_action)
         logits = self.actor_head(feat)
         dist = Categorical(logits=logits)
-        action = dist.sample()
+        action = torch.argmax(logits, dim=-1) if deterministic else dist.sample()
         log_prob = dist.log_prob(action)
         entropy = dist.entropy().mean()
         return action, log_prob, entropy, logits
@@ -440,9 +425,11 @@ class MonitorAC(nn.Module):
         feat = self.encode(z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=switch_action)
         return self.v_head(feat)
 
-    def forward(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None):
+    def forward(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None,
+                deterministic=False):
         action, log_prob, entropy, logits = self.pi(
-            z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=switch_action
+            z, h, p, q_bear, q_bull, weights_drift, port_state,
+            switch_action=switch_action, deterministic=deterministic
         )
         v = self.value(
             z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=switch_action

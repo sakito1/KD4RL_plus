@@ -1,0 +1,43 @@
+{
+  "description": "Frozen KD4RL assets reused by the EmbMonitor-ZH experiment.",
+  "dataset_reuse": {
+    "nas100": {
+      "source": "../KD4RL/Dataset/Nas100\u6570\u636e/feature_ssm",
+      "local": "Dataset/Nas100\u6570\u636e/feature_ssm",
+      "identical_inputs": 78
+    },
+    "sh": {
+      "source": "../KD4RL/Dataset/\u6caa\u6df1\u6570\u636e/feature_ssm",
+      "local": "Dataset/\u6caa\u6df1\u6570\u636e/feature_ssm",
+      "identical_inputs": 106
+    }
+  },
+  "ssm3_checkpoints": {
+    "nas100": {
+      "source": "../KD4RL/checkpoints/nas100/SSM3/best_trendlabel_model.pth",
+      "local": "pretrained_assets/kd4rl/nas100/SSM3/best_trendlabel_model.pth",
+      "sha256": "aa7d804034c2bbbb3837c0d11fb4e727cc5d8b0f5074e27f3aef6e083aa1807c"
+    },
+    "sh": {
+      "source": "../KD4RL/checkpoints/CN_wind_\u590d\u6743/SSM3/best_trendlabel_model.pth",
+      "local": "pretrained_assets/kd4rl/sh/SSM3/best_trendlabel_model.pth",
+      "sha256": "69421345be60251585125516e560f174f5f3e1cddd5d82bab905f43d935a48b1"
+    }
+  },
+  "hrl_checkpoints": {
+    "nas100": {
+      "source_pattern": "../KD4RL/checkpoints/nas100/ppo/seed_*/checkpoints/best_model.pth",
+      "local_pattern": "pretrained_assets/kd4rl/nas100/ppo/seed_*/best_model.pth",
+      "available_source_seeds": [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57],
+      "migrated_seeds": [42],
+      "first_version_seed": 42
+    },
+    "sh": {
+      "source_pattern": "../KD4RL/checkpoints/CN_wind_\u590d\u6743/ppo/seed_*/checkpoints/best_model.pth",
+      "local_pattern": "pretrained_assets/kd4rl/sh/ppo/seed_*/best_model.pth",
+      "available_source_seeds": [77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92],
+      "migrated_seeds": [77],
+      "first_version_seed": 77
+    }
+  }
+}

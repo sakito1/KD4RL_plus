@@ -292,19 +292,17 @@ class HRL_Trainer:
             outer_action = out['act_out']
             is_switch_action = (out['act_mon'].item() == 1)
 
-            # Counterfactual monitor reward: prefer the decision whose base
-            # portfolio is valued higher by the trained outer critic.
+            # Counterfactual monitor reward: value(controller decision)
+            # minus value(the unselected alternative), estimated by Outer Critic.
             with torch.no_grad():
                 value_hold = self.agent.net.outer.value(obs['outer_state'], obs['base_drift']).squeeze(-1)
                 value_switch = self.agent.net.outer.value(obs['outer_state'], outer_action).squeeze(-1)
                 cf_switch_advantage = value_switch - value_hold
-                selected_sign = torch.where(
-                    out['act_mon'] == 1,
-                    torch.ones_like(cf_switch_advantage),
-                    -torch.ones_like(cf_switch_advantage),
-                )
+                controller_value = torch.where(out['act_mon'] == 1, value_switch, value_hold)
+                counterfactual_value = torch.where(out['act_mon'] == 1, value_hold, value_switch)
                 monitor_reward = (
-                    selected_sign * cf_switch_advantage * float(getattr(self.cfg, 'reward_scale_monitor', 1.0))
+                    (controller_value - counterfactual_value)
+                    * float(getattr(self.cfg, 'reward_scale_monitor', 1.0))
                 ).item()
 
             # === Update Counters ===
@@ -570,6 +568,26 @@ class HRL_Trainer:
             self.agent.opt_inn.load_state_dict(ckpt['opt_inn'])
             return True
         return False
+
+    def load_frozen_hrl_checkpoint(self, path):
+        """Load pretrained Outer/Inner parameters and leave EmbMonitor fresh."""
+        checkpoint = torch.load(path, map_location=self.device)
+        source_state = checkpoint.get('agent_net', checkpoint)
+        reusable = {
+            key: value for key, value in source_state.items()
+            if key.startswith('outer.') or key.startswith('inner.')
+        }
+        expected = {
+            key for key in self.agent.net.state_dict()
+            if key.startswith('outer.') or key.startswith('inner.')
+        }
+        missing = sorted(expected.difference(reusable))
+        if missing:
+            raise RuntimeError(f"Pretrained HRL checkpoint misses reusable parameters: {missing[:5]}")
+        self.agent.net.load_state_dict(reusable, strict=False)
+        self.agent.set_module_status("monitor")
+        self.logger.info(f"Loaded frozen Outer/Inner HRL checkpoint: {path}")
+        return path
 
     # ==============================================================================
     # 核心：带验证与回滚的训练块 (Training Block with Validation & Rollback)
