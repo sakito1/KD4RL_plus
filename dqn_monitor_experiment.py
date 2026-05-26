@@ -199,7 +199,7 @@ def run_episode(env, frozen_hrl, dqn, replay=None, train=False, fixed_cycle=None
             action = int(hold_age == 0 or hold_age >= fixed_cycle)
         next_obs, reward, done, info, switch_adv = execute_step(env, frozen_hrl, obs, action)
         if train:
-            replay.store(obs, action, reward, next_obs, done)
+            replay.store(obs, action, reward * cfg["reward_scale"], next_obs, done)
             cfg["env_steps"] += 1
             if len(replay) >= cfg["warmup"]:
                 loss = dqn.update(replay, cfg["batch_size"])
@@ -297,6 +297,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=1000)
     parser.add_argument("--target-update", type=int, default=500)
     parser.add_argument("--epsilon-decay", type=int, default=20000)
+    parser.add_argument("--reward-scale", type=float, default=1.0)
+    parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     args = parser.parse_args()
 
@@ -333,6 +335,7 @@ def main():
         "epsilon_decay": args.epsilon_decay,
         "warmup": min(args.warmup, 32) if args.mode == "smoke" else args.warmup,
         "batch_size": min(args.batch_size, 32) if args.mode == "smoke" else args.batch_size,
+        "reward_scale": args.reward_scale,
     }
 
     best_sharpe = -float("inf")
@@ -356,12 +359,16 @@ def main():
         env.set_mode("train")
 
     best_meta = dqn.load(best_checkpoint)
-    env.set_mode("test")
-    test_result, history = run_episode(env, frozen_hrl, dqn)
-    fixed_result, fixed_history = run_episode(
-        env, frozen_hrl, dqn, fixed_cycle=int(getattr(runtime_config, "max_hold", 60))
-    )
+    test_result = None
+    fixed_result = None
+    if not args.validation_only:
+        env.set_mode("test")
+        test_result, history = run_episode(env, frozen_hrl, dqn)
+        fixed_result, fixed_history = run_episode(
+            env, frozen_hrl, dqn, fixed_cycle=int(getattr(runtime_config, "max_hold", 60))
+        )
     elapsed = time.time() - start_time
+    comparable_to_sota = args.mode == "full" and not args.validation_only
     summary = {
         "run_id": run_id,
         "market": args.market,
@@ -372,16 +379,16 @@ def main():
         "dqn_test": test_result,
         "fixed_hrl_test": fixed_result,
         "target": {
-            "comparable_to_sota": args.mode == "full",
+            "comparable_to_sota": comparable_to_sota,
             "sota_sharpe": market_cfg["sota_sharpe"],
             "sota_return": market_cfg["sota_return"],
             "beats_sharpe": (
                 test_result["sharpe"] > market_cfg["sota_sharpe"]
-                if args.mode == "full" else None
+                if comparable_to_sota else None
             ),
             "beats_return": (
                 test_result["total_ret"] > market_cfg["sota_return"]
-                if args.mode == "full" else None
+                if comparable_to_sota else None
             ),
         },
         "elapsed_seconds": elapsed,
@@ -391,17 +398,22 @@ def main():
     }
     with open(os.path.join(out_dir, "summary.json"), "w") as file:
         json.dump(summary, file, indent=2)
-    pd.DataFrame({"value": history}).to_csv(os.path.join(out_dir, "test_dqn.csv"), index=False)
-    pd.DataFrame({"value": fixed_history}).to_csv(os.path.join(out_dir, "test_fixed_hrl.csv"), index=False)
+    if not args.validation_only:
+        pd.DataFrame({"value": history}).to_csv(os.path.join(out_dir, "test_dqn.csv"), index=False)
+        pd.DataFrame({"value": fixed_history}).to_csv(os.path.join(out_dir, "test_fixed_hrl.csv"), index=False)
     run_row = {
         "run_id": run_id, "market": args.market, "source_seed": market_cfg["source_seed"],
         "mode": args.mode, "episodes": episodes, "hidden_dim": args.hidden_dim, "lr": args.lr,
-        "gamma": args.gamma, "val_sharpe": best_sharpe, "test_sharpe": test_result["sharpe"],
-        "test_return": test_result["total_ret"], "elapsed_seconds": elapsed,
+        "gamma": args.gamma, "reward_scale": args.reward_scale,
+        "validation_only": args.validation_only, "val_sharpe": best_sharpe,
+        "test_sharpe": test_result["sharpe"] if test_result else np.nan,
+        "test_return": test_result["total_ret"] if test_result else np.nan,
+        "elapsed_seconds": elapsed,
     }
     rows = []
-    for model_name, result in (("dqn_monitor", test_result), ("fixed_hrl", fixed_result)):
-        rows.append({"run_id": run_id, "market": args.market, "model": model_name, **result})
+    if not args.validation_only:
+        for model_name, result in (("dqn_monitor", test_result), ("fixed_hrl", fixed_result)):
+            rows.append({"run_id": run_id, "market": args.market, "model": model_name, **result})
     update_workbook(run_row, rows)
     print(json.dumps(summary, indent=2))
 
