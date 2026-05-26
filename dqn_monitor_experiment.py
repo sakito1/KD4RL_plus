@@ -3,6 +3,7 @@
 import argparse
 import copy
 import hashlib
+import itertools
 import json
 import os
 import time
@@ -123,7 +124,6 @@ def build_environment(market, mode, logger):
         return PPO_Env(
             logger=logger,
             episode_len=40,
-            max_hold=10,
             train_date_range=ranges["train"],
             val_date_range=ranges["val"],
             test_date_range=ranges["test"],
@@ -153,51 +153,108 @@ def load_frozen_hrl(model, checkpoint_path, device):
     model.inner.eval()
 
 
-def execute_step(env, frozen_hrl, obs, action):
+def long_hold_penalty(days, target_days):
+    excess = max(float(days) - float(target_days), 0.0) / float(max(target_days, 1))
+    return excess ** 2
+
+
+def build_candidates(env, frozen_hrl, obs, lambda_cost=0.0, lambda_long=0.0):
+    """Build hold and switch candidate executions without changing environment state."""
     with torch.inference_mode():
         weights = obs["weights_drift"]
-        outer_action, _, _, _, _ = frozen_hrl.outer.pi(
+        hold_base = obs["base_drift"]
+        switch_base, _, _, _, _ = frozen_hrl.outer.pi(
             obs["outer_state"], weights, deterministic=True
         )
-        value_hold = frozen_hrl.outer.value(obs["outer_state"], obs["base_drift"]).squeeze(-1)
-        value_switch = frozen_hrl.outer.value(obs["outer_state"], outer_action).squeeze(-1)
-        base_used = outer_action if action == 1 else obs["base_drift"]
-        weights_exec, _, _, _, _ = frozen_hrl.inner.build_inner_action_simple(
-            obs["inner_state"],
-            base_used,
-            weights,
-            alpha=float(getattr(runtime_config, "inner_max_boundary", 1.0)),
-            deterministic=True,
+        value_hold = frozen_hrl.outer.value(obs["outer_state"], hold_base).squeeze(-1)
+        value_switch = frozen_hrl.outer.value(obs["outer_state"], switch_base).squeeze(-1)
+        action_args = {
+            "alpha": float(getattr(runtime_config, "inner_max_boundary", 1.0)),
+            "deterministic": True,
+        }
+        hold_exec, _, _, _, _ = frozen_hrl.inner.build_inner_action_simple(
+            obs["inner_state"], hold_base, weights, **action_args
         )
-        reward = (value_switch - value_hold) if action == 1 else (value_hold - value_switch)
+        switch_exec, _, _, _, _ = frozen_hrl.inner.build_inner_action_simple(
+            obs["inner_state"], switch_base, weights, **action_args
+        )
+        cost_hold = torch.sum(torch.abs(hold_exec - weights), dim=1) * env.transaction_cost_pct
+        cost_switch = torch.sum(torch.abs(switch_exec - weights), dim=1) * env.transaction_cost_pct
+        hold_penalty = long_hold_penalty(env.t_held + 1, env.max_hold)
+        switch_penalty = long_hold_penalty(1, env.max_hold)
+        utility_hold = (
+            value_hold - float(lambda_cost) * cost_hold - float(lambda_long) * hold_penalty
+        )
+        utility_switch = (
+            value_switch - float(lambda_cost) * cost_switch - float(lambda_long) * switch_penalty
+        )
+        candidate_costs = torch.stack(
+            [cost_hold, cost_switch, cost_switch - cost_hold], dim=1
+        )
+    enriched_obs = dict(obs)
+    enriched_obs["candidate_switch_base"] = switch_base
+    enriched_obs["candidate_costs"] = candidate_costs
+    candidate = {
+        "hold_base": hold_base,
+        "switch_base": switch_base,
+        "hold_exec": hold_exec,
+        "switch_exec": switch_exec,
+        "value_hold": float(value_hold.item()),
+        "value_switch": float(value_switch.item()),
+        "cost_hold": float(cost_hold.item()),
+        "cost_switch": float(cost_switch.item()),
+        "long_penalty_hold": float(hold_penalty),
+        "long_penalty_switch": float(switch_penalty),
+        "utility_hold": float(utility_hold.item()),
+        "utility_switch": float(utility_switch.item()),
+    }
+    return enriched_obs, candidate
+
+
+def execute_step(env, candidate, action):
+    base_used = candidate["switch_base"] if action == 1 else candidate["hold_base"]
+    weights_exec = candidate["switch_exec"] if action == 1 else candidate["hold_exec"]
+    reward = (
+        candidate["utility_switch"] - candidate["utility_hold"]
+        if action == 1 else candidate["utility_hold"] - candidate["utility_switch"]
+    )
+    with torch.inference_mode():
         next_obs, _, done, info = env.step(
             weights_exec,
             base_used,
-            outer_action=outer_action,
+            outer_action=candidate["switch_base"],
             is_switch=(action == 1),
             calculate_outer_reward=False,
         )
-    return next_obs, float(reward.item()), done, info, float((value_switch - value_hold).item())
+    return next_obs, reward, done, info, candidate["utility_switch"] - candidate["utility_hold"]
 
 
-def run_episode(env, frozen_hrl, dqn, replay=None, train=False, fixed_cycle=None, cfg=None):
-    obs = env.reset()
+def run_episode(env, frozen_hrl, dqn=None, replay=None, train=False, fixed_cycle=None,
+                oracle=False, cfg=None, utility_cfg=None):
+    utility_cfg = utility_cfg or {"lambda_cost": 0.0, "lambda_long": 0.0}
+    obs, candidate = build_candidates(env, frozen_hrl, env.reset(), **utility_cfg)
     history = [float(env.portfolio_value.item())]
     rewards, advantages, turnovers, costs = [], [], [], []
+    estimated_cost_hold, estimated_cost_switch, long_penalties = [], [], []
     switches = 0
     hold_age = 0
     holding_lengths = []
     losses = []
 
     while True:
-        if fixed_cycle is None:
+        if oracle:
+            action = int(candidate["utility_switch"] > candidate["utility_hold"])
+        elif fixed_cycle is None:
             epsilon = epsilon_at(
                 cfg["env_steps"], cfg["epsilon_start"], cfg["epsilon_end"], cfg["epsilon_decay"]
             ) if train else 0.0
             action = dqn.select_action(obs, epsilon=epsilon)
         else:
             action = int(hold_age == 0 or hold_age >= fixed_cycle)
-        next_obs, reward, done, info, switch_adv = execute_step(env, frozen_hrl, obs, action)
+        next_raw_obs, reward, done, info, switch_adv = execute_step(env, candidate, action)
+        next_obs, next_candidate = build_candidates(
+            env, frozen_hrl, next_raw_obs, **utility_cfg
+        )
         if train:
             replay.store(obs, action, reward * cfg["reward_scale"], next_obs, done)
             cfg["env_steps"] += 1
@@ -218,10 +275,15 @@ def run_episode(env, frozen_hrl, dqn, replay=None, train=False, fixed_cycle=None
             hold_age += 1
         rewards.append(reward)
         advantages.append(switch_adv)
+        estimated_cost_hold.append(candidate["cost_hold"])
+        estimated_cost_switch.append(candidate["cost_switch"])
+        long_penalties.append(
+            candidate["long_penalty_switch"] if action == 1 else candidate["long_penalty_hold"]
+        )
         turnovers.append(float(info["rewards"]["turnover"]))
         costs.append(float(info["rewards"]["transaction_cost"]))
         history.append(float(info["portfolio_value"]))
-        obs = next_obs
+        obs, candidate = next_obs, next_candidate
         if done:
             if hold_age > 0:
                 holding_lengths.append(hold_age)
@@ -236,6 +298,9 @@ def run_episode(env, frozen_hrl, dqn, replay=None, train=False, fixed_cycle=None
         "mean_cf_reward": float(np.mean(rewards)),
         "mean_switch_advantage": float(np.mean(advantages)),
         "switch_advantage_positive_rate": float(np.mean(np.asarray(advantages) > 0)),
+        "mean_estimated_cost_hold": float(np.mean(estimated_cost_hold)),
+        "mean_estimated_cost_switch": float(np.mean(estimated_cost_switch)),
+        "mean_long_hold_penalty": float(np.mean(long_penalties)),
         "dqn_loss": float(np.mean(losses)) if losses else None,
     })
     return result, history
@@ -253,7 +318,7 @@ def reference_frame():
     return pd.concat(frames, ignore_index=True)
 
 
-def update_workbook(run_row, final_rows):
+def update_workbook(run_row=None, final_rows=None, oracle_rows=None):
     reference = reference_frame()
     if os.path.exists(RESULT_BOOK):
         try:
@@ -262,8 +327,9 @@ def update_workbook(run_row, final_rows):
             existing_runs = pd.DataFrame()
     else:
         existing_runs = pd.DataFrame()
-    runs = pd.concat([existing_runs, pd.DataFrame([run_row])], ignore_index=True)
-    runs = runs.drop_duplicates(subset=["run_id", "market"], keep="last")
+    if run_row is not None:
+        existing_runs = pd.concat([existing_runs, pd.DataFrame([run_row])], ignore_index=True)
+    runs = existing_runs.drop_duplicates(subset=["run_id", "market"], keep="last")
     pretrained = pd.DataFrame([
         {"market": "nas100", "source_seed": 47, "fixed_return": 2.21303759765625,
          "fixed_sharpe": 1.0987830427195604},
@@ -277,22 +343,100 @@ def update_workbook(run_row, final_rows):
             old_final = pd.DataFrame()
     else:
         old_final = pd.DataFrame()
-    final = pd.concat([old_final, pd.DataFrame(final_rows)], ignore_index=True)
+    final = pd.concat([old_final, pd.DataFrame(final_rows or [])], ignore_index=True)
     final = final.drop_duplicates(subset=["run_id", "market", "model"], keep="last")
+    if os.path.exists(RESULT_BOOK):
+        try:
+            old_oracle = pd.read_excel(RESULT_BOOK, sheet_name="oracle_runs")
+        except Exception:
+            old_oracle = pd.DataFrame()
+    else:
+        old_oracle = pd.DataFrame()
+    oracle = pd.concat([old_oracle, pd.DataFrame(oracle_rows or [])], ignore_index=True)
+    if not oracle.empty:
+        oracle = oracle.drop_duplicates(
+            subset=["run_id", "market", "lambda_cost", "lambda_long"], keep="last"
+        )
     with pd.ExcelWriter(RESULT_BOOK, engine="openpyxl") as writer:
         reference.to_excel(writer, sheet_name="reference_sota", index=False)
         pretrained.to_excel(writer, sheet_name="pretrained_hrl", index=False)
         runs.to_excel(writer, sheet_name="dqn_runs", index=False)
+        oracle.to_excel(writer, sheet_name="oracle_runs", index=False)
         final.to_excel(writer, sheet_name="final_comparison", index=False)
+
+
+def run_oracle_stage(env, frozen_hrl, args, market_cfg, provenance, out_dir):
+    fixed_cycle = int(getattr(runtime_config, "max_hold", 60))
+    env.set_mode("val")
+    fixed_result, _ = run_episode(env, frozen_hrl, fixed_cycle=fixed_cycle)
+    rows = []
+    results = []
+    quick_grid = [(0.0, 0.0), (5.0, 5e-4), (20.0, 1e-3)]
+    full_grid = list(itertools.product(
+        [0.0, 1.0, 5.0, 10.0, 20.0],
+        [0.0, 1e-4, 5e-4, 1e-3],
+    ))
+    grid = quick_grid if args.oracle_grid == "quick" else full_grid
+    for lambda_cost, lambda_long in grid:
+        utility_cfg = {"lambda_cost": lambda_cost, "lambda_long": lambda_long}
+        oracle_result, _ = run_episode(
+            env, frozen_hrl, oracle=True, utility_cfg=utility_cfg
+        )
+        passed = (
+            oracle_result["sharpe"] > fixed_result["sharpe"]
+            and oracle_result["switch_count"] <= 2 * fixed_result["switch_count"]
+        )
+        record = {
+            "run_id": args.run_id,
+            "market": args.market,
+            "mode": args.mode,
+            "reward_source": "outer_value",
+            "lambda_cost": lambda_cost,
+            "lambda_long": lambda_long,
+            "oracle_pass": bool(passed),
+            "fixed_sharpe": fixed_result["sharpe"],
+            "fixed_switch_count": fixed_result["switch_count"],
+            "val_sharpe": oracle_result["sharpe"],
+            "val_return": oracle_result["total_ret"],
+            "max_dd": oracle_result["max_dd"],
+            "switch_count": oracle_result["switch_count"],
+            "turnover": oracle_result["turnover"],
+            "transaction_cost": oracle_result["transaction_cost"],
+        }
+        rows.append(record)
+        results.append({"config": utility_cfg, "passed": bool(passed), "metrics": oracle_result})
+    passing = [item for item in results if item["passed"]]
+    champion = max(passing or results, key=lambda item: item["metrics"]["sharpe"])
+    summary = {
+        "run_id": args.run_id,
+        "market": args.market,
+        "stage": "oracle",
+        "mode": args.mode,
+        "oracle_grid": args.oracle_grid,
+        "fixed_cycle_validation": fixed_result,
+        "oracle_pass": bool(passing),
+        "champion": champion,
+        "grid": results,
+        "checkpoint": provenance["checkpoint"],
+        "data_provenance": provenance,
+    }
+    with open(os.path.join(out_dir, "summary.json"), "w") as file:
+        json.dump(summary, file, indent=2)
+    update_workbook(oracle_rows=rows)
+    print(json.dumps(summary, indent=2))
+    return summary
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--market", choices=sorted(MARKETS), required=True)
+    parser.add_argument("--stage", choices=["oracle", "dqn"], default="dqn")
+    parser.add_argument("--oracle-grid", choices=["quick", "full"], default=None)
     parser.add_argument("--mode", choices=["smoke", "full"], default="smoke")
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--hidden-dim", type=int, default=32)
+    parser.add_argument("--fusion-hidden", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -301,11 +445,17 @@ def main():
     parser.add_argument("--target-update", type=int, default=500)
     parser.add_argument("--epsilon-decay", type=int, default=20000)
     parser.add_argument("--reward-scale", type=float, default=1.0)
+    parser.add_argument("--lambda-cost", type=float, default=0.0)
+    parser.add_argument("--lambda-long", type=float, default=0.0)
     parser.add_argument("--train-frequency", type=int, default=1)
     parser.add_argument("--validate-every", type=int, default=1)
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     args = parser.parse_args()
+    if args.oracle_grid is None:
+        args.oracle_grid = "quick" if args.mode == "smoke" else "full"
+    if args.stage == "oracle" and args.mode == "full" and args.oracle_grid != "full":
+        parser.error("Full oracle validation must use --oracle-grid full.")
     if args.train_frequency < 1 or args.validate_every < 1:
         parser.error("--train-frequency and --validate-every must be positive integers.")
 
@@ -321,7 +471,12 @@ def main():
     runtime_config.seed = market_cfg["source_seed"]
     set_seed(runtime_config.seed, create_logger(os.path.join("results", "dqn_monitor", "setup")))
 
-    run_id = args.run_id or f"{args.mode}_ep{args.episodes or (2 if args.mode == 'smoke' else 20)}"
+    run_id = args.run_id or (
+        f"{args.stage}_{args.mode}"
+        if args.stage == "oracle"
+        else f"{args.mode}_ep{args.episodes or (2 if args.mode == 'smoke' else 20)}"
+    )
+    args.run_id = run_id
     out_dir = os.path.join("results", "dqn_monitor", args.market, run_id)
     os.makedirs(out_dir, exist_ok=True)
     logger = create_logger(out_dir)
@@ -329,8 +484,12 @@ def main():
     frozen_hrl = HRL_Networks(16, env.num_stocks, runtime_config).to(device)
     checkpoint = provenance["checkpoint"]
     load_frozen_hrl(frozen_hrl, checkpoint, device)
+    if args.stage == "oracle":
+        run_oracle_stage(env, frozen_hrl, args, market_cfg, provenance, out_dir)
+        return
     dqn = DQNMonitorAgent(
-        device=device, hidden_dim=args.hidden_dim, lr=args.lr, gamma=args.gamma,
+        device=device, hidden_dim=args.hidden_dim, fusion_hidden=args.fusion_hidden,
+        lr=args.lr, gamma=args.gamma,
         target_update=args.target_update, grad_clip=1.0,
     )
     replay = DQNReplayBuffer(args.capacity)
@@ -345,13 +504,16 @@ def main():
         "reward_scale": args.reward_scale,
         "train_frequency": args.train_frequency,
     }
+    utility_cfg = {"lambda_cost": args.lambda_cost, "lambda_long": args.lambda_long}
 
     best_sharpe = -float("inf")
     best_checkpoint = os.path.join(out_dir, "best_dqn_monitor.pth")
     env.set_mode("train")
     start_time = time.time()
     for episode in range(episodes):
-        train_result, _ = run_episode(env, frozen_hrl, dqn, replay, train=True, cfg=cfg)
+        train_result, _ = run_episode(
+            env, frozen_hrl, dqn, replay, train=True, cfg=cfg, utility_cfg=utility_cfg
+        )
         evaluate = (
             episode == 0
             or (episode + 1) % args.validate_every == 0
@@ -359,7 +521,7 @@ def main():
         )
         if evaluate:
             env.set_mode("val")
-            val_result, _ = run_episode(env, frozen_hrl, dqn)
+            val_result, _ = run_episode(env, frozen_hrl, dqn, utility_cfg=utility_cfg)
             logger.info(
                 "DQN %s ep=%d/%d train_ret=%.2f%% val_ret=%.2f%% val_sharpe=%.4f "
                 "switch=%d loss=%s",
@@ -383,7 +545,7 @@ def main():
     fixed_result = None
     if not args.validation_only:
         env.set_mode("test")
-        test_result, history = run_episode(env, frozen_hrl, dqn)
+        test_result, history = run_episode(env, frozen_hrl, dqn, utility_cfg=utility_cfg)
         fixed_result, fixed_history = run_episode(
             env, frozen_hrl, dqn, fixed_cycle=int(getattr(runtime_config, "max_hold", 60))
         )
@@ -425,6 +587,8 @@ def main():
         "run_id": run_id, "market": args.market, "source_seed": market_cfg["source_seed"],
         "mode": args.mode, "episodes": episodes, "hidden_dim": args.hidden_dim, "lr": args.lr,
         "gamma": args.gamma, "reward_scale": args.reward_scale,
+        "reward_source": "outer_value", "input_version": "candidate_state_v2",
+        "lambda_cost": args.lambda_cost, "lambda_long": args.lambda_long,
         "train_frequency": args.train_frequency, "validate_every": args.validate_every,
         "validation_only": args.validation_only, "val_sharpe": best_sharpe,
         "test_sharpe": test_result["sharpe"] if test_result else np.nan,

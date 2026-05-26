@@ -7,25 +7,46 @@ import torch.nn.functional as F
 
 
 class EmbMonitorQNet(nn.Module):
-    """Q network for daily hold/switch decisions using pretrained SSM latents."""
+    """Q network for hold/switch decisions using both candidate portfolios."""
 
-    def __init__(self, z_dim=16, h_dim=16, hidden_dim=32):
+    def __init__(self, z_dim=16, h_dim=16, hidden_dim=32, fusion_hidden=64,
+                 port_state_dim=6):
         super().__init__()
+        self.hidden_dim = int(hidden_dim)
         self.asset_projection = nn.Sequential(
             nn.Linear(z_dim + h_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
         )
+        controller_dim = hidden_dim * 4 + port_state_dim + 1 + 3
         self.q_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(controller_dim, fusion_hidden),
+            nn.LayerNorm(fusion_hidden),
+            nn.GELU(),
+            nn.Linear(fusion_hidden, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 2),
         )
 
-    def forward(self, z, h, weights):
+    def encode_state(self, z, h, weights, base_weights, switch_weights, port_state,
+                     held_p, candidate_costs):
         asset_emb = self.asset_projection(torch.cat([z, h], dim=-1))
-        portfolio_emb = torch.sum(asset_emb * weights.unsqueeze(-1), dim=1)
-        return self.q_head(portfolio_emb)
+        emb_live = torch.sum(asset_emb * weights.unsqueeze(-1), dim=1)
+        emb_hold = torch.sum(asset_emb * base_weights.unsqueeze(-1), dim=1)
+        emb_switch = torch.sum(asset_emb * switch_weights.unsqueeze(-1), dim=1)
+        delta_emb = emb_switch - emb_hold
+        return torch.cat([
+            emb_live, emb_hold, emb_switch, delta_emb,
+            port_state, held_p, candidate_costs,
+        ], dim=1)
+
+    def forward(self, z, h, weights, base_weights, switch_weights, port_state,
+                held_p, candidate_costs):
+        controller_state = self.encode_state(
+            z, h, weights, base_weights, switch_weights, port_state,
+            held_p, candidate_costs,
+        )
+        return self.q_head(controller_state)
 
 
 class DQNReplayBuffer:
@@ -45,11 +66,21 @@ class DQNReplayBuffer:
             replay_tensor(obs["ssm"]["z"]),
             replay_tensor(obs["ssm"]["h"]),
             replay_tensor(obs["weights_drift"]),
+            replay_tensor(obs["base_drift"]),
+            replay_tensor(obs["candidate_switch_base"]),
+            replay_tensor(obs["port_state"]),
+            replay_tensor(obs["held_p"]),
+            replay_tensor(obs["candidate_costs"]),
             int(action),
             float(reward),
             replay_tensor(next_obs["ssm"]["z"]),
             replay_tensor(next_obs["ssm"]["h"]),
             replay_tensor(next_obs["weights_drift"]),
+            replay_tensor(next_obs["base_drift"]),
+            replay_tensor(next_obs["candidate_switch_base"]),
+            replay_tensor(next_obs["port_state"]),
+            replay_tensor(next_obs["held_p"]),
+            replay_tensor(next_obs["candidate_costs"]),
             float(done),
         ))
 
@@ -60,21 +91,31 @@ class DQNReplayBuffer:
             "z": torch.stack(fields[0]).to(device),
             "h": torch.stack(fields[1]).to(device),
             "weights": torch.stack(fields[2]).to(device),
-            "actions": torch.tensor(fields[3], dtype=torch.long, device=device),
-            "rewards": torch.tensor(fields[4], dtype=torch.float32, device=device),
-            "next_z": torch.stack(fields[5]).to(device),
-            "next_h": torch.stack(fields[6]).to(device),
-            "next_weights": torch.stack(fields[7]).to(device),
-            "dones": torch.tensor(fields[8], dtype=torch.float32, device=device),
+            "base_weights": torch.stack(fields[3]).to(device),
+            "switch_weights": torch.stack(fields[4]).to(device),
+            "port_state": torch.stack(fields[5]).to(device),
+            "held_p": torch.stack(fields[6]).to(device),
+            "candidate_costs": torch.stack(fields[7]).to(device),
+            "actions": torch.tensor(fields[8], dtype=torch.long, device=device),
+            "rewards": torch.tensor(fields[9], dtype=torch.float32, device=device),
+            "next_z": torch.stack(fields[10]).to(device),
+            "next_h": torch.stack(fields[11]).to(device),
+            "next_weights": torch.stack(fields[12]).to(device),
+            "next_base_weights": torch.stack(fields[13]).to(device),
+            "next_switch_weights": torch.stack(fields[14]).to(device),
+            "next_port_state": torch.stack(fields[15]).to(device),
+            "next_held_p": torch.stack(fields[16]).to(device),
+            "next_candidate_costs": torch.stack(fields[17]).to(device),
+            "dones": torch.tensor(fields[18], dtype=torch.float32, device=device),
         }
 
 
 class DQNMonitorAgent:
-    def __init__(self, device, z_dim=16, h_dim=16, hidden_dim=32, lr=3e-4,
-                 gamma=0.99, target_update=500, grad_clip=1.0):
+    def __init__(self, device, z_dim=16, h_dim=16, hidden_dim=32, fusion_hidden=64,
+                 lr=3e-4, gamma=0.99, target_update=500, grad_clip=1.0):
         self.device = device
-        self.q_net = EmbMonitorQNet(z_dim, h_dim, hidden_dim).to(device)
-        self.target_net = EmbMonitorQNet(z_dim, h_dim, hidden_dim).to(device)
+        self.q_net = EmbMonitorQNet(z_dim, h_dim, hidden_dim, fusion_hidden).to(device)
+        self.target_net = EmbMonitorQNet(z_dim, h_dim, hidden_dim, fusion_hidden).to(device)
         self.target_net.load_state_dict(self.q_net.state_dict())
         self.target_net.eval()
         self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=float(lr))
@@ -87,21 +128,32 @@ class DQNMonitorAgent:
         if random.random() < float(epsilon):
             return random.randrange(2)
         with torch.inference_mode():
-            q = self.q_net(obs["ssm"]["z"], obs["ssm"]["h"], obs["weights_drift"])
+            q = self.q_net(
+                obs["ssm"]["z"], obs["ssm"]["h"], obs["weights_drift"],
+                obs["base_drift"], obs["candidate_switch_base"], obs["port_state"],
+                obs["held_p"], obs["candidate_costs"],
+            )
         return int(torch.argmax(q, dim=1).item())
 
     def update(self, replay, batch_size):
         if len(replay) < int(batch_size):
             return None
         batch = replay.sample(batch_size, self.device)
-        q_selected = self.q_net(batch["z"], batch["h"], batch["weights"]).gather(
+        q_selected = self.q_net(
+            batch["z"], batch["h"], batch["weights"], batch["base_weights"],
+            batch["switch_weights"], batch["port_state"], batch["held_p"],
+            batch["candidate_costs"],
+        ).gather(
             1, batch["actions"].unsqueeze(1)
         ).squeeze(1)
         # Target participates in the differentiable loss expression; no_grad
         # avoids critic gradients without creating an inference-only tensor.
         with torch.no_grad():
             next_q = self.target_net(
-                batch["next_z"], batch["next_h"], batch["next_weights"]
+                batch["next_z"], batch["next_h"], batch["next_weights"],
+                batch["next_base_weights"], batch["next_switch_weights"],
+                batch["next_port_state"], batch["next_held_p"],
+                batch["next_candidate_costs"],
             ).max(dim=1).values
             target = batch["rewards"] + self.gamma * (1.0 - batch["dones"]) * next_q
         loss = F.smooth_l1_loss(q_selected, target)
