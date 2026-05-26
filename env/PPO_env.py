@@ -277,7 +277,8 @@ class PPO_Env(gym.Env):
 
     # =====================================================================
     # =====================================================================
-    def step(self, real_weight, base_weight=None, outer_action=None, is_switch: bool = False):
+    def step(self, real_weight, base_weight=None, outer_action=None, is_switch: bool = False,
+             calculate_outer_reward: bool = True):
         """step 函数参数说明：
 
         - real_weight: Inner 调整后的最终权重（用于计算本步实际收益）
@@ -335,7 +336,7 @@ class PPO_Env(gym.Env):
         step_alpha = portfolio_return - base_return_val
         # =====================================================================
         # =====================================================================
-        if is_switch:
+        if is_switch and calculate_outer_reward:
             sharpe = self._calc_future_sharpe(new_base_weight, self.day, horizon=self.max_hold)
             benchmark_weights = torch.ones(self.num_stocks, device=self.device) / self.num_stocks
             sharpe_benchmark = self._calc_future_sharpe(benchmark_weights, self.day, horizon=self.max_hold)
@@ -368,6 +369,8 @@ class PPO_Env(gym.Env):
                 'monitor_reward': step_monitor.item(),
                 'base_return': base_return_val.item() * self.reward_scale_base,
                 'cost_rate': cost_rate.item(),
+                'turnover': turnover.item(),
+                'transaction_cost': cost.item(),
             },
             'portfolio_value': val_t1_net.item(),
             'date': self.all_dates[self.day]

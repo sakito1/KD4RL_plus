@@ -1,5 +1,10 @@
 {
   "description": "Frozen KD4RL assets reused by the EmbMonitor-ZH experiment.",
+  "reference_results": {
+    "source": "../KD4RL/result.xlsx",
+    "local": "pretrained_assets/kd4rl/reference/result.xlsx",
+    "sha256": "a442689228360e0d4fd2692d915c04f3faac06accab9050c7a5478068ac84f2c"
+  },
   "dataset_reuse": {
     "nas100": {
       "source": "../KD4RL/Dataset/Nas100\u6570\u636e/feature_ssm",
@@ -29,15 +34,15 @@
       "source_pattern": "../KD4RL/checkpoints/nas100/ppo/seed_*/checkpoints/best_model.pth",
       "local_pattern": "pretrained_assets/kd4rl/nas100/ppo/seed_*/best_model.pth",
       "available_source_seeds": [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57],
-      "migrated_seeds": [42],
-      "first_version_seed": 42
+      "migrated_seeds": [42, 47],
+      "dqn_monitor_seed": 47
     },
     "sh": {
       "source_pattern": "../KD4RL/checkpoints/CN_wind_\u590d\u6743/ppo/seed_*/checkpoints/best_model.pth",
       "local_pattern": "pretrained_assets/kd4rl/sh/ppo/seed_*/best_model.pth",
       "available_source_seeds": [77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92],
       "migrated_seeds": [77],
-      "first_version_seed": 77
+      "dqn_monitor_seed": 77
     }
   }
 }
