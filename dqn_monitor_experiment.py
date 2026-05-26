@@ -201,7 +201,10 @@ def run_episode(env, frozen_hrl, dqn, replay=None, train=False, fixed_cycle=None
         if train:
             replay.store(obs, action, reward * cfg["reward_scale"], next_obs, done)
             cfg["env_steps"] += 1
-            if len(replay) >= cfg["warmup"]:
+            if (
+                len(replay) >= cfg["warmup"]
+                and cfg["env_steps"] % cfg["train_frequency"] == 0
+            ):
                 loss = dqn.update(replay, cfg["batch_size"])
                 if loss is not None:
                     losses.append(loss)
@@ -298,9 +301,13 @@ def main():
     parser.add_argument("--target-update", type=int, default=500)
     parser.add_argument("--epsilon-decay", type=int, default=20000)
     parser.add_argument("--reward-scale", type=float, default=1.0)
+    parser.add_argument("--train-frequency", type=int, default=1)
+    parser.add_argument("--validate-every", type=int, default=1)
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     args = parser.parse_args()
+    if args.train_frequency < 1 or args.validate_every < 1:
+        parser.error("--train-frequency and --validate-every must be positive integers.")
 
     os.chdir(ROOT)
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -336,6 +343,7 @@ def main():
         "warmup": min(args.warmup, 32) if args.mode == "smoke" else args.warmup,
         "batch_size": min(args.batch_size, 32) if args.mode == "smoke" else args.batch_size,
         "reward_scale": args.reward_scale,
+        "train_frequency": args.train_frequency,
     }
 
     best_sharpe = -float("inf")
@@ -344,18 +352,30 @@ def main():
     start_time = time.time()
     for episode in range(episodes):
         train_result, _ = run_episode(env, frozen_hrl, dqn, replay, train=True, cfg=cfg)
-        env.set_mode("val")
-        val_result, _ = run_episode(env, frozen_hrl, dqn)
-        logger.info(
-            "DQN %s ep=%d/%d train_ret=%.2f%% val_ret=%.2f%% val_sharpe=%.4f "
-            "switch=%d loss=%s",
-            args.market, episode + 1, episodes, train_result["total_ret"] * 100,
-            val_result["total_ret"] * 100, val_result["sharpe"], val_result["switch_count"],
-            train_result["dqn_loss"],
+        evaluate = (
+            episode == 0
+            or (episode + 1) % args.validate_every == 0
+            or episode + 1 == episodes
         )
-        if val_result["sharpe"] > best_sharpe:
-            best_sharpe = val_result["sharpe"]
-            dqn.save(best_checkpoint, {"episode": episode + 1, "val": val_result})
+        if evaluate:
+            env.set_mode("val")
+            val_result, _ = run_episode(env, frozen_hrl, dqn)
+            logger.info(
+                "DQN %s ep=%d/%d train_ret=%.2f%% val_ret=%.2f%% val_sharpe=%.4f "
+                "switch=%d loss=%s",
+                args.market, episode + 1, episodes, train_result["total_ret"] * 100,
+                val_result["total_ret"] * 100, val_result["sharpe"], val_result["switch_count"],
+                train_result["dqn_loss"],
+            )
+            if val_result["sharpe"] > best_sharpe:
+                best_sharpe = val_result["sharpe"]
+                dqn.save(best_checkpoint, {"episode": episode + 1, "val": val_result})
+        else:
+            logger.info(
+                "DQN %s ep=%d/%d train_ret=%.2f%% validation=skipped loss=%s",
+                args.market, episode + 1, episodes, train_result["total_ret"] * 100,
+                train_result["dqn_loss"],
+            )
         env.set_mode("train")
 
     best_meta = dqn.load(best_checkpoint)
@@ -405,6 +425,7 @@ def main():
         "run_id": run_id, "market": args.market, "source_seed": market_cfg["source_seed"],
         "mode": args.mode, "episodes": episodes, "hidden_dim": args.hidden_dim, "lr": args.lr,
         "gamma": args.gamma, "reward_scale": args.reward_scale,
+        "train_frequency": args.train_frequency, "validate_every": args.validate_every,
         "validation_only": args.validation_only, "val_sharpe": best_sharpe,
         "test_sharpe": test_result["sharpe"] if test_result else np.nan,
         "test_return": test_result["total_ret"] if test_result else np.nan,
