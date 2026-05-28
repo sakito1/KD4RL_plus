@@ -5,6 +5,7 @@ import torch
 from pg_controller import PGControllerNet, RunningObjectiveBaseline
 from pg_controller_experiment import (
     compute_metrics,
+    compute_reward_to_go,
     episode_objective,
     violates_max_hold_after_hold,
     violation_penalty,
@@ -49,13 +50,21 @@ class PGControllerTests(unittest.TestCase):
         objective, _, penalty = episode_objective(
             history, early_count=0, long_count=0, lambda_min=1.0, lambda_max=1.0,
             scheduled_switch_rate=1.0, schedule_penalty=0.5,
+            near_max_switch_rate=1.0, near_max_penalty=0.25,
         )
-        self.assertAlmostEqual(penalty, 0.5)
-        self.assertAlmostEqual(objective, metrics["sharpe"] - 0.5)
+        self.assertAlmostEqual(penalty, 0.75)
+        self.assertAlmostEqual(objective, metrics["sharpe"] - 0.75)
 
     def test_max_hold_violation_counts_action_that_exceeds_limit(self):
         self.assertFalse(violates_max_hold_after_hold(hold_age=29, max_hold=30))
         self.assertTrue(violates_max_hold_after_hold(hold_age=30, max_hold=30))
+
+    def test_reward_to_go_matches_step_count(self):
+        returns = compute_reward_to_go(
+            [100.0, 101.0, 102.0, 101.0], gamma=1.0, standardize=False
+        )
+        self.assertEqual(returns.shape, (3,))
+        self.assertGreater(returns[0], returns[-1])
 
     def test_running_baseline_is_scalar_not_learned_value_head(self):
         baseline = RunningObjectiveBaseline(momentum=0.5)

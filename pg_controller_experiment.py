@@ -135,15 +135,30 @@ def compute_metrics(history):
     }
 
 
+def compute_reward_to_go(history, gamma=1.0, standardize=True):
+    values = np.asarray(history, dtype=float)
+    step_rewards = np.diff(np.log(np.maximum(values, 1e-12)))
+    returns = np.zeros_like(step_rewards)
+    running = 0.0
+    for index in range(len(step_rewards) - 1, -1, -1):
+        running = step_rewards[index] + float(gamma) * running
+        returns[index] = running
+    if standardize and returns.size > 1:
+        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+    return returns.astype(np.float32)
+
+
 def violation_penalty(early_count, long_count, lambda_min, lambda_max):
     return float(lambda_min) * int(early_count) + float(lambda_max) * int(long_count)
 
 
 def episode_objective(history, early_count, long_count, lambda_min, lambda_max,
-                      scheduled_switch_rate=0.0, schedule_penalty=0.0):
+                      scheduled_switch_rate=0.0, schedule_penalty=0.0,
+                      near_max_switch_rate=0.0, near_max_penalty=0.0):
     metrics = compute_metrics(history)
     penalty = violation_penalty(early_count, long_count, lambda_min, lambda_max)
     penalty += float(schedule_penalty) * float(scheduled_switch_rate)
+    penalty += float(near_max_penalty) * float(near_max_switch_rate)
     return float(metrics["sharpe"] - penalty), metrics, float(penalty)
 
 
@@ -369,10 +384,20 @@ def main():
     parser.add_argument("--late-hold-loss-scale", type=float, default=0.0)
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--schedule-penalty", type=float, default=0.5)
+    parser.add_argument("--near-max-penalty", type=float, default=0.5)
+    parser.add_argument(
+        "--pg-objective",
+        choices=["episode_sharpe", "reward_to_go"],
+        default="episode_sharpe",
+    )
+    parser.add_argument("--reward-gamma", type=float, default=1.0)
+    parser.add_argument("--no-reward-standardize", action="store_true")
     parser.add_argument("--baseline-momentum", type=float, default=0.9)
     parser.add_argument("--use-rolling-baseline", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     parser.add_argument("--validation-only", action="store_true")
+    parser.add_argument("--eval-checkpoint", default=None)
+    parser.add_argument("--eval-split", choices=["val", "test"], default="test")
     args = parser.parse_args()
 
     os.chdir(ROOT)
@@ -390,6 +415,7 @@ def main():
     run_id = args.run_id or f"pg_{args.mode}_ep{args.episodes or (2 if args.mode == 'smoke' else 20)}"
     out_dir = os.path.join("results", "pg_controller", args.market, run_id)
     os.makedirs(out_dir, exist_ok=True)
+    start = time.time()
     logger = create_logger(out_dir)
     env = build_environment(args.market, args.mode, logger)
     frozen_hrl = HRL_Networks(16, env.num_stocks, runtime_config).to(device)
@@ -404,10 +430,86 @@ def main():
     min_hold = int(getattr(runtime_config, "min_hold", 5))
     max_hold = int(getattr(runtime_config, "max_hold", 60))
     episodes = args.episodes or (2 if args.mode == "smoke" else 20)
+    if args.eval_checkpoint:
+        checkpoint = torch.load(args.eval_checkpoint, map_location=device)
+        controller.load_state_dict(checkpoint.get("controller", checkpoint))
+        env.set_mode(args.eval_split)
+        with torch.inference_mode():
+            eval_history, _, _, _, eval_stats = run_pg_episode(
+                env, frozen_hrl, controller, deterministic=True,
+                min_hold=min_hold, max_hold=max_hold,
+                constraint_logit_bias=args.constraint_logit_bias,
+                late_hold_start=args.late_hold_start,
+                late_hold_logit_bias=args.late_hold_logit_bias,
+            )
+        eval_metrics = compute_metrics(eval_history)
+        eval_penalty = violation_penalty(
+            eval_stats["early_violation_count"], eval_stats["long_violation_count"],
+            args.lambda_min, args.lambda_max,
+        )
+        eval_penalty += args.schedule_penalty * eval_stats["scheduled_switch_rate"]
+        eval_penalty += args.near_max_penalty * eval_stats["near_max_switch_rate"]
+        eval_objective = float(eval_metrics["sharpe"] - eval_penalty)
+        elapsed = time.time() - start
+        summary = {
+            "run_id": run_id,
+            "market": args.market,
+            "mode": args.mode,
+            "eval_split": args.eval_split,
+            "eval_checkpoint": args.eval_checkpoint,
+            "eval_objective": eval_objective,
+            "eval_penalty": eval_penalty,
+            "eval_result": {**eval_metrics, **eval_stats},
+            "config": vars(args),
+            "min_hold": min_hold,
+            "max_hold": max_hold,
+            "data_provenance": provenance,
+            "elapsed_seconds": elapsed,
+        }
+        with open(os.path.join(out_dir, "summary.json"), "w") as file:
+            json.dump(summary, file, indent=2)
+        run_row = {
+            "run_id": run_id,
+            "market": args.market,
+            "seed": market_cfg["source_seed"],
+            "mode": f"eval_{args.eval_split}",
+            "episodes": 0,
+            "hidden_dim": args.hidden_dim,
+            "fusion_hidden": args.fusion_hidden,
+            "lr": args.lr,
+            "lambda_min": args.lambda_min,
+            "lambda_max": args.lambda_max,
+            "constraint_loss_scale": args.constraint_loss_scale,
+            "constraint_logit_bias": args.constraint_logit_bias,
+            "late_hold_start": args.late_hold_start,
+            "late_hold_logit_bias": args.late_hold_logit_bias,
+            "late_hold_loss_scale": args.late_hold_loss_scale,
+            "grad_clip": args.grad_clip,
+            "schedule_penalty": args.schedule_penalty,
+            "near_max_penalty": args.near_max_penalty,
+            "pg_objective": args.pg_objective,
+            "reward_gamma": args.reward_gamma,
+            "val_objective": eval_objective if args.eval_split == "val" else None,
+            "val_penalty": eval_penalty if args.eval_split == "val" else None,
+            "val_sharpe": eval_metrics["sharpe"] if args.eval_split == "val" else None,
+            "val_return": eval_metrics["total_ret"] if args.eval_split == "val" else None,
+            "val_maxdd": eval_metrics["max_dd"] if args.eval_split == "val" else None,
+            **eval_stats,
+            "test_status": "completed" if args.eval_split == "test" else "skipped",
+            "elapsed_seconds": elapsed,
+        }
+        final_rows = []
+        if args.eval_split == "test":
+            final_rows.append({
+                "run_id": run_id, "market": args.market, "model": "pg_controller",
+                **eval_metrics, **eval_stats,
+            })
+        update_workbook(run_row, final_rows=final_rows)
+        print(json.dumps(summary, indent=2))
+        return
     best_objective = -float("inf")
     best_path = os.path.join(out_dir, "best_pg_controller.pth")
     records = []
-    start = time.time()
 
     env.set_mode("train")
     for episode in range(episodes):
@@ -422,13 +524,15 @@ def main():
             history, stats["early_violation_count"], stats["long_violation_count"],
             args.lambda_min, args.lambda_max,
             stats["scheduled_switch_rate"], args.schedule_penalty,
+            stats["near_max_switch_rate"], args.near_max_penalty,
         )
         return_signal = (
             baseline.advantage(metrics["sharpe"])
             if args.use_rolling_baseline else metrics["sharpe"]
         )
         if log_probs:
-            log_prob_sum = torch.stack(log_probs).sum()
+            log_probs_tensor = torch.stack(log_probs)
+            log_prob_sum = log_probs_tensor.sum()
             entropy_mean = torch.stack(entropies).mean()
             constraint_loss = torch.tensor(0.0, device=device)
             if constraints["min_probs"]:
@@ -444,16 +548,28 @@ def main():
                     constraints["max_probs"]
                 ).sum()
             constraint_loss = args.constraint_loss_scale * constraint_loss
-            loss = -log_prob_sum * float(return_signal)
+            if args.pg_objective == "reward_to_go":
+                weights = compute_reward_to_go(
+                    history,
+                    gamma=args.reward_gamma,
+                    standardize=not args.no_reward_standardize,
+                )
+                weights = torch.as_tensor(weights, device=device, dtype=log_probs_tensor.dtype)
+                policy_loss = -(log_probs_tensor.reshape(-1) * weights).sum()
+            else:
+                policy_loss = -log_prob_sum * float(return_signal)
+            loss = policy_loss
             loss = loss + constraint_loss - args.ent_coef * entropy_mean
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(controller.parameters(), args.grad_clip)
             optimizer.step()
             loss_value = float(loss.item())
+            policy_loss_value = float(policy_loss.detach().item())
             constraint_loss_value = float(constraint_loss.detach().item())
         else:
             loss_value = None
+            policy_loss_value = None
             constraint_loss_value = None
 
         env.set_mode("val")
@@ -471,6 +587,7 @@ def main():
             args.lambda_min, args.lambda_max,
         )
         val_penalty += args.schedule_penalty * val_stats["scheduled_switch_rate"]
+        val_penalty += args.near_max_penalty * val_stats["near_max_switch_rate"]
         val_objective = float(val_metrics["sharpe"] - val_penalty)
         record = {
             "episode": episode + 1,
@@ -478,6 +595,7 @@ def main():
             "train_sharpe": metrics["sharpe"],
             "train_penalty": penalty,
             "train_return_signal": return_signal,
+            "train_policy_loss": policy_loss_value,
             "train_constraint_loss": constraint_loss_value,
             "train_loss": loss_value,
             "val_objective": val_objective,
@@ -568,6 +686,9 @@ def main():
         "late_hold_loss_scale": args.late_hold_loss_scale,
         "grad_clip": args.grad_clip,
         "schedule_penalty": args.schedule_penalty,
+        "near_max_penalty": args.near_max_penalty,
+        "pg_objective": args.pg_objective,
+        "reward_gamma": args.reward_gamma,
         "val_objective": best.get("val_objective"),
         "val_penalty": best.get("val_penalty"),
         "val_sharpe": best["val_metrics"]["sharpe"],

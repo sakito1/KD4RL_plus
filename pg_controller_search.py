@@ -23,8 +23,11 @@ def default_configs():
         "constraint_loss_scale": 1,
         "grad_clip": 10,
         "schedule_penalty": 0.5,
+        "near_max_penalty": 0.5,
         "late_hold_start": 0.7,
         "late_hold_loss_scale": 10,
+        "pg_objective": "episode_sharpe",
+        "reward_gamma": 1.0,
     }
     configs = []
     for bias, late_bias in [(4, 0), (4, 1), (4, 2), (5, 1), (6, 1), (6, 2)]:
@@ -96,6 +99,9 @@ def run_one(stage, market, mode, episodes, cfg, validation_only, rerun):
         "--late-hold-loss-scale", str(cfg["late_hold_loss_scale"]),
         "--grad-clip", str(cfg["grad_clip"]),
         "--schedule-penalty", str(cfg["schedule_penalty"]),
+        "--near-max-penalty", str(cfg["near_max_penalty"]),
+        "--pg-objective", str(cfg["pg_objective"]),
+        "--reward-gamma", str(cfg["reward_gamma"]),
     ]
     if validation_only:
         cmd.append("--validation-only")
