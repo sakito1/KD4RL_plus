@@ -87,9 +87,10 @@ def verify_market_assets(market):
 def build_environment(market, mode, logger):
     if mode == "smoke":
         ranges = MARKETS[market]["smoke_ranges"]
+        smoke_episode_len = max(40, int(getattr(runtime_config, "max_hold", 60)) + 20)
         return PPO_Env(
             logger=logger,
-            episode_len=40,
+            episode_len=smoke_episode_len,
             train_date_range=ranges["train"],
             val_date_range=ranges["val"],
             test_date_range=ranges["test"],
@@ -134,10 +135,18 @@ def compute_metrics(history):
     }
 
 
+def violation_penalty(early_count, long_count, lambda_min, lambda_max):
+    return float(lambda_min) * int(early_count) + float(lambda_max) * int(long_count)
+
+
 def episode_objective(history, early_count, long_count, lambda_min, lambda_max):
     metrics = compute_metrics(history)
-    penalty = float(lambda_min) * early_count + float(lambda_max) * long_count
+    penalty = violation_penalty(early_count, long_count, lambda_min, lambda_max)
     return float(metrics["sharpe"] - penalty), metrics, float(penalty)
+
+
+def violates_max_hold_after_hold(hold_age, max_hold):
+    return int(hold_age) + 1 > int(max_hold)
 
 
 def build_candidates(env, frozen_hrl, obs):
@@ -200,11 +209,12 @@ def execute_action(env, candidate, action):
 
 
 def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
-                   min_hold=5, max_hold=60):
+                   min_hold=5, max_hold=60, constraint_logit_bias=0.0):
     raw_obs = env.reset()
     obs, candidate = build_candidates(env, frozen_hrl, raw_obs)
     history = [float(env.portfolio_value.item())]
     log_probs, entropies = [], []
+    min_constraint_probs, max_constraint_probs = [], []
     switch_count = 0
     hold_age = 0
     holding_lengths = []
@@ -212,16 +222,42 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
     long_count = 0
     turnovers = []
     costs = []
+    p_switch_all = []
+    p_switch_pre_min = []
+    p_switch_post_max = []
+    p_hold_post_max = []
 
     while True:
-        action_tensor, log_prob, entropy = controller.act(obs, deterministic=deterministic)
+        logits = controller(obs)
+        if constraint_logit_bias:
+            if hold_age < int(min_hold):
+                logits[:, 1] = logits[:, 1] - float(constraint_logit_bias)
+            if violates_max_hold_after_hold(hold_age, max_hold):
+                logits[:, 0] = logits[:, 0] - float(constraint_logit_bias)
+        dist = torch.distributions.Categorical(logits=logits)
+        action_tensor = torch.argmax(logits, dim=-1) if deterministic else dist.sample()
+        log_prob = dist.log_prob(action_tensor)
+        entropy = dist.entropy()
         action = int(action_tensor.item())
+        probs = dist.probs
+        p_switch = float(probs[:, 1].detach().mean().item())
+        p_hold = float(probs[:, 0].detach().mean().item())
+        p_switch_all.append(p_switch)
+        if hold_age < int(min_hold):
+            p_switch_pre_min.append(p_switch)
+        if violates_max_hold_after_hold(hold_age, max_hold):
+            p_switch_post_max.append(p_switch)
+            p_hold_post_max.append(p_hold)
         if not deterministic:
             log_probs.append(log_prob)
             entropies.append(entropy)
+            if hold_age < int(min_hold):
+                min_constraint_probs.append(probs[:, 1].mean())
+            if violates_max_hold_after_hold(hold_age, max_hold):
+                max_constraint_probs.append(probs[:, 0].mean())
         if action == 1 and hold_age < int(min_hold):
             early_count += 1
-        if action == 0 and hold_age > int(max_hold):
+        if action == 0 and violates_max_hold_after_hold(hold_age, max_hold):
             long_count += 1
 
         next_raw_obs, done, info = execute_action(env, candidate, action)
@@ -250,8 +286,16 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
         "long_violation_rate": float(long_count / max(len(history) - 1, 1)),
         "turnover": float(np.sum(turnovers)),
         "transaction_cost": float(np.sum(costs)),
+        "avg_p_switch": float(np.mean(p_switch_all)) if p_switch_all else 0.0,
+        "avg_p_switch_pre_min": float(np.mean(p_switch_pre_min)) if p_switch_pre_min else 0.0,
+        "avg_p_switch_post_max": float(np.mean(p_switch_post_max)) if p_switch_post_max else 0.0,
+        "avg_p_hold_post_max": float(np.mean(p_hold_post_max)) if p_hold_post_max else 0.0,
     }
-    return history, log_probs, entropies, stats
+    constraints = {
+        "min_probs": min_constraint_probs,
+        "max_probs": max_constraint_probs,
+    }
+    return history, log_probs, entropies, constraints, stats
 
 
 def update_workbook(run_row, final_rows=None):
@@ -287,6 +331,9 @@ def main():
     parser.add_argument("--lambda-min", type=float, default=1.0)
     parser.add_argument("--lambda-max", type=float, default=1.0)
     parser.add_argument("--ent-coef", type=float, default=0.01)
+    parser.add_argument("--constraint-loss-scale", type=float, default=1.0)
+    parser.add_argument("--constraint-logit-bias", type=float, default=10.0)
+    parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--baseline-momentum", type=float, default=0.9)
     parser.add_argument("--use-rolling-baseline", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
@@ -319,64 +366,94 @@ def main():
     min_hold = int(getattr(runtime_config, "min_hold", 5))
     max_hold = int(getattr(runtime_config, "max_hold", 60))
     episodes = args.episodes or (2 if args.mode == "smoke" else 20)
-    best_sharpe = -float("inf")
+    best_objective = -float("inf")
     best_path = os.path.join(out_dir, "best_pg_controller.pth")
     records = []
     start = time.time()
 
     env.set_mode("train")
     for episode in range(episodes):
-        history, log_probs, entropies, stats = run_pg_episode(
+        history, log_probs, entropies, constraints, stats = run_pg_episode(
             env, frozen_hrl, controller, deterministic=False,
             min_hold=min_hold, max_hold=max_hold,
+            constraint_logit_bias=args.constraint_logit_bias,
         )
         objective, metrics, penalty = episode_objective(
             history, stats["early_violation_count"], stats["long_violation_count"],
             args.lambda_min, args.lambda_max,
         )
-        advantage = baseline.advantage(objective) if args.use_rolling_baseline else objective
+        return_signal = (
+            baseline.advantage(metrics["sharpe"])
+            if args.use_rolling_baseline else metrics["sharpe"]
+        )
         if log_probs:
             log_prob_sum = torch.stack(log_probs).sum()
             entropy_mean = torch.stack(entropies).mean()
-            loss = -log_prob_sum * float(advantage) - args.ent_coef * entropy_mean
+            constraint_loss = torch.tensor(0.0, device=device)
+            if constraints["min_probs"]:
+                constraint_loss = constraint_loss + args.lambda_min * torch.stack(
+                    constraints["min_probs"]
+                ).sum()
+            if constraints["max_probs"]:
+                constraint_loss = constraint_loss + args.lambda_max * torch.stack(
+                    constraints["max_probs"]
+                ).sum()
+            constraint_loss = args.constraint_loss_scale * constraint_loss
+            loss = -log_prob_sum * float(return_signal)
+            loss = loss + constraint_loss - args.ent_coef * entropy_mean
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(controller.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(controller.parameters(), args.grad_clip)
             optimizer.step()
             loss_value = float(loss.item())
+            constraint_loss_value = float(constraint_loss.detach().item())
         else:
             loss_value = None
+            constraint_loss_value = None
 
         env.set_mode("val")
         with torch.inference_mode():
-            val_history, _, _, val_stats = run_pg_episode(
+            val_history, _, _, _, val_stats = run_pg_episode(
                 env, frozen_hrl, controller, deterministic=True,
                 min_hold=min_hold, max_hold=max_hold,
+                constraint_logit_bias=args.constraint_logit_bias,
             )
         val_metrics = compute_metrics(val_history)
+        val_penalty = violation_penalty(
+            val_stats["early_violation_count"], val_stats["long_violation_count"],
+            args.lambda_min, args.lambda_max,
+        )
+        val_objective = float(val_metrics["sharpe"] - val_penalty)
         record = {
             "episode": episode + 1,
             "train_objective": objective,
             "train_sharpe": metrics["sharpe"],
             "train_penalty": penalty,
+            "train_return_signal": return_signal,
+            "train_constraint_loss": constraint_loss_value,
             "train_loss": loss_value,
+            "val_objective": val_objective,
+            "val_penalty": val_penalty,
             "val_sharpe": val_metrics["sharpe"],
             "val_return": val_metrics["total_ret"],
             **{f"val_{k}": v for k, v in val_stats.items()},
         }
         records.append(record)
         logger.info(
-            "PG %s ep=%d/%d train_obj=%.4f train_sharpe=%.4f val_sharpe=%.4f "
+            "PG %s ep=%d/%d train_obj=%.4f train_sharpe=%.4f "
+            "val_obj=%.4f val_sharpe=%.4f "
             "switch=%d early=%d long=%d",
             args.market, episode + 1, episodes, objective, metrics["sharpe"],
-            val_metrics["sharpe"], val_stats["switch_count"],
+            val_objective, val_metrics["sharpe"], val_stats["switch_count"],
             val_stats["early_violation_count"], val_stats["long_violation_count"],
         )
-        if val_metrics["sharpe"] > best_sharpe:
-            best_sharpe = val_metrics["sharpe"]
+        if val_objective > best_objective:
+            best_objective = val_objective
             torch.save({
                 "controller": controller.state_dict(),
                 "episode": episode + 1,
+                "val_objective": val_objective,
+                "val_penalty": val_penalty,
                 "val_metrics": val_metrics,
                 "val_stats": val_stats,
             }, best_path)
@@ -390,9 +467,10 @@ def main():
     if not args.validation_only:
         env.set_mode("test")
         with torch.inference_mode():
-            test_history, _, _, test_stats = run_pg_episode(
+            test_history, _, _, _, test_stats = run_pg_episode(
                 env, frozen_hrl, controller, deterministic=True,
                 min_hold=min_hold, max_hold=max_hold,
+                constraint_logit_bias=args.constraint_logit_bias,
             )
         test_result = compute_metrics(test_history)
         final_rows.append({
@@ -406,6 +484,8 @@ def main():
         "market": args.market,
         "mode": args.mode,
         "episodes": episodes,
+        "best_validation_objective": best.get("val_objective"),
+        "best_validation_penalty": best.get("val_penalty"),
         "best_validation": {**best["val_metrics"], **best["val_stats"]},
         "test_result": test_result,
         "test_stats": test_stats,
@@ -429,6 +509,11 @@ def main():
         "lr": args.lr,
         "lambda_min": args.lambda_min,
         "lambda_max": args.lambda_max,
+        "constraint_loss_scale": args.constraint_loss_scale,
+        "constraint_logit_bias": args.constraint_logit_bias,
+        "grad_clip": args.grad_clip,
+        "val_objective": best.get("val_objective"),
+        "val_penalty": best.get("val_penalty"),
         "val_sharpe": best["val_metrics"]["sharpe"],
         "val_return": best["val_metrics"]["total_ret"],
         "val_maxdd": best["val_metrics"]["max_dd"],

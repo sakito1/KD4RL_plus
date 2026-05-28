@@ -3,7 +3,12 @@ import unittest
 import torch
 
 from pg_controller import PGControllerNet, RunningObjectiveBaseline
-from pg_controller_experiment import compute_metrics, episode_objective
+from pg_controller_experiment import (
+    compute_metrics,
+    episode_objective,
+    violates_max_hold_after_hold,
+    violation_penalty,
+)
 
 
 class PGControllerTests(unittest.TestCase):
@@ -40,6 +45,11 @@ class PGControllerTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["sharpe"], returned_metrics["sharpe"])
         self.assertAlmostEqual(penalty, 5.0)
         self.assertAlmostEqual(objective, metrics["sharpe"] - 5.0)
+        self.assertAlmostEqual(violation_penalty(2, 1, 1.0, 3.0), 5.0)
+
+    def test_max_hold_violation_counts_action_that_exceeds_limit(self):
+        self.assertFalse(violates_max_hold_after_hold(hold_age=29, max_hold=30))
+        self.assertTrue(violates_max_hold_after_hold(hold_age=30, max_hold=30))
 
     def test_running_baseline_is_scalar_not_learned_value_head(self):
         baseline = RunningObjectiveBaseline(momentum=0.5)
