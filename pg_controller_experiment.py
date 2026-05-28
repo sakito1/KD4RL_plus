@@ -139,9 +139,11 @@ def violation_penalty(early_count, long_count, lambda_min, lambda_max):
     return float(lambda_min) * int(early_count) + float(lambda_max) * int(long_count)
 
 
-def episode_objective(history, early_count, long_count, lambda_min, lambda_max):
+def episode_objective(history, early_count, long_count, lambda_min, lambda_max,
+                      scheduled_switch_rate=0.0, schedule_penalty=0.0):
     metrics = compute_metrics(history)
     penalty = violation_penalty(early_count, long_count, lambda_min, lambda_max)
+    penalty += float(schedule_penalty) * float(scheduled_switch_rate)
     return float(metrics["sharpe"] - penalty), metrics, float(penalty)
 
 
@@ -209,12 +211,13 @@ def execute_action(env, candidate, action):
 
 
 def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
-                   min_hold=5, max_hold=60, constraint_logit_bias=0.0):
+                   min_hold=5, max_hold=60, constraint_logit_bias=0.0,
+                   late_hold_start=0.75, late_hold_logit_bias=0.0):
     raw_obs = env.reset()
     obs, candidate = build_candidates(env, frozen_hrl, raw_obs)
     history = [float(env.portfolio_value.item())]
     log_probs, entropies = [], []
-    min_constraint_probs, max_constraint_probs = [], []
+    min_constraint_probs, max_constraint_probs, late_hold_probs = [], [], []
     switch_count = 0
     hold_age = 0
     holding_lengths = []
@@ -222,6 +225,7 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
     long_count = 0
     turnovers = []
     costs = []
+    switch_ages = []
     p_switch_all = []
     p_switch_pre_min = []
     p_switch_post_max = []
@@ -229,6 +233,13 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
 
     while True:
         logits = controller(obs)
+        late_start_day = int(np.floor(float(late_hold_start) * int(max_hold)))
+        late_span = max(int(max_hold) - late_start_day, 1)
+        in_late_window = late_start_day <= hold_age < int(max_hold)
+        late_ramp = 0.0
+        if in_late_window:
+            late_ramp = float((hold_age - late_start_day + 1) / late_span)
+            logits[:, 0] = logits[:, 0] - float(late_hold_logit_bias) * late_ramp
         if constraint_logit_bias:
             if hold_age < int(min_hold):
                 logits[:, 1] = logits[:, 1] - float(constraint_logit_bias)
@@ -253,6 +264,8 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
             entropies.append(entropy)
             if hold_age < int(min_hold):
                 min_constraint_probs.append(probs[:, 1].mean())
+            if in_late_window:
+                late_hold_probs.append(late_ramp * probs[:, 0].mean())
             if violates_max_hold_after_hold(hold_age, max_hold):
                 max_constraint_probs.append(probs[:, 0].mean())
         if action == 1 and hold_age < int(min_hold):
@@ -263,6 +276,7 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
         next_raw_obs, done, info = execute_action(env, candidate, action)
         if action == 1:
             switch_count += 1
+            switch_ages.append(int(hold_age))
             if hold_age > 0:
                 holding_lengths.append(hold_age)
             hold_age = 1
@@ -277,9 +291,23 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
             break
         obs, candidate = build_candidates(env, frozen_hrl, next_raw_obs)
 
+    near_max_threshold = max(1, int(np.floor(0.9 * int(max_hold))))
+    scheduled_switch_count = sum(age >= int(max_hold) for age in switch_ages)
+    near_max_switch_count = sum(age >= near_max_threshold for age in switch_ages)
+    min_hold_switch_count = sum(age <= int(min_hold) for age in switch_ages)
     stats = {
         "switch_count": int(switch_count),
         "avg_hold_days": float(np.mean(holding_lengths)) if holding_lengths else 0.0,
+        "switch_age_mean": float(np.mean(switch_ages)) if switch_ages else 0.0,
+        "switch_age_std": float(np.std(switch_ages)) if switch_ages else 0.0,
+        "switch_age_min": int(min(switch_ages)) if switch_ages else 0,
+        "switch_age_max": int(max(switch_ages)) if switch_ages else 0,
+        "scheduled_switch_count": int(scheduled_switch_count),
+        "scheduled_switch_rate": float(scheduled_switch_count / max(switch_count, 1)),
+        "near_max_switch_count": int(near_max_switch_count),
+        "near_max_switch_rate": float(near_max_switch_count / max(switch_count, 1)),
+        "min_hold_switch_count": int(min_hold_switch_count),
+        "min_hold_switch_rate": float(min_hold_switch_count / max(switch_count, 1)),
         "early_violation_count": int(early_count),
         "long_violation_count": int(long_count),
         "early_violation_rate": float(early_count / max(len(history) - 1, 1)),
@@ -293,6 +321,7 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
     }
     constraints = {
         "min_probs": min_constraint_probs,
+        "late_hold_probs": late_hold_probs,
         "max_probs": max_constraint_probs,
     }
     return history, log_probs, entropies, constraints, stats
@@ -327,13 +356,19 @@ def main():
     parser.add_argument("--mode", choices=["smoke", "full"], default="smoke")
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--run-id", default=None)
+    parser.add_argument("--hidden-dim", type=int, default=32)
+    parser.add_argument("--fusion-hidden", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--lambda-min", type=float, default=1.0)
     parser.add_argument("--lambda-max", type=float, default=1.0)
     parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--constraint-loss-scale", type=float, default=1.0)
     parser.add_argument("--constraint-logit-bias", type=float, default=10.0)
+    parser.add_argument("--late-hold-start", type=float, default=0.75)
+    parser.add_argument("--late-hold-logit-bias", type=float, default=0.0)
+    parser.add_argument("--late-hold-loss-scale", type=float, default=0.0)
     parser.add_argument("--grad-clip", type=float, default=10.0)
+    parser.add_argument("--schedule-penalty", type=float, default=0.5)
     parser.add_argument("--baseline-momentum", type=float, default=0.9)
     parser.add_argument("--use-rolling-baseline", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
@@ -360,7 +395,10 @@ def main():
     frozen_hrl = HRL_Networks(16, env.num_stocks, runtime_config).to(device)
     load_frozen_hrl(frozen_hrl, provenance["checkpoint"], device)
 
-    controller = PGControllerNet().to(device)
+    controller = PGControllerNet(
+        hidden_dim=args.hidden_dim,
+        fusion_hidden=args.fusion_hidden,
+    ).to(device)
     optimizer = torch.optim.Adam(controller.parameters(), lr=args.lr)
     baseline = RunningObjectiveBaseline(momentum=args.baseline_momentum)
     min_hold = int(getattr(runtime_config, "min_hold", 5))
@@ -377,10 +415,13 @@ def main():
             env, frozen_hrl, controller, deterministic=False,
             min_hold=min_hold, max_hold=max_hold,
             constraint_logit_bias=args.constraint_logit_bias,
+            late_hold_start=args.late_hold_start,
+            late_hold_logit_bias=args.late_hold_logit_bias,
         )
         objective, metrics, penalty = episode_objective(
             history, stats["early_violation_count"], stats["long_violation_count"],
             args.lambda_min, args.lambda_max,
+            stats["scheduled_switch_rate"], args.schedule_penalty,
         )
         return_signal = (
             baseline.advantage(metrics["sharpe"])
@@ -393,6 +434,10 @@ def main():
             if constraints["min_probs"]:
                 constraint_loss = constraint_loss + args.lambda_min * torch.stack(
                     constraints["min_probs"]
+                ).sum()
+            if constraints["late_hold_probs"]:
+                constraint_loss = constraint_loss + args.late_hold_loss_scale * torch.stack(
+                    constraints["late_hold_probs"]
                 ).sum()
             if constraints["max_probs"]:
                 constraint_loss = constraint_loss + args.lambda_max * torch.stack(
@@ -417,12 +462,15 @@ def main():
                 env, frozen_hrl, controller, deterministic=True,
                 min_hold=min_hold, max_hold=max_hold,
                 constraint_logit_bias=args.constraint_logit_bias,
+                late_hold_start=args.late_hold_start,
+                late_hold_logit_bias=args.late_hold_logit_bias,
             )
         val_metrics = compute_metrics(val_history)
         val_penalty = violation_penalty(
             val_stats["early_violation_count"], val_stats["long_violation_count"],
             args.lambda_min, args.lambda_max,
         )
+        val_penalty += args.schedule_penalty * val_stats["scheduled_switch_rate"]
         val_objective = float(val_metrics["sharpe"] - val_penalty)
         record = {
             "episode": episode + 1,
@@ -471,6 +519,8 @@ def main():
                 env, frozen_hrl, controller, deterministic=True,
                 min_hold=min_hold, max_hold=max_hold,
                 constraint_logit_bias=args.constraint_logit_bias,
+                late_hold_start=args.late_hold_start,
+                late_hold_logit_bias=args.late_hold_logit_bias,
             )
         test_result = compute_metrics(test_history)
         final_rows.append({
@@ -506,12 +556,18 @@ def main():
         "seed": market_cfg["source_seed"],
         "mode": args.mode,
         "episodes": episodes,
+        "hidden_dim": args.hidden_dim,
+        "fusion_hidden": args.fusion_hidden,
         "lr": args.lr,
         "lambda_min": args.lambda_min,
         "lambda_max": args.lambda_max,
         "constraint_loss_scale": args.constraint_loss_scale,
         "constraint_logit_bias": args.constraint_logit_bias,
+        "late_hold_start": args.late_hold_start,
+        "late_hold_logit_bias": args.late_hold_logit_bias,
+        "late_hold_loss_scale": args.late_hold_loss_scale,
         "grad_clip": args.grad_clip,
+        "schedule_penalty": args.schedule_penalty,
         "val_objective": best.get("val_objective"),
         "val_penalty": best.get("val_penalty"),
         "val_sharpe": best["val_metrics"]["sharpe"],
