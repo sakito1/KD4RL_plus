@@ -8,3 +8,4 @@ results/
 ckpts/
 checkpoints/
 __pycache__/
+*.xlsx.lock

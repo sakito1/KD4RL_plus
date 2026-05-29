@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -218,6 +219,14 @@ def counterfactual_advantage_loss(logits_list, advantages_list, margin=0.0,
     return loss.mean()
 
 
+def mask_controller_hold_age(obs):
+    masked = dict(obs)
+    port_state = obs["port_state"].clone()
+    port_state[:, 0] = 0.0
+    masked["port_state"] = port_state
+    return masked
+
+
 def build_candidates(env, frozen_hrl, obs):
     with torch.inference_mode():
         weights = obs["weights_drift"]
@@ -282,9 +291,81 @@ def execute_action(env, candidate, action):
     return next_obs, done, info
 
 
+def run_supervised_pretrain(env, frozen_hrl, controller, optimizer, episodes,
+                            min_hold=5, max_hold=60, margin=0.0, weight_clip=0.0,
+                            grad_clip=10.0, mask_hold_age_feature=False,
+                            logger=None, market=""):
+    records = []
+    env.set_mode("train")
+    for episode in range(int(episodes)):
+        raw_obs = env.reset()
+        obs, candidate = build_candidates(env, frozen_hrl, raw_obs)
+        hold_age = 0
+        logits_list, advantages_list = [], []
+        oracle_switch_count = 0
+        oracle_positive_switch_count = 0
+        oracle_early_count = 0
+        oracle_long_count = 0
+        while True:
+            policy_obs = mask_controller_hold_age(obs) if mask_hold_age_feature else obs
+            logits_list.append(controller(policy_obs))
+            switch_advantage = obs["candidate_step_returns"][:, 2].reshape(-1).detach()
+            advantages_list.append(switch_advantage)
+            advantage_value = float(switch_advantage.mean().item())
+            if hold_age < int(min_hold):
+                action = 0
+            elif violates_max_hold_after_hold(hold_age, max_hold):
+                action = 1
+            else:
+                action = int(advantage_value > float(margin))
+            if action == 1:
+                oracle_switch_count += 1
+                if advantage_value > 0:
+                    oracle_positive_switch_count += 1
+                if hold_age < int(min_hold):
+                    oracle_early_count += 1
+            if action == 0 and violates_max_hold_after_hold(hold_age, max_hold):
+                oracle_long_count += 1
+
+            next_raw_obs, done, _ = execute_action(env, candidate, action)
+            hold_age = 1 if action == 1 else hold_age + 1
+            if done:
+                break
+            obs, candidate = build_candidates(env, frozen_hrl, next_raw_obs)
+
+        loss = counterfactual_advantage_loss(
+            logits_list, advantages_list, margin=margin, weight_clip=weight_clip
+        )
+        if loss is None:
+            loss = torch.tensor(0.0, device=next(controller.parameters()).device)
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(controller.parameters(), grad_clip)
+        optimizer.step()
+        record = {
+            "pretrain_episode": episode + 1,
+            "pretrain_loss": float(loss.detach().item()),
+            "pretrain_oracle_switch_count": int(oracle_switch_count),
+            "pretrain_oracle_positive_switch_rate": float(
+                oracle_positive_switch_count / max(oracle_switch_count, 1)
+            ),
+            "pretrain_oracle_early_count": int(oracle_early_count),
+            "pretrain_oracle_long_count": int(oracle_long_count),
+        }
+        records.append(record)
+        if logger:
+            logger.info(
+                "PG supervised %s ep=%d/%d loss=%.4f oracle_switch=%d pos_rate=%.2f",
+                market, episode + 1, int(episodes), record["pretrain_loss"],
+                oracle_switch_count, record["pretrain_oracle_positive_switch_rate"],
+            )
+    return records
+
+
 def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
                    min_hold=5, max_hold=60, constraint_logit_bias=0.0,
-                   late_hold_start=0.75, late_hold_logit_bias=0.0):
+                   late_hold_start=0.75, late_hold_logit_bias=0.0,
+                   mask_hold_age_feature=False):
     raw_obs = env.reset()
     obs, candidate = build_candidates(env, frozen_hrl, raw_obs)
     history = [float(env.portfolio_value.item())]
@@ -310,7 +391,8 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
     aligned_decisions = 0
 
     while True:
-        logits = controller(obs)
+        policy_obs = mask_controller_hold_age(obs) if mask_hold_age_feature else obs
+        logits = controller(policy_obs)
         late_start_day = int(np.floor(float(late_hold_start) * int(max_hold)))
         late_span = max(int(max_hold) - late_start_day, 1)
         in_late_window = late_start_day <= hold_age < int(max_hold)
@@ -434,26 +516,33 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
 
 
 def update_workbook(run_row, final_rows=None):
-    if os.path.exists(RESULT_BOOK):
-        try:
-            existing = pd.read_excel(RESULT_BOOK, sheet_name="pg_controller_runs")
-        except Exception:
+    lock_path = f"{RESULT_BOOK}.lock"
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if os.path.exists(RESULT_BOOK):
+            try:
+                existing = pd.read_excel(RESULT_BOOK, sheet_name="pg_controller_runs")
+            except Exception:
+                existing = pd.DataFrame()
+            try:
+                final = pd.read_excel(RESULT_BOOK, sheet_name="final_comparison")
+            except Exception:
+                final = pd.DataFrame()
+        else:
             existing = pd.DataFrame()
-        try:
-            final = pd.read_excel(RESULT_BOOK, sheet_name="final_comparison")
-        except Exception:
             final = pd.DataFrame()
-    else:
-        existing = pd.DataFrame()
-        final = pd.DataFrame()
-    runs = pd.concat([existing, pd.DataFrame([run_row])], ignore_index=True)
-    runs = runs.drop_duplicates(subset=["run_id", "market"], keep="last")
-    if final_rows:
-        final = pd.concat([final, pd.DataFrame(final_rows)], ignore_index=True)
-        final = final.drop_duplicates(subset=["run_id", "market", "model"], keep="last")
-    with pd.ExcelWriter(RESULT_BOOK, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
-        runs.to_excel(writer, sheet_name="pg_controller_runs", index=False)
-        final.to_excel(writer, sheet_name="final_comparison", index=False)
+        runs = pd.concat([existing, pd.DataFrame([run_row])], ignore_index=True)
+        runs = runs.drop_duplicates(subset=["run_id", "market"], keep="last")
+        if final_rows:
+            final = pd.concat([final, pd.DataFrame(final_rows)], ignore_index=True)
+            final = final.drop_duplicates(subset=["run_id", "market", "model"], keep="last")
+        writer_kwargs = {"engine": "openpyxl"}
+        if os.path.exists(RESULT_BOOK):
+            writer_kwargs.update({"mode": "a", "if_sheet_exists": "replace"})
+        with pd.ExcelWriter(RESULT_BOOK, **writer_kwargs) as writer:
+            runs.to_excel(writer, sheet_name="pg_controller_runs", index=False)
+            final.to_excel(writer, sheet_name="final_comparison", index=False)
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def main():
@@ -486,6 +575,8 @@ def main():
     parser.add_argument("--aux-advantage-loss-scale", type=float, default=0.0)
     parser.add_argument("--aux-advantage-margin", type=float, default=0.0)
     parser.add_argument("--aux-advantage-weight-clip", type=float, default=0.0)
+    parser.add_argument("--mask-hold-age-feature", action="store_true")
+    parser.add_argument("--supervised-pretrain-episodes", type=int, default=0)
     parser.add_argument("--baseline-momentum", type=float, default=0.9)
     parser.add_argument("--use-rolling-baseline", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
@@ -535,6 +626,7 @@ def main():
                 constraint_logit_bias=args.constraint_logit_bias,
                 late_hold_start=args.late_hold_start,
                 late_hold_logit_bias=args.late_hold_logit_bias,
+                mask_hold_age_feature=args.mask_hold_age_feature,
             )
         eval_metrics = compute_metrics(eval_history)
         eval_penalty = violation_penalty(
@@ -586,6 +678,8 @@ def main():
             "aux_advantage_loss_scale": args.aux_advantage_loss_scale,
             "aux_advantage_margin": args.aux_advantage_margin,
             "aux_advantage_weight_clip": args.aux_advantage_weight_clip,
+            "mask_hold_age_feature": args.mask_hold_age_feature,
+            "supervised_pretrain_episodes": args.supervised_pretrain_episodes,
             "val_objective": eval_objective if args.eval_split == "val" else None,
             "val_penalty": eval_penalty if args.eval_split == "val" else None,
             "val_sharpe": eval_metrics["sharpe"] if args.eval_split == "val" else None,
@@ -607,8 +701,22 @@ def main():
     best_objective = -float("inf")
     best_path = os.path.join(out_dir, "best_pg_controller.pth")
     records = []
+    pretrain_records = []
 
     env.set_mode("train")
+    if args.supervised_pretrain_episodes > 0:
+        pretrain_records = run_supervised_pretrain(
+            env, frozen_hrl, controller, optimizer,
+            episodes=args.supervised_pretrain_episodes,
+            min_hold=min_hold, max_hold=max_hold,
+            margin=args.aux_advantage_margin,
+            weight_clip=args.aux_advantage_weight_clip,
+            grad_clip=args.grad_clip,
+            mask_hold_age_feature=args.mask_hold_age_feature,
+            logger=logger,
+            market=args.market,
+        )
+        env.set_mode("train")
     for episode in range(episodes):
         history, log_probs, entropies, constraints, stats = run_pg_episode(
             env, frozen_hrl, controller, deterministic=False,
@@ -616,6 +724,7 @@ def main():
             constraint_logit_bias=args.constraint_logit_bias,
             late_hold_start=args.late_hold_start,
             late_hold_logit_bias=args.late_hold_logit_bias,
+            mask_hold_age_feature=args.mask_hold_age_feature,
         )
         objective, metrics, penalty = episode_objective(
             history, stats["early_violation_count"], stats["long_violation_count"],
@@ -624,8 +733,8 @@ def main():
             stats["near_max_switch_rate"], args.near_max_penalty,
         )
         return_signal = (
-            baseline.advantage(metrics["sharpe"])
-            if args.use_rolling_baseline else metrics["sharpe"]
+            baseline.advantage(objective)
+            if args.use_rolling_baseline else objective
         )
         if log_probs:
             log_probs_tensor = torch.stack(log_probs)
@@ -688,6 +797,7 @@ def main():
                 constraint_logit_bias=args.constraint_logit_bias,
                 late_hold_start=args.late_hold_start,
                 late_hold_logit_bias=args.late_hold_logit_bias,
+                mask_hold_age_feature=args.mask_hold_age_feature,
             )
         val_metrics = compute_metrics(val_history)
         val_penalty = violation_penalty(
@@ -748,6 +858,7 @@ def main():
                 constraint_logit_bias=args.constraint_logit_bias,
                 late_hold_start=args.late_hold_start,
                 late_hold_logit_bias=args.late_hold_logit_bias,
+                mask_hold_age_feature=args.mask_hold_age_feature,
             )
         test_result = compute_metrics(test_history)
         final_rows.append({
@@ -766,6 +877,7 @@ def main():
         "best_validation": {**best["val_metrics"], **best["val_stats"]},
         "test_result": test_result,
         "test_stats": test_stats,
+        "pretrain_records": pretrain_records,
         "records": records,
         "config": vars(args),
         "min_hold": min_hold,
@@ -801,6 +913,8 @@ def main():
         "aux_advantage_loss_scale": args.aux_advantage_loss_scale,
         "aux_advantage_margin": args.aux_advantage_margin,
         "aux_advantage_weight_clip": args.aux_advantage_weight_clip,
+        "mask_hold_age_feature": args.mask_hold_age_feature,
+        "supervised_pretrain_episodes": args.supervised_pretrain_episodes,
         "val_objective": best.get("val_objective"),
         "val_penalty": best.get("val_penalty"),
         "val_sharpe": best["val_metrics"]["sharpe"],

@@ -31,6 +31,8 @@ def default_configs():
         "aux_advantage_loss_scale": 0.0,
         "aux_advantage_margin": 0.0,
         "aux_advantage_weight_clip": 0.0,
+        "mask_hold_age_feature": False,
+        "supervised_pretrain_episodes": 0,
     }
     configs = []
     for bias, late_bias in [(4, 0), (4, 1), (4, 2), (5, 1), (6, 1), (6, 2)]:
@@ -84,6 +86,36 @@ def default_configs():
             "aux_advantage_weight_clip": 0.0,
         })
         configs.append(cfg)
+    for aux_scale, late_start in [(1.0, 0.65), (5.0, 0.65), (5.0, 0.55)]:
+        cfg = dict(aux_base)
+        cfg.update({
+            "hidden_dim": 32,
+            "fusion_hidden": 64,
+            "late_hold_start": late_start,
+            "late_hold_logit_bias": 0.0,
+            "late_hold_loss_scale": 0.0,
+            "aux_advantage_loss_scale": aux_scale,
+            "mask_hold_age_feature": True,
+            "supervised_pretrain_episodes": 3,
+        })
+        configs.append(cfg)
+    for pretrain_episodes, aux_scale, mask_age in [
+        (3, 1.0, False),
+        (5, 1.0, False),
+        (5, 1.0, True),
+    ]:
+        cfg = dict(aux_base)
+        cfg.update({
+            "hidden_dim": 32,
+            "fusion_hidden": 64,
+            "late_hold_start": 0.65,
+            "late_hold_logit_bias": 0.0,
+            "late_hold_loss_scale": 0.0,
+            "aux_advantage_loss_scale": aux_scale,
+            "mask_hold_age_feature": mask_age,
+            "supervised_pretrain_episodes": pretrain_episodes,
+        })
+        configs.append(cfg)
     return configs
 
 
@@ -95,6 +127,8 @@ def run_id(stage, market, episodes, cfg):
         f"bias{fmt_float(cfg['constraint_logit_bias'])}",
         f"late{fmt_float(cfg['late_hold_logit_bias'])}",
         f"aux{fmt_float(cfg.get('aux_advantage_loss_scale', 0))}",
+        "maskage" if cfg.get("mask_hold_age_feature", False) else "age",
+        f"pre{cfg.get('supervised_pretrain_episodes', 0)}",
         f"lm{fmt_float(cfg['lambda_min'])}",
         f"lx{fmt_float(cfg['lambda_max'])}",
     ]
@@ -133,7 +167,10 @@ def run_one(stage, market, mode, episodes, cfg, validation_only, rerun):
         "--aux-advantage-loss-scale", str(cfg.get("aux_advantage_loss_scale", 0.0)),
         "--aux-advantage-margin", str(cfg.get("aux_advantage_margin", 0.0)),
         "--aux-advantage-weight-clip", str(cfg.get("aux_advantage_weight_clip", 0.0)),
+        "--supervised-pretrain-episodes", str(cfg.get("supervised_pretrain_episodes", 0)),
     ]
+    if cfg.get("mask_hold_age_feature", False):
+        cmd.append("--mask-hold-age-feature")
     if validation_only:
         cmd.append("--validation-only")
     subprocess.run(cmd, cwd=ROOT, check=True)

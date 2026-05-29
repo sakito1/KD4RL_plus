@@ -9,6 +9,7 @@ from pg_controller_experiment import (
     compute_reward_to_go,
     episode_objective,
     estimate_candidate_step_returns,
+    mask_controller_hold_age,
     violates_max_hold_after_hold,
     violation_penalty,
 )
@@ -96,6 +97,17 @@ class PGControllerTests(unittest.TestCase):
         self.assertLess(loss.item(), 0.2)
         loss.backward()
         self.assertIsNotNone(logits[0].grad)
+
+    def test_mask_hold_age_feature_only_zeros_first_port_state_column(self):
+        obs = {
+            "port_state": torch.tensor([[0.7, 0.1, -0.2, 0.3, 0.4, 0.5]]),
+            "other": torch.tensor([1.0]),
+        }
+        masked = mask_controller_hold_age(obs)
+        self.assertEqual(masked["port_state"][0, 0].item(), 0.0)
+        self.assertAlmostEqual(masked["port_state"][0, 1].item(), 0.1)
+        self.assertAlmostEqual(obs["port_state"][0, 0].item(), 0.7)
+        self.assertIs(masked["other"], obs["other"])
 
     def test_running_baseline_is_scalar_not_learned_value_head(self):
         baseline = RunningObjectiveBaseline(momentum=0.5)
