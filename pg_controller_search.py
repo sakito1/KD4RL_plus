@@ -24,6 +24,7 @@ def default_configs():
         "grad_clip": 10,
         "schedule_penalty": 0.5,
         "near_max_penalty": 0.5,
+        "min_boundary_penalty": 0.5,
         "late_hold_start": 0.7,
         "late_hold_loss_scale": 10,
         "pg_objective": "episode_sharpe",
@@ -32,6 +33,7 @@ def default_configs():
         "aux_advantage_margin": 0.0,
         "aux_advantage_weight_clip": 0.0,
         "mask_hold_age_feature": False,
+        "hard_boundary_mask": False,
         "supervised_pretrain_episodes": 0,
     }
     configs = []
@@ -96,6 +98,7 @@ def default_configs():
             "late_hold_loss_scale": 0.0,
             "aux_advantage_loss_scale": aux_scale,
             "mask_hold_age_feature": True,
+            "hard_boundary_mask": True,
             "supervised_pretrain_episodes": 3,
         })
         configs.append(cfg)
@@ -113,6 +116,7 @@ def default_configs():
             "late_hold_loss_scale": 0.0,
             "aux_advantage_loss_scale": aux_scale,
             "mask_hold_age_feature": mask_age,
+            "hard_boundary_mask": True,
             "supervised_pretrain_episodes": pretrain_episodes,
         })
         configs.append(cfg)
@@ -128,6 +132,7 @@ def run_id(stage, market, episodes, cfg):
         f"late{fmt_float(cfg['late_hold_logit_bias'])}",
         f"aux{fmt_float(cfg.get('aux_advantage_loss_scale', 0))}",
         "maskage" if cfg.get("mask_hold_age_feature", False) else "age",
+        "hard" if cfg.get("hard_boundary_mask", False) else "soft",
         f"pre{cfg.get('supervised_pretrain_episodes', 0)}",
         f"lm{fmt_float(cfg['lambda_min'])}",
         f"lx{fmt_float(cfg['lambda_max'])}",
@@ -162,6 +167,7 @@ def run_one(stage, market, mode, episodes, cfg, validation_only, rerun):
         "--grad-clip", str(cfg["grad_clip"]),
         "--schedule-penalty", str(cfg["schedule_penalty"]),
         "--near-max-penalty", str(cfg["near_max_penalty"]),
+        "--min-boundary-penalty", str(cfg.get("min_boundary_penalty", 0.0)),
         "--pg-objective", str(cfg["pg_objective"]),
         "--reward-gamma", str(cfg["reward_gamma"]),
         "--aux-advantage-loss-scale", str(cfg.get("aux_advantage_loss_scale", 0.0)),
@@ -171,6 +177,8 @@ def run_one(stage, market, mode, episodes, cfg, validation_only, rerun):
     ]
     if cfg.get("mask_hold_age_feature", False):
         cmd.append("--mask-hold-age-feature")
+    if cfg.get("hard_boundary_mask", False):
+        cmd.append("--hard-boundary-mask")
     if validation_only:
         cmd.append("--validation-only")
     subprocess.run(cmd, cwd=ROOT, check=True)
@@ -183,11 +191,13 @@ def score(summary):
     violations = val.get("early_violation_count", 0) + val.get("long_violation_count", 0)
     scheduled = val.get("scheduled_switch_rate", 0.0)
     near_max = val.get("near_max_switch_rate", 0.0)
+    min_boundary = val.get("min_hold_switch_rate", 0.0)
     alignment = val.get("decision_cf_alignment_rate", 0.0)
     return (
         -violations,
         -scheduled,
         -near_max,
+        -min_boundary,
         alignment,
         summary.get("best_validation_objective", val["sharpe"]),
         val["sharpe"],
@@ -231,6 +241,7 @@ def main():
                 f"early={val['early_violation_count']} long={val['long_violation_count']} "
                 f"sched={val.get('scheduled_switch_rate', 0.0):.2f} "
                 f"near_max={val.get('near_max_switch_rate', 0.0):.2f} "
+                f"min_boundary={val.get('min_hold_switch_rate', 0.0):.2f} "
                 f"cf_align={val.get('decision_cf_alignment_rate', 0.0):.2f}"
             )
             market_summaries.append(summary)
@@ -245,6 +256,7 @@ def main():
             f"early={val['early_violation_count']} long={val['long_violation_count']} "
             f"sched={val.get('scheduled_switch_rate', 0.0):.2f} "
             f"near_max={val.get('near_max_switch_rate', 0.0):.2f} "
+            f"min_boundary={val.get('min_hold_switch_rate', 0.0):.2f} "
             f"cf_align={val.get('decision_cf_alignment_rate', 0.0):.2f}"
         )
 

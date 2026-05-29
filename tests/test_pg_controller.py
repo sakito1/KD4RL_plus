@@ -54,9 +54,10 @@ class PGControllerTests(unittest.TestCase):
             history, early_count=0, long_count=0, lambda_min=1.0, lambda_max=1.0,
             scheduled_switch_rate=1.0, schedule_penalty=0.5,
             near_max_switch_rate=1.0, near_max_penalty=0.25,
+            min_boundary_switch_rate=1.0, min_boundary_penalty=0.125,
         )
-        self.assertAlmostEqual(penalty, 0.75)
-        self.assertAlmostEqual(objective, metrics["sharpe"] - 0.75)
+        self.assertAlmostEqual(penalty, 0.875)
+        self.assertAlmostEqual(objective, metrics["sharpe"] - 0.875)
 
     def test_max_hold_violation_counts_action_that_exceeds_limit(self):
         self.assertFalse(violates_max_hold_after_hold(hold_age=29, max_hold=30))

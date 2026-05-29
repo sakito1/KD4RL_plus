@@ -156,11 +156,13 @@ def violation_penalty(early_count, long_count, lambda_min, lambda_max):
 
 def episode_objective(history, early_count, long_count, lambda_min, lambda_max,
                       scheduled_switch_rate=0.0, schedule_penalty=0.0,
-                      near_max_switch_rate=0.0, near_max_penalty=0.0):
+                      near_max_switch_rate=0.0, near_max_penalty=0.0,
+                      min_boundary_switch_rate=0.0, min_boundary_penalty=0.0):
     metrics = compute_metrics(history)
     penalty = violation_penalty(early_count, long_count, lambda_min, lambda_max)
     penalty += float(schedule_penalty) * float(scheduled_switch_rate)
     penalty += float(near_max_penalty) * float(near_max_switch_rate)
+    penalty += float(min_boundary_penalty) * float(min_boundary_switch_rate)
     return float(metrics["sharpe"] - penalty), metrics, float(penalty)
 
 
@@ -365,7 +367,7 @@ def run_supervised_pretrain(env, frozen_hrl, controller, optimizer, episodes,
 def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
                    min_hold=5, max_hold=60, constraint_logit_bias=0.0,
                    late_hold_start=0.75, late_hold_logit_bias=0.0,
-                   mask_hold_age_feature=False):
+                   mask_hold_age_feature=False, hard_boundary_mask=False):
     raw_obs = env.reset()
     obs, candidate = build_candidates(env, frozen_hrl, raw_obs)
     history = [float(env.portfolio_value.item())]
@@ -400,7 +402,12 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
         if in_late_window:
             late_ramp = float((hold_age - late_start_day + 1) / late_span)
             logits[:, 0] = logits[:, 0] - float(late_hold_logit_bias) * late_ramp
-        if constraint_logit_bias:
+        if hard_boundary_mask:
+            if hold_age < int(min_hold):
+                logits[:, 1] = -1e9
+            if violates_max_hold_after_hold(hold_age, max_hold):
+                logits[:, 0] = -1e9
+        elif constraint_logit_bias:
             if hold_age < int(min_hold):
                 logits[:, 1] = logits[:, 1] - float(constraint_logit_bias)
             if violates_max_hold_after_hold(hold_age, max_hold):
@@ -416,8 +423,13 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
         switch_advantage = obs.get("candidate_step_returns")
         if switch_advantage is not None:
             switch_advantage = switch_advantage[:, 2].reshape(-1).detach()
-            aux_logits.append(logits)
-            aux_advantages.append(switch_advantage)
+            free_decision = (
+                hold_age >= int(min_hold)
+                and not violates_max_hold_after_hold(hold_age, max_hold)
+            )
+            if free_decision:
+                aux_logits.append(logits)
+                aux_advantages.append(switch_advantage)
             advantage_value = float(switch_advantage.mean().item())
             cf_advantages.append(advantage_value)
             chosen_advantage = advantage_value if action == 1 else -advantage_value
@@ -565,6 +577,7 @@ def main():
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--schedule-penalty", type=float, default=0.5)
     parser.add_argument("--near-max-penalty", type=float, default=0.5)
+    parser.add_argument("--min-boundary-penalty", type=float, default=0.0)
     parser.add_argument(
         "--pg-objective",
         choices=["episode_sharpe", "reward_to_go"],
@@ -576,6 +589,7 @@ def main():
     parser.add_argument("--aux-advantage-margin", type=float, default=0.0)
     parser.add_argument("--aux-advantage-weight-clip", type=float, default=0.0)
     parser.add_argument("--mask-hold-age-feature", action="store_true")
+    parser.add_argument("--hard-boundary-mask", action="store_true")
     parser.add_argument("--supervised-pretrain-episodes", type=int, default=0)
     parser.add_argument("--baseline-momentum", type=float, default=0.9)
     parser.add_argument("--use-rolling-baseline", action="store_true")
@@ -627,6 +641,7 @@ def main():
                 late_hold_start=args.late_hold_start,
                 late_hold_logit_bias=args.late_hold_logit_bias,
                 mask_hold_age_feature=args.mask_hold_age_feature,
+                hard_boundary_mask=args.hard_boundary_mask,
             )
         eval_metrics = compute_metrics(eval_history)
         eval_penalty = violation_penalty(
@@ -635,6 +650,7 @@ def main():
         )
         eval_penalty += args.schedule_penalty * eval_stats["scheduled_switch_rate"]
         eval_penalty += args.near_max_penalty * eval_stats["near_max_switch_rate"]
+        eval_penalty += args.min_boundary_penalty * eval_stats["min_hold_switch_rate"]
         eval_objective = float(eval_metrics["sharpe"] - eval_penalty)
         elapsed = time.time() - start
         summary = {
@@ -673,12 +689,14 @@ def main():
             "grad_clip": args.grad_clip,
             "schedule_penalty": args.schedule_penalty,
             "near_max_penalty": args.near_max_penalty,
+            "min_boundary_penalty": args.min_boundary_penalty,
             "pg_objective": args.pg_objective,
             "reward_gamma": args.reward_gamma,
             "aux_advantage_loss_scale": args.aux_advantage_loss_scale,
             "aux_advantage_margin": args.aux_advantage_margin,
             "aux_advantage_weight_clip": args.aux_advantage_weight_clip,
             "mask_hold_age_feature": args.mask_hold_age_feature,
+            "hard_boundary_mask": args.hard_boundary_mask,
             "supervised_pretrain_episodes": args.supervised_pretrain_episodes,
             "val_objective": eval_objective if args.eval_split == "val" else None,
             "val_penalty": eval_penalty if args.eval_split == "val" else None,
@@ -725,12 +743,14 @@ def main():
             late_hold_start=args.late_hold_start,
             late_hold_logit_bias=args.late_hold_logit_bias,
             mask_hold_age_feature=args.mask_hold_age_feature,
+            hard_boundary_mask=args.hard_boundary_mask,
         )
         objective, metrics, penalty = episode_objective(
             history, stats["early_violation_count"], stats["long_violation_count"],
             args.lambda_min, args.lambda_max,
             stats["scheduled_switch_rate"], args.schedule_penalty,
             stats["near_max_switch_rate"], args.near_max_penalty,
+            stats["min_hold_switch_rate"], args.min_boundary_penalty,
         )
         return_signal = (
             baseline.advantage(objective)
@@ -798,6 +818,7 @@ def main():
                 late_hold_start=args.late_hold_start,
                 late_hold_logit_bias=args.late_hold_logit_bias,
                 mask_hold_age_feature=args.mask_hold_age_feature,
+                hard_boundary_mask=args.hard_boundary_mask,
             )
         val_metrics = compute_metrics(val_history)
         val_penalty = violation_penalty(
@@ -806,6 +827,7 @@ def main():
         )
         val_penalty += args.schedule_penalty * val_stats["scheduled_switch_rate"]
         val_penalty += args.near_max_penalty * val_stats["near_max_switch_rate"]
+        val_penalty += args.min_boundary_penalty * val_stats["min_hold_switch_rate"]
         val_objective = float(val_metrics["sharpe"] - val_penalty)
         record = {
             "episode": episode + 1,
@@ -859,6 +881,7 @@ def main():
                 late_hold_start=args.late_hold_start,
                 late_hold_logit_bias=args.late_hold_logit_bias,
                 mask_hold_age_feature=args.mask_hold_age_feature,
+                hard_boundary_mask=args.hard_boundary_mask,
             )
         test_result = compute_metrics(test_history)
         final_rows.append({
@@ -908,12 +931,14 @@ def main():
         "grad_clip": args.grad_clip,
         "schedule_penalty": args.schedule_penalty,
         "near_max_penalty": args.near_max_penalty,
+        "min_boundary_penalty": args.min_boundary_penalty,
         "pg_objective": args.pg_objective,
         "reward_gamma": args.reward_gamma,
         "aux_advantage_loss_scale": args.aux_advantage_loss_scale,
         "aux_advantage_margin": args.aux_advantage_margin,
         "aux_advantage_weight_clip": args.aux_advantage_weight_clip,
         "mask_hold_age_feature": args.mask_hold_age_feature,
+        "hard_boundary_mask": args.hard_boundary_mask,
         "supervised_pretrain_episodes": args.supervised_pretrain_episodes,
         "val_objective": best.get("val_objective"),
         "val_penalty": best.get("val_penalty"),
