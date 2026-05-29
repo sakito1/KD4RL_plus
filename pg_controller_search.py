@@ -28,6 +28,9 @@ def default_configs():
         "late_hold_loss_scale": 10,
         "pg_objective": "episode_sharpe",
         "reward_gamma": 1.0,
+        "aux_advantage_loss_scale": 0.0,
+        "aux_advantage_margin": 0.0,
+        "aux_advantage_weight_clip": 0.0,
     }
     configs = []
     for bias, late_bias in [(4, 0), (4, 1), (4, 2), (5, 1), (6, 1), (6, 2)]:
@@ -57,6 +60,30 @@ def default_configs():
             "late_hold_logit_bias": 1,
         })
         configs.append(cfg)
+    aux_base = dict(base)
+    aux_base.update({
+        "late_hold_loss_scale": 2,
+        "late_hold_logit_bias": 0.5,
+        "constraint_logit_bias": 4,
+        "lr": 1e-3,
+        "ent_coef": 0.01,
+    })
+    for aux_scale, late_start, hidden_dim in [
+        (0.25, 0.65, 32),
+        (0.5, 0.65, 32),
+        (1.0, 0.65, 32),
+        (0.5, 0.55, 64),
+    ]:
+        cfg = dict(aux_base)
+        cfg.update({
+            "hidden_dim": hidden_dim,
+            "fusion_hidden": 64 if hidden_dim == 32 else 128,
+            "late_hold_start": late_start,
+            "aux_advantage_loss_scale": aux_scale,
+            "aux_advantage_margin": 0.0,
+            "aux_advantage_weight_clip": 0.0,
+        })
+        configs.append(cfg)
     return configs
 
 
@@ -67,6 +94,7 @@ def run_id(stage, market, episodes, cfg):
         f"lr{fmt_float(cfg['lr'])}", f"ent{fmt_float(cfg['ent_coef'])}",
         f"bias{fmt_float(cfg['constraint_logit_bias'])}",
         f"late{fmt_float(cfg['late_hold_logit_bias'])}",
+        f"aux{fmt_float(cfg.get('aux_advantage_loss_scale', 0))}",
         f"lm{fmt_float(cfg['lambda_min'])}",
         f"lx{fmt_float(cfg['lambda_max'])}",
     ]
@@ -102,6 +130,9 @@ def run_one(stage, market, mode, episodes, cfg, validation_only, rerun):
         "--near-max-penalty", str(cfg["near_max_penalty"]),
         "--pg-objective", str(cfg["pg_objective"]),
         "--reward-gamma", str(cfg["reward_gamma"]),
+        "--aux-advantage-loss-scale", str(cfg.get("aux_advantage_loss_scale", 0.0)),
+        "--aux-advantage-margin", str(cfg.get("aux_advantage_margin", 0.0)),
+        "--aux-advantage-weight-clip", str(cfg.get("aux_advantage_weight_clip", 0.0)),
     ]
     if validation_only:
         cmd.append("--validation-only")
@@ -115,10 +146,12 @@ def score(summary):
     violations = val.get("early_violation_count", 0) + val.get("long_violation_count", 0)
     scheduled = val.get("scheduled_switch_rate", 0.0)
     near_max = val.get("near_max_switch_rate", 0.0)
+    alignment = val.get("decision_cf_alignment_rate", 0.0)
     return (
         -violations,
         -scheduled,
         -near_max,
+        alignment,
         summary.get("best_validation_objective", val["sharpe"]),
         val["sharpe"],
         val["total_ret"],
@@ -160,7 +193,8 @@ def main():
                 f"switch={val['switch_count']} "
                 f"early={val['early_violation_count']} long={val['long_violation_count']} "
                 f"sched={val.get('scheduled_switch_rate', 0.0):.2f} "
-                f"near_max={val.get('near_max_switch_rate', 0.0):.2f}"
+                f"near_max={val.get('near_max_switch_rate', 0.0):.2f} "
+                f"cf_align={val.get('decision_cf_alignment_rate', 0.0):.2f}"
             )
             market_summaries.append(summary)
             all_summaries.append(summary)
@@ -173,7 +207,8 @@ def main():
             f"switch={val['switch_count']} "
             f"early={val['early_violation_count']} long={val['long_violation_count']} "
             f"sched={val.get('scheduled_switch_rate', 0.0):.2f} "
-            f"near_max={val.get('near_max_switch_rate', 0.0):.2f}"
+            f"near_max={val.get('near_max_switch_rate', 0.0):.2f} "
+            f"cf_align={val.get('decision_cf_alignment_rate', 0.0):.2f}"
         )
 
     report_path = ROOT / "results" / "pg_controller" / f"{args.stage}_summary.json"

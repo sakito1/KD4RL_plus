@@ -4,9 +4,11 @@ import torch
 
 from pg_controller import PGControllerNet, RunningObjectiveBaseline
 from pg_controller_experiment import (
+    counterfactual_advantage_loss,
     compute_metrics,
     compute_reward_to_go,
     episode_objective,
+    estimate_candidate_step_returns,
     violates_max_hold_after_hold,
     violation_penalty,
 )
@@ -65,6 +67,35 @@ class PGControllerTests(unittest.TestCase):
         )
         self.assertEqual(returns.shape, (3,))
         self.assertGreater(returns[0], returns[-1])
+
+    def test_counterfactual_step_return_does_not_mutate_env(self):
+        class DummyEnv:
+            pass
+
+        env = DummyEnv()
+        env.day = 1
+        env.transaction_cost_pct = 0.0
+        env.ratio = torch.tensor([[1.0, 1.10], [1.0, 0.90]])
+        weights = torch.tensor([[0.5, 0.5]])
+        hold_exec = torch.tensor([[1.0, 0.0]])
+        switch_exec = torch.tensor([[0.0, 1.0]])
+
+        returns, costs = estimate_candidate_step_returns(
+            env, weights, hold_exec, switch_exec
+        )
+        self.assertEqual(returns.shape, (1, 3))
+        self.assertEqual(costs.shape, (1, 3))
+        self.assertGreater(returns[0, 0].item(), returns[0, 1].item())
+        self.assertLess(returns[0, 2].item(), 0.0)
+        self.assertEqual(env.day, 1)
+
+    def test_auxiliary_advantage_loss_prefers_positive_switch_margin(self):
+        logits = [torch.tensor([[0.0, 2.0], [2.0, 0.0]], requires_grad=True)]
+        advantages = [torch.tensor([0.01, -0.01])]
+        loss = counterfactual_advantage_loss(logits, advantages)
+        self.assertLess(loss.item(), 0.2)
+        loss.backward()
+        self.assertIsNotNone(logits[0].grad)
 
     def test_running_baseline_is_scalar_not_learned_value_head(self):
         baseline = RunningObjectiveBaseline(momentum=0.5)

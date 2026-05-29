@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 
 import utils.config as runtime_config
 from env import PPO_Env
@@ -166,6 +167,57 @@ def violates_max_hold_after_hold(hold_age, max_hold):
     return int(hold_age) + 1 > int(max_hold)
 
 
+def estimate_candidate_step_returns(env, weights_drift, hold_exec, switch_exec):
+    """One-step counterfactual net log returns for the two executable candidates.
+
+    This mirrors the environment's next-step accounting without mutating the
+    environment. The values are used only as an auxiliary training label, never
+    as controller input at validation/test time.
+    """
+    r_future = env.ratio[:, env.day]
+    current_weights = weights_drift.reshape(-1).detach()
+
+    def net_log_return(exec_weights):
+        final_weights = exec_weights.reshape(-1).detach()
+        turnover = torch.sum(torch.abs(final_weights - current_weights))
+        cost_rate = turnover * env.transaction_cost_pct
+        net_growth = torch.sum(final_weights * r_future) * torch.clamp(
+            1.0 - cost_rate, min=1e-8
+        )
+        return torch.log(torch.clamp(net_growth, min=1e-12)), cost_rate
+
+    hold_ret, hold_cost = net_log_return(hold_exec)
+    switch_ret, switch_cost = net_log_return(switch_exec)
+    candidate_returns = torch.stack(
+        [hold_ret, switch_ret, switch_ret - hold_ret], dim=0
+    ).unsqueeze(0)
+    candidate_cost_rates = torch.stack(
+        [hold_cost, switch_cost, switch_cost - hold_cost], dim=0
+    ).unsqueeze(0)
+    return candidate_returns, candidate_cost_rates
+
+
+def counterfactual_advantage_loss(logits_list, advantages_list, margin=0.0,
+                                  weight_clip=0.0):
+    if not logits_list:
+        return None
+    logits = torch.cat(logits_list, dim=0)
+    advantages = torch.cat(advantages_list, dim=0).reshape(-1)
+    valid = torch.abs(advantages) > float(margin)
+    if not bool(valid.any().item()):
+        return torch.zeros((), dtype=logits.dtype, device=logits.device)
+
+    switch_logit_margin = logits[:, 1] - logits[:, 0]
+    target = (advantages > 0).to(dtype=logits.dtype)
+    loss = F.binary_cross_entropy_with_logits(
+        switch_logit_margin[valid], target[valid], reduction="none"
+    )
+    if float(weight_clip) > 0:
+        weight = torch.clamp(torch.abs(advantages[valid]) / float(weight_clip), max=1.0)
+        loss = loss * weight
+    return loss.mean()
+
+
 def build_candidates(env, frozen_hrl, obs):
     with torch.inference_mode():
         weights = obs["weights_drift"]
@@ -188,6 +240,9 @@ def build_candidates(env, frozen_hrl, obs):
         candidate_costs = torch.stack(
             [cost_hold, cost_switch, cost_switch - cost_hold], dim=1
         )
+        candidate_returns, candidate_cost_rates = estimate_candidate_step_returns(
+            env, weights, hold_exec, switch_exec
+        )
     def normal_tensor(value):
         return value.detach().clone()
 
@@ -202,6 +257,8 @@ def build_candidates(env, frozen_hrl, obs):
     enriched_obs["held_p"] = normal_tensor(obs["held_p"])
     enriched_obs["candidate_switch_base"] = normal_tensor(switch_base)
     enriched_obs["candidate_costs"] = normal_tensor(candidate_costs)
+    enriched_obs["candidate_step_returns"] = normal_tensor(candidate_returns)
+    enriched_obs["candidate_step_cost_rates"] = normal_tensor(candidate_cost_rates)
     candidate = {
         "hold_base": hold_base,
         "switch_base": switch_base,
@@ -233,6 +290,7 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
     history = [float(env.portfolio_value.item())]
     log_probs, entropies = [], []
     min_constraint_probs, max_constraint_probs, late_hold_probs = [], [], []
+    aux_logits, aux_advantages = [], []
     switch_count = 0
     hold_age = 0
     holding_lengths = []
@@ -245,6 +303,11 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
     p_switch_pre_min = []
     p_switch_post_max = []
     p_hold_post_max = []
+    cf_advantages = []
+    chosen_cf_advantages = []
+    switch_positive_advantage = 0
+    hold_negative_advantage = 0
+    aligned_decisions = 0
 
     while True:
         logits = controller(obs)
@@ -268,6 +331,21 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
         probs = dist.probs
         p_switch = float(probs[:, 1].detach().mean().item())
         p_hold = float(probs[:, 0].detach().mean().item())
+        switch_advantage = obs.get("candidate_step_returns")
+        if switch_advantage is not None:
+            switch_advantage = switch_advantage[:, 2].reshape(-1).detach()
+            aux_logits.append(logits)
+            aux_advantages.append(switch_advantage)
+            advantage_value = float(switch_advantage.mean().item())
+            cf_advantages.append(advantage_value)
+            chosen_advantage = advantage_value if action == 1 else -advantage_value
+            chosen_cf_advantages.append(chosen_advantage)
+            if action == 1 and advantage_value > 0:
+                switch_positive_advantage += 1
+            if action == 0 and advantage_value <= 0:
+                hold_negative_advantage += 1
+            if (action == 1 and advantage_value > 0) or (action == 0 and advantage_value <= 0):
+                aligned_decisions += 1
         p_switch_all.append(p_switch)
         if hold_age < int(min_hold):
             p_switch_pre_min.append(p_switch)
@@ -333,11 +411,24 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
         "avg_p_switch_pre_min": float(np.mean(p_switch_pre_min)) if p_switch_pre_min else 0.0,
         "avg_p_switch_post_max": float(np.mean(p_switch_post_max)) if p_switch_post_max else 0.0,
         "avg_p_hold_post_max": float(np.mean(p_hold_post_max)) if p_hold_post_max else 0.0,
+        "cf_switch_advantage_mean": float(np.mean(cf_advantages)) if cf_advantages else 0.0,
+        "cf_switch_advantage_abs_mean": float(np.mean(np.abs(cf_advantages))) if cf_advantages else 0.0,
+        "cf_switch_advantage_positive_rate": float(
+            np.mean(np.asarray(cf_advantages) > 0)
+        ) if cf_advantages else 0.0,
+        "chosen_cf_advantage_mean": float(np.mean(chosen_cf_advantages)) if chosen_cf_advantages else 0.0,
+        "decision_cf_alignment_rate": float(aligned_decisions / max(len(cf_advantages), 1)),
+        "switch_positive_advantage_rate": float(switch_positive_advantage / max(switch_count, 1)),
+        "hold_negative_advantage_rate": float(
+            hold_negative_advantage / max((len(cf_advantages) - switch_count), 1)
+        ),
     }
     constraints = {
         "min_probs": min_constraint_probs,
         "late_hold_probs": late_hold_probs,
         "max_probs": max_constraint_probs,
+        "aux_logits": aux_logits if not deterministic else [],
+        "aux_advantages": aux_advantages if not deterministic else [],
     }
     return history, log_probs, entropies, constraints, stats
 
@@ -392,6 +483,9 @@ def main():
     )
     parser.add_argument("--reward-gamma", type=float, default=1.0)
     parser.add_argument("--no-reward-standardize", action="store_true")
+    parser.add_argument("--aux-advantage-loss-scale", type=float, default=0.0)
+    parser.add_argument("--aux-advantage-margin", type=float, default=0.0)
+    parser.add_argument("--aux-advantage-weight-clip", type=float, default=0.0)
     parser.add_argument("--baseline-momentum", type=float, default=0.9)
     parser.add_argument("--use-rolling-baseline", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
@@ -489,6 +583,9 @@ def main():
             "near_max_penalty": args.near_max_penalty,
             "pg_objective": args.pg_objective,
             "reward_gamma": args.reward_gamma,
+            "aux_advantage_loss_scale": args.aux_advantage_loss_scale,
+            "aux_advantage_margin": args.aux_advantage_margin,
+            "aux_advantage_weight_clip": args.aux_advantage_weight_clip,
             "val_objective": eval_objective if args.eval_split == "val" else None,
             "val_penalty": eval_penalty if args.eval_split == "val" else None,
             "val_sharpe": eval_metrics["sharpe"] if args.eval_split == "val" else None,
@@ -548,6 +645,14 @@ def main():
                     constraints["max_probs"]
                 ).sum()
             constraint_loss = args.constraint_loss_scale * constraint_loss
+            aux_loss = counterfactual_advantage_loss(
+                constraints.get("aux_logits", []),
+                constraints.get("aux_advantages", []),
+                margin=args.aux_advantage_margin,
+                weight_clip=args.aux_advantage_weight_clip,
+            )
+            if aux_loss is None:
+                aux_loss = torch.tensor(0.0, device=device)
             if args.pg_objective == "reward_to_go":
                 weights = compute_reward_to_go(
                     history,
@@ -559,6 +664,7 @@ def main():
             else:
                 policy_loss = -log_prob_sum * float(return_signal)
             loss = policy_loss
+            loss = loss + args.aux_advantage_loss_scale * aux_loss
             loss = loss + constraint_loss - args.ent_coef * entropy_mean
             optimizer.zero_grad()
             loss.backward()
@@ -567,10 +673,12 @@ def main():
             loss_value = float(loss.item())
             policy_loss_value = float(policy_loss.detach().item())
             constraint_loss_value = float(constraint_loss.detach().item())
+            aux_loss_value = float(aux_loss.detach().item())
         else:
             loss_value = None
             policy_loss_value = None
             constraint_loss_value = None
+            aux_loss_value = None
 
         env.set_mode("val")
         with torch.inference_mode():
@@ -597,6 +705,7 @@ def main():
             "train_return_signal": return_signal,
             "train_policy_loss": policy_loss_value,
             "train_constraint_loss": constraint_loss_value,
+            "train_aux_advantage_loss": aux_loss_value,
             "train_loss": loss_value,
             "val_objective": val_objective,
             "val_penalty": val_penalty,
@@ -689,6 +798,9 @@ def main():
         "near_max_penalty": args.near_max_penalty,
         "pg_objective": args.pg_objective,
         "reward_gamma": args.reward_gamma,
+        "aux_advantage_loss_scale": args.aux_advantage_loss_scale,
+        "aux_advantage_margin": args.aux_advantage_margin,
+        "aux_advantage_weight_clip": args.aux_advantage_weight_clip,
         "val_objective": best.get("val_objective"),
         "val_penalty": best.get("val_penalty"),
         "val_sharpe": best["val_metrics"]["sharpe"],
