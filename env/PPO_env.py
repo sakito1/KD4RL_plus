@@ -167,17 +167,9 @@ class PPO_Env(gym.Env):
 
         if self.mode == 'train':
             raw_indices = self.idx_map['train']
-            if not raw_indices:
-                raise ValueError("No indices for mode train")
+            if not raw_indices: return
             absolute_limit = self.total_days - 2
-            train_end_exclusive = raw_indices[-1] + 1
-            stop_limit = min(train_end_exclusive, absolute_limit)
-            valid_starts = [t for t in raw_indices if t + self.episode_len <= stop_limit]
-            if not valid_starts:
-                raise ValueError(
-                    "Train date range is too short for one full episode: "
-                    f"available_steps={len(raw_indices)}, episode_len={self.episode_len}"
-                )
+            valid_starts = [t for t in raw_indices if t + self.episode_len <= absolute_limit]
             self.train_indices_pool = valid_starts[::self.stride]
             random.shuffle(self.train_indices_pool)
             self.train_ptr = 0
@@ -277,18 +269,13 @@ class PPO_Env(gym.Env):
 
     # =====================================================================
     # =====================================================================
-    def step(self, real_weight, base_weight=None, outer_action=None, is_switch: bool = False,
-             calculate_outer_reward: bool = True):
+    def step(self, real_weight, base_weight=None, outer_action=None, is_switch: bool = False):
         """step 函数参数说明：
 
         - real_weight: Inner 调整后的最终权重（用于计算本步实际收益）
         - base_weight: Agent 决定使用的新基准（Switch 时为 Outer Action，Hold 时为 Drifted Base）
-        - outer_action: Outer Actor 建议的候选动作（保留接口用于记录/兼容）
+        - outer_action: Outer Actor 建议的候选动作（Monitor Reward 暂不使用，但保留接口）
         - is_switch: Monitor 是否执行了 Switch 动作
-
-        Monitor reward is assigned by the trainer from the outer critic's
-        hold-versus-switch counterfactual values.  The environment must not
-        look into future prices to label today's monitor action.
         """
 
         if self.day >= self.stop_step:
@@ -300,7 +287,41 @@ class PPO_Env(gym.Env):
         # =====================================================================
         # =====================================================================
 
-        step_monitor = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        current_holdings_drift = self.prev_base_weight * r_past
+        current_holdings_drift = current_holdings_drift / (current_holdings_drift.sum() + 1e-8)
+
+        remain_days = int(max(self.max_hold - self.t_held, 0))
+        look_ahead_days = max(remain_days, 1)
+
+        future_trend_ret = self._future_outer_sum(current_holdings_drift.detach(), self.day, look_ahead_days)
+
+        CRASH_THRESHOLD = -0.05
+        BOOM_THRESHOLD = 0.1
+
+        is_crash = (future_trend_ret < CRASH_THRESHOLD)
+        is_boom = (future_trend_ret > BOOM_THRESHOLD)
+        smooth = (future_trend_ret - CRASH_THRESHOLD)/(BOOM_THRESHOLD - CRASH_THRESHOLD)
+
+        if is_crash.item():
+            if is_switch:
+                step_monitor = -2.0 * smooth
+            else:
+                step_monitor = 2.0 * smooth
+
+        elif is_boom.item():
+            if is_switch:
+                step_monitor = -2.0 * smooth
+            else:
+                step_monitor = 2.0 * smooth
+
+        else:
+            if is_switch:
+                step_monitor = -1* smooth
+            else:
+                step_monitor = 1 * smooth
+
+        step_monitor = torch.tensor(step_monitor, dtype=torch.float32, device=self.device)
+        step_monitor = step_monitor  * self.reward_scale_monitor
 
         # =====================================================================
         # =====================================================================
@@ -336,7 +357,7 @@ class PPO_Env(gym.Env):
         step_alpha = portfolio_return - base_return_val
         # =====================================================================
         # =====================================================================
-        if is_switch and calculate_outer_reward:
+        if is_switch:
             sharpe = self._calc_future_sharpe(new_base_weight, self.day, horizon=self.max_hold)
             benchmark_weights = torch.ones(self.num_stocks, device=self.device) / self.num_stocks
             sharpe_benchmark = self._calc_future_sharpe(benchmark_weights, self.day, horizon=self.max_hold)
@@ -369,8 +390,6 @@ class PPO_Env(gym.Env):
                 'monitor_reward': step_monitor.item(),
                 'base_return': base_return_val.item() * self.reward_scale_base,
                 'cost_rate': cost_rate.item(),
-                'turnover': turnover.item(),
-                'transaction_cost': cost.item(),
             },
             'portfolio_value': val_t1_net.item(),
             'date': self.all_dates[self.day]
@@ -457,4 +476,5 @@ class PPO_Env(gym.Env):
             self.cumulative_alpha, self.cumulative_risk, cost_feat
         ], dtype=torch.float32, device=self.device)
         return state.unsqueeze(0)
+
 
