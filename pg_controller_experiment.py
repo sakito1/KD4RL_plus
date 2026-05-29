@@ -261,6 +261,9 @@ def build_candidates(env, frozen_hrl, obs):
     enriched_obs["ssm"] = {
         "z": normal_tensor(obs["ssm"]["z"]),
         "h": normal_tensor(obs["ssm"]["h"]),
+        "p": normal_tensor(obs["ssm"]["p"]),
+        "q_bear": normal_tensor(obs["ssm"]["q_bear"]),
+        "q_bull": normal_tensor(obs["ssm"]["q_bull"]),
     }
     enriched_obs["weights_drift"] = normal_tensor(obs["weights_drift"])
     enriched_obs["base_drift"] = normal_tensor(obs["base_drift"])
@@ -282,14 +285,34 @@ def build_candidates(env, frozen_hrl, obs):
 def execute_action(env, candidate, action):
     base = candidate["switch_base"] if action == 1 else candidate["hold_base"]
     weights = candidate["switch_exec"] if action == 1 else candidate["hold_exec"]
+    estimated_turnover = 0.0
+    estimated_cost = 0.0
+    if hasattr(env, "ratio") and hasattr(env, "prev_weights") and env.day > 0:
+        with torch.inference_mode():
+            r_past = env.ratio[:, env.day - 1]
+            weight_drifted = env.prev_weights * r_past
+            val_t1_raw = env.portfolio_value * weight_drifted.sum()
+            weight_drifted_norm = weight_drifted / (weight_drifted.sum() + 1e-8)
+            turnover = torch.sum(torch.abs(weights.flatten().detach() - weight_drifted_norm))
+            cost = val_t1_raw * turnover * env.transaction_cost_pct
+            estimated_turnover = float(turnover.item())
+            estimated_cost = float(cost.item())
     with torch.inference_mode():
-        next_obs, _, done, info = env.step(
-            weights,
-            base,
-            outer_action=candidate["switch_base"],
-            is_switch=(action == 1),
-            calculate_outer_reward=False,
-        )
+        step_kwargs = {
+            "outer_action": candidate["switch_base"],
+            "is_switch": (action == 1),
+            "calculate_outer_reward": False,
+        }
+        try:
+            next_obs, _, done, info = env.step(weights, base, **step_kwargs)
+        except TypeError as exc:
+            if "calculate_outer_reward" not in str(exc):
+                raise
+            step_kwargs.pop("calculate_outer_reward")
+            next_obs, _, done, info = env.step(weights, base, **step_kwargs)
+    rewards = info.setdefault("rewards", {})
+    rewards.setdefault("turnover", estimated_turnover)
+    rewards.setdefault("transaction_cost", estimated_cost)
     return next_obs, done, info
 
 
@@ -391,10 +414,22 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
     switch_positive_advantage = 0
     hold_negative_advantage = 0
     aligned_decisions = 0
+    gate_series = {
+        "gate_mean": [],
+        "gate_std": [],
+        "gate_max": [],
+        "gate_live": [],
+        "gate_switch_minus_hold": [],
+        "gate_top5_mass": [],
+    }
 
     while True:
         policy_obs = mask_controller_hold_age(obs) if mask_hold_age_feature else obs
         logits = controller(policy_obs)
+        with torch.no_grad():
+            gate_diag = controller.gate_diagnostics(policy_obs)
+            for key, values in gate_diag.items():
+                gate_series[key].append(float(values.detach().mean().item()))
         late_start_day = int(np.floor(float(late_hold_start) * int(max_hold)))
         late_span = max(int(max_hold) - late_start_day, 1)
         in_late_window = late_start_day <= hold_age < int(max_hold)
@@ -516,6 +551,10 @@ def run_pg_episode(env, frozen_hrl, controller, deterministic=False,
         "hold_negative_advantage_rate": float(
             hold_negative_advantage / max((len(cf_advantages) - switch_count), 1)
         ),
+        **{
+            key: float(np.mean(values)) if values else 0.0
+            for key, values in gate_series.items()
+        },
     }
     constraints = {
         "min_probs": min_constraint_probs,
@@ -591,6 +630,14 @@ def main():
     parser.add_argument("--mask-hold-age-feature", action="store_true")
     parser.add_argument("--hard-boundary-mask", action="store_true")
     parser.add_argument("--supervised-pretrain-episodes", type=int, default=0)
+    parser.add_argument("--disable-risk-gate", action="store_true")
+    parser.add_argument("--risk-gate-floor", type=float, default=0.05)
+    parser.add_argument("--risk-gate-prior-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--embedding-mode",
+        choices=["full", "hold_delta", "live_delta", "delta"],
+        default="full",
+    )
     parser.add_argument("--baseline-momentum", type=float, default=0.9)
     parser.add_argument("--use-rolling-baseline", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
@@ -623,6 +670,10 @@ def main():
     controller = PGControllerNet(
         hidden_dim=args.hidden_dim,
         fusion_hidden=args.fusion_hidden,
+        use_risk_gate=not args.disable_risk_gate,
+        risk_gate_floor=args.risk_gate_floor,
+        risk_gate_prior_scale=args.risk_gate_prior_scale,
+        embedding_mode=args.embedding_mode,
     ).to(device)
     optimizer = torch.optim.Adam(controller.parameters(), lr=args.lr)
     baseline = RunningObjectiveBaseline(momentum=args.baseline_momentum)
@@ -698,6 +749,10 @@ def main():
             "mask_hold_age_feature": args.mask_hold_age_feature,
             "hard_boundary_mask": args.hard_boundary_mask,
             "supervised_pretrain_episodes": args.supervised_pretrain_episodes,
+            "use_risk_gate": not args.disable_risk_gate,
+            "risk_gate_floor": args.risk_gate_floor,
+            "risk_gate_prior_scale": args.risk_gate_prior_scale,
+            "embedding_mode": args.embedding_mode,
             "val_objective": eval_objective if args.eval_split == "val" else None,
             "val_penalty": eval_penalty if args.eval_split == "val" else None,
             "val_sharpe": eval_metrics["sharpe"] if args.eval_split == "val" else None,
@@ -940,6 +995,10 @@ def main():
         "mask_hold_age_feature": args.mask_hold_age_feature,
         "hard_boundary_mask": args.hard_boundary_mask,
         "supervised_pretrain_episodes": args.supervised_pretrain_episodes,
+        "use_risk_gate": not args.disable_risk_gate,
+        "risk_gate_floor": args.risk_gate_floor,
+        "risk_gate_prior_scale": args.risk_gate_prior_scale,
+        "embedding_mode": args.embedding_mode,
         "val_objective": best.get("val_objective"),
         "val_penalty": best.get("val_penalty"),
         "val_sharpe": best["val_metrics"]["sharpe"],

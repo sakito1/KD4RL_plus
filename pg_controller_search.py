@@ -35,6 +35,10 @@ def default_configs():
         "mask_hold_age_feature": False,
         "hard_boundary_mask": False,
         "supervised_pretrain_episodes": 0,
+        "disable_risk_gate": False,
+        "risk_gate_floor": 0.05,
+        "risk_gate_prior_scale": 1.0,
+        "embedding_mode": "full",
     }
     configs = []
     for bias, late_bias in [(4, 0), (4, 1), (4, 2), (5, 1), (6, 1), (6, 2)]:
@@ -133,6 +137,8 @@ def run_id(stage, market, episodes, cfg):
         f"aux{fmt_float(cfg.get('aux_advantage_loss_scale', 0))}",
         "maskage" if cfg.get("mask_hold_age_feature", False) else "age",
         "hard" if cfg.get("hard_boundary_mask", False) else "soft",
+        "nogate" if cfg.get("disable_risk_gate", False) else f"gate{fmt_float(cfg.get('risk_gate_prior_scale', 1))}",
+        cfg.get("embedding_mode", "full"),
         f"pre{cfg.get('supervised_pretrain_episodes', 0)}",
         f"lm{fmt_float(cfg['lambda_min'])}",
         f"lx{fmt_float(cfg['lambda_max'])}",
@@ -174,11 +180,16 @@ def run_one(stage, market, mode, episodes, cfg, validation_only, rerun):
         "--aux-advantage-margin", str(cfg.get("aux_advantage_margin", 0.0)),
         "--aux-advantage-weight-clip", str(cfg.get("aux_advantage_weight_clip", 0.0)),
         "--supervised-pretrain-episodes", str(cfg.get("supervised_pretrain_episodes", 0)),
+        "--risk-gate-floor", str(cfg.get("risk_gate_floor", 0.05)),
+        "--risk-gate-prior-scale", str(cfg.get("risk_gate_prior_scale", 1.0)),
+        "--embedding-mode", str(cfg.get("embedding_mode", "full")),
     ]
     if cfg.get("mask_hold_age_feature", False):
         cmd.append("--mask-hold-age-feature")
     if cfg.get("hard_boundary_mask", False):
         cmd.append("--hard-boundary-mask")
+    if cfg.get("disable_risk_gate", False):
+        cmd.append("--disable-risk-gate")
     if validation_only:
         cmd.append("--validation-only")
     subprocess.run(cmd, cwd=ROOT, check=True)

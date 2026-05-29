@@ -9,6 +9,7 @@ from pg_controller_experiment import (
     compute_reward_to_go,
     episode_objective,
     estimate_candidate_step_returns,
+    execute_action,
     mask_controller_hold_age,
     violates_max_hold_after_hold,
     violation_penalty,
@@ -23,6 +24,9 @@ class PGControllerTests(unittest.TestCase):
             "ssm": {
                 "z": torch.randn(1, n, 16),
                 "h": torch.randn(1, n, 16),
+                "p": torch.rand(1, n),
+                "q_bear": torch.rand(1, n),
+                "q_bull": torch.rand(1, n),
             },
             "weights_drift": torch.softmax(torch.randn(1, n), dim=1),
             "base_drift": torch.softmax(torch.randn(1, n), dim=1),
@@ -35,10 +39,84 @@ class PGControllerTests(unittest.TestCase):
         self.assertEqual(logits.shape, (1, 2))
         action, log_prob, entropy = net.act(obs, deterministic=False)
         self.assertEqual(action.shape, (1,))
+        gate_diag = net.gate_diagnostics(obs)
+        self.assertIn("gate_mean", gate_diag)
+        self.assertEqual(gate_diag["gate_mean"].shape, (1,))
         loss = -log_prob.sum() - 0.01 * entropy.mean()
         loss.backward()
         grads = [p.grad for p in net.parameters() if p.requires_grad]
         self.assertTrue(any(g is not None and torch.isfinite(g).all() for g in grads))
+
+    def test_risk_gate_prior_focuses_bearish_assets_initially(self):
+        net = PGControllerNet(risk_gate_prior_scale=2.0)
+        n = 2
+        obs = {
+            "ssm": {
+                "z": torch.zeros(1, n, 16),
+                "h": torch.zeros(1, n, 16),
+                "p": torch.tensor([[0.2, 0.8]]),
+                "q_bear": torch.tensor([[0.9, 0.1]]),
+                "q_bull": torch.tensor([[0.1, 0.9]]),
+            },
+            "weights_drift": torch.tensor([[0.5, 0.5]]),
+            "base_drift": torch.tensor([[0.5, 0.5]]),
+            "candidate_switch_base": torch.tensor([[0.5, 0.5]]),
+            "port_state": torch.zeros(1, 6),
+            "held_p": torch.zeros(1),
+            "candidate_costs": torch.zeros(1, 3),
+        }
+        asset_emb = net.asset_projection(torch.zeros(1, n, 32))
+        gate = net._risk_gate(
+            asset_emb,
+            obs["weights_drift"],
+            obs["base_drift"],
+            obs["candidate_switch_base"],
+            ssm_p=obs["ssm"]["p"],
+            q_bear=obs["ssm"]["q_bear"],
+            q_bull=obs["ssm"]["q_bull"],
+        )
+        self.assertGreater(gate[0, 0].item(), gate[0, 1].item())
+
+    def test_embedding_modes_reduce_controller_input(self):
+        n = 4
+        obs = {
+            "ssm": {
+                "z": torch.randn(1, n, 16),
+                "h": torch.randn(1, n, 16),
+                "p": torch.rand(1, n),
+                "q_bear": torch.rand(1, n),
+                "q_bull": torch.rand(1, n),
+            },
+            "weights_drift": torch.softmax(torch.randn(1, n), dim=1),
+            "base_drift": torch.softmax(torch.randn(1, n), dim=1),
+            "candidate_switch_base": torch.softmax(torch.randn(1, n), dim=1),
+            "port_state": torch.randn(1, 6),
+            "held_p": torch.randn(1),
+            "candidate_costs": torch.randn(1, 3),
+        }
+        expected_dims = {
+            "full": 32 * 4 + 6 + 1 + 3,
+            "hold_delta": 32 * 2 + 6 + 1 + 3,
+            "live_delta": 32 * 2 + 6 + 1 + 3,
+            "delta": 32 + 6 + 1 + 3,
+        }
+        for mode, expected_dim in expected_dims.items():
+            net = PGControllerNet(embedding_mode=mode)
+            state = net.encode_state(
+                obs["ssm"]["z"],
+                obs["ssm"]["h"],
+                obs["weights_drift"],
+                obs["base_drift"],
+                obs["candidate_switch_base"],
+                obs["port_state"],
+                obs["held_p"],
+                obs["candidate_costs"],
+                ssm_p=obs["ssm"]["p"],
+                q_bear=obs["ssm"]["q_bear"],
+                q_bull=obs["ssm"]["q_bull"],
+            )
+            self.assertEqual(state.shape, (1, expected_dim))
+            self.assertEqual(net(obs).shape, (1, 2))
 
     def test_episode_objective_uses_sharpe_minus_violation_counts(self):
         history = [100.0, 101.0, 100.5, 102.0]
@@ -90,6 +168,34 @@ class PGControllerTests(unittest.TestCase):
         self.assertGreater(returns[0, 0].item(), returns[0, 1].item())
         self.assertLess(returns[0, 2].item(), 0.0)
         self.assertEqual(env.day, 1)
+
+    def test_execute_action_supports_legacy_env_step_signature(self):
+        class DummyEnv:
+            day = 0
+
+            def step(self, weights, base, outer_action=None, is_switch=False):
+                self.called = {
+                    "weights": weights,
+                    "base": base,
+                    "outer_action": outer_action,
+                    "is_switch": is_switch,
+                }
+                return {"ok": True}, 0.0, True, {"portfolio_value": 1.0}
+
+        env = DummyEnv()
+        candidate = {
+            "hold_base": torch.tensor([[0.5, 0.5]]),
+            "switch_base": torch.tensor([[0.2, 0.8]]),
+            "hold_exec": torch.tensor([[0.5, 0.5]]),
+            "switch_exec": torch.tensor([[0.1, 0.9]]),
+        }
+        next_obs, done, info = execute_action(env, candidate, action=1)
+        self.assertTrue(done)
+        self.assertTrue(next_obs["ok"])
+        self.assertEqual(info["portfolio_value"], 1.0)
+        self.assertTrue(env.called["is_switch"])
+        self.assertEqual(info["rewards"]["turnover"], 0.0)
+        self.assertEqual(info["rewards"]["transaction_cost"], 0.0)
 
     def test_auxiliary_advantage_loss_prefers_positive_switch_margin(self):
         logits = [torch.tensor([[0.0, 2.0], [2.0, 0.0]], requires_grad=True)]
