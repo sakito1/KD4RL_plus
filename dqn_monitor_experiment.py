@@ -14,7 +14,12 @@ import pandas as pd
 import torch
 
 import utils.config as runtime_config
-from agent import DQNMonitorAgent, DQNReplayBuffer
+from agent import (
+    ConditionalUtilityAgent,
+    DQNMonitorAgent,
+    DQNReplayBuffer,
+    UtilityReplayBuffer,
+)
 from env import PPO_Env
 from Train.PPO_train import HRL_Networks, set_seed
 from utils.Log import create_logger
@@ -158,7 +163,8 @@ def long_hold_penalty(days, target_days):
     return excess ** 2
 
 
-def build_candidates(env, frozen_hrl, obs, lambda_cost=0.0, lambda_long=0.0):
+def build_candidates(env, frozen_hrl, obs, lambda_cost=0.0, lambda_long=0.0,
+                     utility_agent=None):
     """Build hold and switch candidate executions without changing environment state."""
     with torch.inference_mode():
         weights = obs["weights_drift"]
@@ -208,7 +214,27 @@ def build_candidates(env, frozen_hrl, obs, lambda_cost=0.0, lambda_long=0.0):
         "utility_hold": float(utility_hold.item()),
         "utility_switch": float(utility_switch.item()),
     }
+    if utility_agent is not None:
+        with torch.inference_mode():
+            conditional_utilities = utility_agent.predict(enriched_obs).squeeze(0)
+        candidate["utility_hold"] = float(conditional_utilities[0].item())
+        candidate["utility_switch"] = float(conditional_utilities[1].item())
     return enriched_obs, candidate
+
+
+def realized_candidate_targets(env, candidate, lambda_long=0.0):
+    """One-day net log-return labels for conditional utility training."""
+    with torch.inference_mode():
+        ratio = env.ratio[:, env.day].unsqueeze(0)
+        gross_hold = torch.sum(candidate["hold_exec"] * ratio, dim=1)
+        gross_switch = torch.sum(candidate["switch_exec"] * ratio, dim=1)
+        target_hold = torch.log(
+            gross_hold * (1.0 - candidate["cost_hold"]) + 1e-12
+        ) - float(lambda_long) * candidate["long_penalty_hold"]
+        target_switch = torch.log(
+            gross_switch * (1.0 - candidate["cost_switch"]) + 1e-12
+        )
+    return torch.stack([target_hold, target_switch], dim=1)
 
 
 def execute_step(env, candidate, action):
@@ -230,9 +256,11 @@ def execute_step(env, candidate, action):
 
 
 def run_episode(env, frozen_hrl, dqn=None, replay=None, train=False, fixed_cycle=None,
-                oracle=False, cfg=None, utility_cfg=None):
+                oracle=False, cfg=None, utility_cfg=None, utility_agent=None):
     utility_cfg = utility_cfg or {"lambda_cost": 0.0, "lambda_long": 0.0}
-    obs, candidate = build_candidates(env, frozen_hrl, env.reset(), **utility_cfg)
+    obs, candidate = build_candidates(
+        env, frozen_hrl, env.reset(), utility_agent=utility_agent, **utility_cfg
+    )
     history = [float(env.portfolio_value.item())]
     rewards, advantages, turnovers, costs = [], [], [], []
     estimated_cost_hold, estimated_cost_switch, long_penalties = [], [], []
@@ -240,8 +268,18 @@ def run_episode(env, frozen_hrl, dqn=None, replay=None, train=False, fixed_cycle
     hold_age = 0
     holding_lengths = []
     losses = []
+    utility_errors = []
 
     while True:
+        if utility_agent is not None:
+            targets = realized_candidate_targets(
+                env, candidate, lambda_long=utility_cfg.get("lambda_long", 0.0)
+            ).squeeze(0)
+            predicted = torch.tensor(
+                [candidate["utility_hold"], candidate["utility_switch"]],
+                dtype=targets.dtype, device=targets.device,
+            )
+            utility_errors.append(float(torch.mean((predicted - targets) ** 2).item()))
         if oracle:
             action = int(candidate["utility_switch"] > candidate["utility_hold"])
         elif fixed_cycle is None:
@@ -253,7 +291,7 @@ def run_episode(env, frozen_hrl, dqn=None, replay=None, train=False, fixed_cycle
             action = int(hold_age == 0 or hold_age >= fixed_cycle)
         next_raw_obs, reward, done, info, switch_adv = execute_step(env, candidate, action)
         next_obs, next_candidate = build_candidates(
-            env, frozen_hrl, next_raw_obs, **utility_cfg
+            env, frozen_hrl, next_raw_obs, utility_agent=utility_agent, **utility_cfg
         )
         if train:
             replay.store(obs, action, reward * cfg["reward_scale"], next_obs, done)
@@ -301,6 +339,7 @@ def run_episode(env, frozen_hrl, dqn=None, replay=None, train=False, fixed_cycle
         "mean_estimated_cost_hold": float(np.mean(estimated_cost_hold)),
         "mean_estimated_cost_switch": float(np.mean(estimated_cost_switch)),
         "mean_long_hold_penalty": float(np.mean(long_penalties)),
+        "utility_mse": float(np.mean(utility_errors)) if utility_errors else None,
         "dqn_loss": float(np.mean(losses)) if losses else None,
     })
     return result, history
@@ -318,7 +357,7 @@ def reference_frame():
     return pd.concat(frames, ignore_index=True)
 
 
-def update_workbook(run_row=None, final_rows=None, oracle_rows=None):
+def update_workbook(run_row=None, final_rows=None, oracle_rows=None, critic_rows=None):
     reference = reference_frame()
     if os.path.exists(RESULT_BOOK):
         try:
@@ -357,11 +396,22 @@ def update_workbook(run_row=None, final_rows=None, oracle_rows=None):
         oracle = oracle.drop_duplicates(
             subset=["run_id", "market", "lambda_cost", "lambda_long"], keep="last"
         )
+    if os.path.exists(RESULT_BOOK):
+        try:
+            old_critic = pd.read_excel(RESULT_BOOK, sheet_name="conditional_critic_runs")
+        except Exception:
+            old_critic = pd.DataFrame()
+    else:
+        old_critic = pd.DataFrame()
+    critic = pd.concat([old_critic, pd.DataFrame(critic_rows or [])], ignore_index=True)
+    if not critic.empty:
+        critic = critic.drop_duplicates(subset=["run_id", "market"], keep="last")
     with pd.ExcelWriter(RESULT_BOOK, engine="openpyxl") as writer:
         reference.to_excel(writer, sheet_name="reference_sota", index=False)
         pretrained.to_excel(writer, sheet_name="pretrained_hrl", index=False)
         runs.to_excel(writer, sheet_name="dqn_runs", index=False)
         oracle.to_excel(writer, sheet_name="oracle_runs", index=False)
+        critic.to_excel(writer, sheet_name="conditional_critic_runs", index=False)
         final.to_excel(writer, sheet_name="final_comparison", index=False)
 
 
@@ -427,10 +477,122 @@ def run_oracle_stage(env, frozen_hrl, args, market_cfg, provenance, out_dir):
     return summary
 
 
+def collect_conditional_episode(env, frozen_hrl, utility_agent, replay, cfg, lambda_long):
+    obs, candidate = build_candidates(env, frozen_hrl, env.reset())
+    hold_age = 0
+    losses = []
+    fixed_cycle = int(getattr(runtime_config, "max_hold", 60))
+    while True:
+        targets = realized_candidate_targets(env, candidate, lambda_long=lambda_long)
+        replay.store(obs, targets)
+        cfg["env_steps"] += 1
+        if (
+            len(replay) >= cfg["warmup"]
+            and cfg["env_steps"] % cfg["train_frequency"] == 0
+        ):
+            loss = utility_agent.update(replay, cfg["batch_size"])
+            if loss is not None:
+                losses.append(loss)
+        action = int(hold_age == 0 or hold_age >= fixed_cycle)
+        next_raw_obs, _, done, _, _ = execute_step(env, candidate, action)
+        if action == 1:
+            hold_age = 1
+        else:
+            hold_age += 1
+        if done:
+            break
+        obs, candidate = build_candidates(env, frozen_hrl, next_raw_obs)
+    return float(np.mean(losses)) if losses else None
+
+
+def run_conditional_critic_stage(env, frozen_hrl, args, provenance, out_dir):
+    utility_agent = ConditionalUtilityAgent(
+        device=runtime_config.device, hidden_dim=args.hidden_dim,
+        fusion_hidden=args.fusion_hidden, lr=args.lr,
+    )
+    replay = UtilityReplayBuffer(args.capacity)
+    episodes = args.episodes or (2 if args.mode == "smoke" else 20)
+    cfg = {
+        "env_steps": 0,
+        "warmup": min(args.warmup, 32) if args.mode == "smoke" else args.warmup,
+        "batch_size": min(args.batch_size, 32) if args.mode == "smoke" else args.batch_size,
+        "train_frequency": args.train_frequency,
+    }
+    utility_cfg = {"lambda_cost": 0.0, "lambda_long": args.lambda_long}
+    best_sharpe = -float("inf")
+    best_checkpoint = os.path.join(out_dir, "best_conditional_critic.pth")
+    env.set_mode("train")
+    start_time = time.time()
+    validation_history = []
+    for episode in range(episodes):
+        loss = collect_conditional_episode(
+            env, frozen_hrl, utility_agent, replay, cfg, args.lambda_long
+        )
+        evaluate = (
+            episode == 0
+            or (episode + 1) % args.validate_every == 0
+            or episode + 1 == episodes
+        )
+        if evaluate:
+            env.set_mode("val")
+            val_result, _ = run_episode(
+                env, frozen_hrl, dqn=utility_agent, utility_agent=utility_agent,
+                utility_cfg=utility_cfg,
+            )
+            validation_history.append({"episode": episode + 1, "loss": loss, **val_result})
+            if val_result["sharpe"] > best_sharpe:
+                best_sharpe = val_result["sharpe"]
+                utility_agent.save(
+                    best_checkpoint, {"episode": episode + 1, "val": val_result}
+                )
+            env.set_mode("train")
+    best_meta = utility_agent.load(best_checkpoint)
+    env.set_mode("val")
+    fixed_result, _ = run_episode(
+        env, frozen_hrl, fixed_cycle=int(getattr(runtime_config, "max_hold", 60))
+    )
+    elapsed = time.time() - start_time
+    summary = {
+        "run_id": args.run_id,
+        "market": args.market,
+        "stage": "conditional-critic",
+        "mode": args.mode,
+        "episodes": episodes,
+        "best_validation": best_meta.get("val", {}),
+        "fixed_cycle_validation": fixed_result,
+        "validation_history": validation_history,
+        "elapsed_seconds": elapsed,
+        "config": vars(args),
+        "utility_checkpoint": best_checkpoint,
+        "data_provenance": provenance,
+    }
+    with open(os.path.join(out_dir, "summary.json"), "w") as file:
+        json.dump(summary, file, indent=2)
+    best_val = summary["best_validation"]
+    update_workbook(critic_rows=[{
+        "run_id": args.run_id,
+        "market": args.market,
+        "mode": args.mode,
+        "episodes": episodes,
+        "lambda_long": args.lambda_long,
+        "val_sharpe": best_val.get("sharpe"),
+        "val_return": best_val.get("total_ret"),
+        "utility_mse": best_val.get("utility_mse"),
+        "switch_count": best_val.get("switch_count"),
+        "turnover": best_val.get("turnover"),
+        "transaction_cost": best_val.get("transaction_cost"),
+        "elapsed_seconds": elapsed,
+    }])
+    print(json.dumps(summary, indent=2))
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--market", choices=sorted(MARKETS), required=True)
-    parser.add_argument("--stage", choices=["oracle", "dqn"], default="dqn")
+    parser.add_argument(
+        "--stage", choices=["oracle", "conditional-critic", "dqn"], default="dqn"
+    )
     parser.add_argument("--oracle-grid", choices=["quick", "full"], default=None)
     parser.add_argument("--mode", choices=["smoke", "full"], default="smoke")
     parser.add_argument("--episodes", type=int, default=None)
@@ -445,6 +607,11 @@ def main():
     parser.add_argument("--target-update", type=int, default=500)
     parser.add_argument("--epsilon-decay", type=int, default=20000)
     parser.add_argument("--reward-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--reward-source", choices=["outer_value", "conditional_critic"],
+        default="outer_value",
+    )
+    parser.add_argument("--utility-checkpoint", default=None)
     parser.add_argument("--lambda-cost", type=float, default=0.0)
     parser.add_argument("--lambda-long", type=float, default=0.0)
     parser.add_argument("--train-frequency", type=int, default=1)
@@ -473,7 +640,7 @@ def main():
 
     run_id = args.run_id or (
         f"{args.stage}_{args.mode}"
-        if args.stage == "oracle"
+        if args.stage in {"oracle", "conditional-critic"}
         else f"{args.mode}_ep{args.episodes or (2 if args.mode == 'smoke' else 20)}"
     )
     args.run_id = run_id
@@ -487,6 +654,21 @@ def main():
     if args.stage == "oracle":
         run_oracle_stage(env, frozen_hrl, args, market_cfg, provenance, out_dir)
         return
+    if args.stage == "conditional-critic":
+        run_conditional_critic_stage(env, frozen_hrl, args, provenance, out_dir)
+        return
+    utility_agent = None
+    if args.reward_source == "conditional_critic":
+        if not args.utility_checkpoint:
+            parser.error("--utility-checkpoint is required for conditional_critic reward.")
+        utility_agent = ConditionalUtilityAgent(
+            device=device, hidden_dim=args.hidden_dim,
+            fusion_hidden=args.fusion_hidden, lr=args.lr,
+        )
+        utility_agent.load(args.utility_checkpoint)
+        utility_agent.net.eval()
+        for parameter in utility_agent.net.parameters():
+            parameter.requires_grad = False
     dqn = DQNMonitorAgent(
         device=device, hidden_dim=args.hidden_dim, fusion_hidden=args.fusion_hidden,
         lr=args.lr, gamma=args.gamma,
@@ -512,7 +694,8 @@ def main():
     start_time = time.time()
     for episode in range(episodes):
         train_result, _ = run_episode(
-            env, frozen_hrl, dqn, replay, train=True, cfg=cfg, utility_cfg=utility_cfg
+            env, frozen_hrl, dqn, replay, train=True, cfg=cfg,
+            utility_cfg=utility_cfg, utility_agent=utility_agent,
         )
         evaluate = (
             episode == 0
@@ -521,7 +704,10 @@ def main():
         )
         if evaluate:
             env.set_mode("val")
-            val_result, _ = run_episode(env, frozen_hrl, dqn, utility_cfg=utility_cfg)
+            val_result, _ = run_episode(
+                env, frozen_hrl, dqn, utility_cfg=utility_cfg,
+                utility_agent=utility_agent,
+            )
             logger.info(
                 "DQN %s ep=%d/%d train_ret=%.2f%% val_ret=%.2f%% val_sharpe=%.4f "
                 "switch=%d loss=%s",
@@ -545,7 +731,9 @@ def main():
     fixed_result = None
     if not args.validation_only:
         env.set_mode("test")
-        test_result, history = run_episode(env, frozen_hrl, dqn, utility_cfg=utility_cfg)
+        test_result, history = run_episode(
+            env, frozen_hrl, dqn, utility_cfg=utility_cfg, utility_agent=utility_agent
+        )
         fixed_result, fixed_history = run_episode(
             env, frozen_hrl, dqn, fixed_cycle=int(getattr(runtime_config, "max_hold", 60))
         )
@@ -587,7 +775,7 @@ def main():
         "run_id": run_id, "market": args.market, "source_seed": market_cfg["source_seed"],
         "mode": args.mode, "episodes": episodes, "hidden_dim": args.hidden_dim, "lr": args.lr,
         "gamma": args.gamma, "reward_scale": args.reward_scale,
-        "reward_source": "outer_value", "input_version": "candidate_state_v2",
+        "reward_source": args.reward_source, "input_version": "candidate_state_v2",
         "lambda_cost": args.lambda_cost, "lambda_long": args.lambda_long,
         "train_frequency": args.train_frequency, "validate_every": args.validate_every,
         "validation_only": args.validation_only, "val_sharpe": best_sharpe,

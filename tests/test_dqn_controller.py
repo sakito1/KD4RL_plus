@@ -2,8 +2,19 @@ import unittest
 
 import torch
 
-from agent.DQN_monitor import DQNMonitorAgent, DQNReplayBuffer, EmbMonitorQNet
-from dqn_monitor_experiment import build_candidates, execute_step, long_hold_penalty
+from agent.DQN_monitor import (
+    ConditionalUtilityAgent,
+    DQNMonitorAgent,
+    DQNReplayBuffer,
+    EmbMonitorQNet,
+    UtilityReplayBuffer,
+)
+from dqn_monitor_experiment import (
+    build_candidates,
+    execute_step,
+    long_hold_penalty,
+    realized_candidate_targets,
+)
 
 
 def make_observation(num_assets=3):
@@ -18,7 +29,7 @@ def make_observation(num_assets=3):
         "outer_state": torch.zeros(1, num_assets, 2, 1),
         "inner_state": torch.zeros(1, num_assets, 2, 1),
         "port_state": torch.zeros(1, 6),
-        "held_p": torch.tensor([[0.4]], dtype=torch.float32),
+        "held_p": torch.tensor([0.4], dtype=torch.float32),
     }
 
 
@@ -46,6 +57,8 @@ class FakeEnv:
     transaction_cost_pct = 0.01
     max_hold = 5
     t_held = 6
+    day = 0
+    ratio = torch.tensor([[1.01], [1.02], [0.99]], dtype=torch.float32)
 
     def __init__(self):
         self.step_calls = 0
@@ -100,6 +113,21 @@ class ControllerStateTests(unittest.TestCase):
             reward, candidate["utility_switch"] - candidate["utility_hold"]
         )
         self.assertAlmostEqual(reward, switch_advantage)
+
+    def test_conditional_targets_are_net_returns_and_critic_updates(self):
+        env = FakeEnv()
+        obs, candidate = build_candidates(env, FakeModel(), make_observation())
+        targets = realized_candidate_targets(env, candidate, lambda_long=0.5)
+        self.assertEqual(targets.shape, (1, 2))
+        gross_hold = 0.7 * 1.01 + 0.2 * 1.02 + 0.1 * 0.99
+        expected_hold = torch.log(torch.tensor(gross_hold * (1 - candidate["cost_hold"]))).item()
+        expected_hold -= 0.5 * candidate["long_penalty_hold"]
+        self.assertAlmostEqual(targets[0, 0].item(), expected_hold, places=6)
+        replay = UtilityReplayBuffer(4)
+        replay.store(obs, targets)
+        replay.store(obs, targets)
+        utility = ConditionalUtilityAgent(torch.device("cpu"))
+        self.assertIsInstance(utility.update(replay, 2), float)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ class EmbMonitorQNet(nn.Module):
 
     def encode_state(self, z, h, weights, base_weights, switch_weights, port_state,
                      held_p, candidate_costs):
+        batch_size = z.shape[0]
         asset_emb = self.asset_projection(torch.cat([z, h], dim=-1))
         emb_live = torch.sum(asset_emb * weights.unsqueeze(-1), dim=1)
         emb_hold = torch.sum(asset_emb * base_weights.unsqueeze(-1), dim=1)
@@ -37,7 +38,9 @@ class EmbMonitorQNet(nn.Module):
         delta_emb = emb_switch - emb_hold
         return torch.cat([
             emb_live, emb_hold, emb_switch, delta_emb,
-            port_state, held_p, candidate_costs,
+            port_state.reshape(batch_size, -1),
+            held_p.reshape(batch_size, -1),
+            candidate_costs.reshape(batch_size, -1),
         ], dim=1)
 
     def forward(self, z, h, weights, base_weights, switch_weights, port_state,
@@ -180,4 +183,110 @@ class DQNMonitorAgent:
         self.q_net.load_state_dict(checkpoint["q_net"])
         self.target_net.load_state_dict(checkpoint.get("target_net", checkpoint["q_net"]))
         self.update_steps = int(checkpoint.get("update_steps", 0))
+        return checkpoint.get("metadata", {})
+
+
+class ConditionalUtilityCritic(nn.Module):
+    """Estimate the net one-day utilities of the hold and switch candidates."""
+
+    def __init__(self, z_dim=16, h_dim=16, hidden_dim=32, fusion_hidden=64,
+                 port_state_dim=6):
+        super().__init__()
+        self.encoder = EmbMonitorQNet(
+            z_dim=z_dim, h_dim=h_dim, hidden_dim=hidden_dim,
+            fusion_hidden=fusion_hidden, port_state_dim=port_state_dim,
+        )
+        controller_dim = hidden_dim * 4 + port_state_dim + 1 + 3
+        self.utility_head = nn.Sequential(
+            nn.Linear(controller_dim, fusion_hidden),
+            nn.LayerNorm(fusion_hidden),
+            nn.GELU(),
+            nn.Linear(fusion_hidden, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 2),
+        )
+
+    def forward(self, z, h, weights, base_weights, switch_weights, port_state,
+                held_p, candidate_costs):
+        controller_state = self.encoder.encode_state(
+            z, h, weights, base_weights, switch_weights, port_state,
+            held_p, candidate_costs,
+        )
+        return self.utility_head(controller_state)
+
+
+class UtilityReplayBuffer:
+    def __init__(self, capacity):
+        self.data = deque(maxlen=int(capacity))
+
+    def __len__(self):
+        return len(self.data)
+
+    def store(self, obs, targets):
+        def stored(value):
+            return value.squeeze(0).detach().clone().cpu()
+
+        self.data.append((
+            stored(obs["ssm"]["z"]),
+            stored(obs["ssm"]["h"]),
+            stored(obs["weights_drift"]),
+            stored(obs["base_drift"]),
+            stored(obs["candidate_switch_base"]),
+            stored(obs["port_state"]),
+            stored(obs["held_p"]),
+            stored(obs["candidate_costs"]),
+            stored(targets),
+        ))
+
+    def sample(self, batch_size, device):
+        fields = list(zip(*random.sample(self.data, int(batch_size))))
+        return [torch.stack(field).to(device) for field in fields]
+
+
+class ConditionalUtilityAgent:
+    def __init__(self, device, hidden_dim=32, fusion_hidden=64, lr=3e-4,
+                 grad_clip=1.0):
+        self.device = device
+        self.net = ConditionalUtilityCritic(
+            hidden_dim=hidden_dim, fusion_hidden=fusion_hidden
+        ).to(device)
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=float(lr))
+        self.grad_clip = float(grad_clip)
+
+    def predict(self, obs):
+        return self.net(
+            obs["ssm"]["z"], obs["ssm"]["h"], obs["weights_drift"],
+            obs["base_drift"], obs["candidate_switch_base"], obs["port_state"],
+            obs["held_p"], obs["candidate_costs"],
+        )
+
+    def select_action(self, obs, epsilon=0.0):
+        if random.random() < float(epsilon):
+            return random.randrange(2)
+        with torch.inference_mode():
+            utilities = self.predict(obs)
+        return int(torch.argmax(utilities, dim=1).item())
+
+    def update(self, replay, batch_size):
+        if len(replay) < int(batch_size):
+            return None
+        batch = replay.sample(batch_size, self.device)
+        predicted = self.net(*batch[:8])
+        loss = F.smooth_l1_loss(predicted, batch[8])
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
+        self.optimizer.step()
+        return float(loss.item())
+
+    def save(self, path, metadata=None):
+        torch.save({
+            "utility_net": self.net.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "metadata": metadata or {},
+        }, path)
+
+    def load(self, path):
+        checkpoint = torch.load(path, map_location=self.device)
+        self.net.load_state_dict(checkpoint["utility_net"])
         return checkpoint.get("metadata", {})
