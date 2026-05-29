@@ -638,6 +638,8 @@ def main():
         choices=["full", "hold_delta", "live_delta", "delta"],
         default="full",
     )
+    parser.add_argument("--initial-hold-bias", type=float, default=0.0)
+    parser.add_argument("--zero-policy-output", action="store_true")
     parser.add_argument("--baseline-momentum", type=float, default=0.9)
     parser.add_argument("--use-rolling-baseline", action="store_true")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
@@ -674,6 +676,8 @@ def main():
         risk_gate_floor=args.risk_gate_floor,
         risk_gate_prior_scale=args.risk_gate_prior_scale,
         embedding_mode=args.embedding_mode,
+        initial_hold_bias=args.initial_hold_bias,
+        zero_policy_output=args.zero_policy_output,
     ).to(device)
     optimizer = torch.optim.Adam(controller.parameters(), lr=args.lr)
     baseline = RunningObjectiveBaseline(momentum=args.baseline_momentum)
@@ -753,6 +757,8 @@ def main():
             "risk_gate_floor": args.risk_gate_floor,
             "risk_gate_prior_scale": args.risk_gate_prior_scale,
             "embedding_mode": args.embedding_mode,
+            "initial_hold_bias": args.initial_hold_bias,
+            "zero_policy_output": args.zero_policy_output,
             "val_objective": eval_objective if args.eval_split == "val" else None,
             "val_penalty": eval_penalty if args.eval_split == "val" else None,
             "val_sharpe": eval_metrics["sharpe"] if args.eval_split == "val" else None,
@@ -999,6 +1005,8 @@ def main():
         "risk_gate_floor": args.risk_gate_floor,
         "risk_gate_prior_scale": args.risk_gate_prior_scale,
         "embedding_mode": args.embedding_mode,
+        "initial_hold_bias": args.initial_hold_bias,
+        "zero_policy_output": args.zero_policy_output,
         "val_objective": best.get("val_objective"),
         "val_penalty": best.get("val_penalty"),
         "val_sharpe": best["val_metrics"]["sharpe"],

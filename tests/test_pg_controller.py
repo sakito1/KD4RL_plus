@@ -118,6 +118,31 @@ class PGControllerTests(unittest.TestCase):
             self.assertEqual(state.shape, (1, expected_dim))
             self.assertEqual(net(obs).shape, (1, 2))
 
+    def test_initial_hold_bias_starts_from_hold_policy(self):
+        obs = {
+            "ssm": {
+                "z": torch.randn(1, 3, 16),
+                "h": torch.randn(1, 3, 16),
+                "p": torch.rand(1, 3),
+                "q_bear": torch.rand(1, 3),
+                "q_bull": torch.rand(1, 3),
+            },
+            "weights_drift": torch.ones(1, 3) / 3,
+            "base_drift": torch.ones(1, 3) / 3,
+            "candidate_switch_base": torch.ones(1, 3) / 3,
+            "port_state": torch.zeros(1, 6),
+            "held_p": torch.zeros(1),
+            "candidate_costs": torch.zeros(1, 3),
+        }
+        net = PGControllerNet(
+            initial_hold_bias=1.5,
+            zero_policy_output=True,
+            embedding_mode="delta",
+        )
+        logits = net(obs)
+        self.assertGreater(logits[0, 0].item(), logits[0, 1].item())
+        self.assertTrue(torch.allclose(net.policy[-1].weight, torch.zeros_like(net.policy[-1].weight)))
+
     def test_episode_objective_uses_sharpe_minus_violation_counts(self):
         history = [100.0, 101.0, 100.5, 102.0]
         metrics = compute_metrics(history)

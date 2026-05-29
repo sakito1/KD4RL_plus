@@ -13,7 +13,8 @@ class PGControllerNet(nn.Module):
 
     def __init__(self, z_dim=16, h_dim=16, hidden_dim=32, fusion_hidden=64,
                  port_state_dim=6, use_risk_gate=True, risk_gate_floor=0.05,
-                 risk_gate_prior_scale=1.0, embedding_mode="full"):
+                 risk_gate_prior_scale=1.0, embedding_mode="full",
+                 initial_hold_bias=0.0, zero_policy_output=False):
         super().__init__()
         self.use_risk_gate = bool(use_risk_gate)
         self.risk_gate_floor = float(risk_gate_floor)
@@ -50,6 +51,16 @@ class PGControllerNet(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, 2),
         )
+        if zero_policy_output:
+            nn.init.zeros_(self.policy[-1].weight)
+        if initial_hold_bias:
+            with torch.no_grad():
+                self.policy[-1].bias.copy_(
+                    torch.tensor(
+                        [float(initial_hold_bias), -float(initial_hold_bias)],
+                        dtype=self.policy[-1].bias.dtype,
+                    )
+                )
 
     @staticmethod
     def _optional_asset_feature(value, like):
