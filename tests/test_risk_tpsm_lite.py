@@ -14,6 +14,8 @@ from risk_tpsm_lite import (
     compute_rolling_drawdown,
     compute_downside_volatility,
     map_risk_outputs_to_legacy,
+    pairwise_ranking_loss,
+    selection_score,
 )
 
 
@@ -108,6 +110,38 @@ class RiskTPSMLiteTests(unittest.TestCase):
         self.assertEqual(out["q_risk"].shape, (5, 3))
         with self.assertRaises(ValueError):
             model(x)
+
+    def test_attention_pooling_and_rank_loss(self):
+        model = RiskTPSMLite(
+            in_dim=12,
+            emb_dim=16,
+            num_horizons=3,
+            use_attention_pooling=True,
+        )
+        x = torch.randn(6, 20, 12)
+        out = model(x)
+        self.assertEqual(out["q_risk"].shape, (6, 3))
+        y = torch.tensor(
+            [
+                [0.1, 0.2, 0.3],
+                [0.9, 0.8, 0.7],
+                [0.2, 0.3, 0.4],
+                [0.8, 0.7, 0.6],
+                [0.3, 0.4, 0.5],
+                [0.7, 0.6, 0.5],
+            ],
+            dtype=torch.float32,
+        )
+        mask = torch.ones(6, 3, dtype=torch.bool)
+        rank_loss = pairwise_ranking_loss(out["risk_logits"], y, mask, label_margin=0.2)
+        self.assertTrue(torch.isfinite(rank_loss))
+        self.assertGreaterEqual(rank_loss.item(), 0.0)
+
+    def test_selection_score_prefers_higher_auc_when_requested(self):
+        metrics_a = {"risk_bce_mean": 0.6, "brier_mean": 0.1, "auc_h5": 0.55, "auc_h10": 0.56}
+        metrics_b = {"risk_bce_mean": 0.7, "brier_mean": 0.2, "auc_h5": 0.60, "auc_h10": 0.62}
+        self.assertGreater(selection_score(metrics_b, "auc_mean"), selection_score(metrics_a, "auc_mean"))
+        self.assertGreater(selection_score(metrics_a, "risk_bce_mean"), selection_score(metrics_b, "risk_bce_mean"))
 
     def test_risk_helpers_and_legacy_mapping(self):
         close = np.array([10.0, 11.0, 9.0, 12.0])

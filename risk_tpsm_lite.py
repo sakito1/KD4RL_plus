@@ -370,6 +370,7 @@ class RiskTPSMLite(nn.Module):
         use_asset_conditioning: bool = False,
         num_assets: int = 0,
         asset_emb_dim: int = 8,
+        use_attention_pooling: bool = False,
     ):
         super().__init__()
         self.in_dim = int(in_dim)
@@ -379,11 +380,22 @@ class RiskTPSMLite(nn.Module):
         self.use_asset_conditioning = bool(use_asset_conditioning)
         self.num_assets = int(num_assets)
         self.asset_emb_dim = int(asset_emb_dim)
+        self.use_attention_pooling = bool(use_attention_pooling)
         self.encoder = nn.Sequential(
             CausalConvBlock(self.in_dim, tcn_channels, kernel_size=3, dilation=1, dropout=dropout),
             CausalConvBlock(tcn_channels, tcn_channels, kernel_size=3, dilation=2, dropout=dropout),
             CausalConvBlock(tcn_channels, tcn_channels, kernel_size=3, dilation=4, dropout=0.0),
         )
+        if self.use_attention_pooling:
+            self.attn_pool = nn.Sequential(
+                nn.Linear(tcn_channels, max(tcn_channels // 2, 4)),
+                nn.Tanh(),
+                nn.Linear(max(tcn_channels // 2, 4), 1),
+            )
+            self.pool_mix = nn.Parameter(torch.tensor(0.5))
+        else:
+            self.attn_pool = None
+            self.pool_mix = None
         if self.use_asset_conditioning:
             if self.num_assets <= 0:
                 raise ValueError("num_assets must be positive when use_asset_conditioning=True.")
@@ -409,6 +421,12 @@ class RiskTPSMLite(nn.Module):
         assert x.size(-1) == self.in_dim, f"expected F={self.in_dim}, got {x.size(-1)}"
         h = self.encoder(x.transpose(1, 2))
         last = h[:, :, -1]
+        if self.use_attention_pooling:
+            h_time = h.transpose(1, 2)
+            attn = torch.softmax(self.attn_pool(h_time).squeeze(-1), dim=-1)
+            pooled = torch.sum(h_time * attn.unsqueeze(-1), dim=1)
+            mix = torch.sigmoid(self.pool_mix)
+            last = mix * last + (1.0 - mix) * pooled
         if self.use_asset_conditioning:
             if asset_id is None:
                 raise ValueError("asset_id is required when use_asset_conditioning=True.")
@@ -440,6 +458,31 @@ def _masked_mean(values, mask):
     return (values * mask).sum() / mask.sum().clamp_min(1.0)
 
 
+def pairwise_ranking_loss(risk_logits, y_risk, mask, label_margin=0.15, max_pairs=4096):
+    """RankNet-style pairwise loss to improve cross-sample risk ordering."""
+    losses = []
+    num_horizons = risk_logits.size(1)
+    for hi in range(num_horizons):
+        valid = mask[:, hi].bool()
+        if int(valid.sum().item()) < 2:
+            continue
+        scores = risk_logits[valid, hi]
+        labels = y_risk[valid, hi]
+        label_diff = labels[:, None] - labels[None, :]
+        pair_mask = label_diff.abs() >= float(label_margin)
+        if not bool(pair_mask.any().item()):
+            continue
+        score_diff = scores[:, None] - scores[None, :]
+        signed_diff = torch.sign(label_diff[pair_mask]) * score_diff[pair_mask]
+        if int(max_pairs) > 0 and signed_diff.numel() > int(max_pairs):
+            perm = torch.randperm(signed_diff.numel(), device=signed_diff.device)[: int(max_pairs)]
+            signed_diff = signed_diff[perm]
+        losses.append(F.softplus(-signed_diff).mean())
+    if not losses:
+        return risk_logits.new_tensor(0.0)
+    return torch.stack(losses).mean()
+
+
 def compute_risk_tpsm_loss(
     outputs,
     batch,
@@ -449,7 +492,12 @@ def compute_risk_tpsm_loss(
     lambda_brier: float = 0.1,
     lambda_tv: float = 1e-3,
     lambda_severity: float = 0.0,
+    lambda_rank: float = 0.0,
+    rank_label_margin: float = 0.15,
+    rank_max_pairs: int = 4096,
     use_weighted_bce: bool = True,
+    risk_loss_type: str = "bce",
+    focal_gamma: float = 2.0,
 ):
     q_risk = outputs["q_risk"]
     regime_probs = outputs["regime_probs"]
@@ -467,6 +515,8 @@ def compute_risk_tpsm_loss(
         bce = -(pw * y_risk * torch.log(q_safe) + (1.0 - y_risk) * torch.log1p(-q_safe))
     else:
         bce = F.binary_cross_entropy(q_safe, y_risk, reduction="none")
+    if risk_loss_type == "focal":
+        bce = bce * torch.abs(y_risk - q_risk).pow(float(focal_gamma))
     loss_risk = _masked_mean(bce, mask)
     loss_brier = _masked_mean((q_risk - y_risk).pow(2), mask)
 
@@ -484,6 +534,16 @@ def compute_risk_tpsm_loss(
         severity = outputs["severity"]
         loss_severity = _masked_mean(F.huber_loss(severity, batch["dd_norm"], reduction="none"), mask)
 
+    loss_rank = q_risk.new_tensor(0.0)
+    if lambda_rank > 0.0:
+        loss_rank = pairwise_ranking_loss(
+            outputs["risk_logits"],
+            y_risk,
+            mask,
+            label_margin=rank_label_margin,
+            max_pairs=rank_max_pairs,
+        )
+
     total = loss_risk + lambda_brier * loss_brier
     if stage >= 2:
         total = total + lambda_regime * loss_regime
@@ -491,6 +551,8 @@ def compute_risk_tpsm_loss(
         total = total + lambda_tv * loss_tv
     if lambda_severity > 0.0:
         total = total + lambda_severity * loss_severity
+    if lambda_rank > 0.0:
+        total = total + lambda_rank * loss_rank
 
     return total, {
         "loss": float(total.detach().cpu()),
@@ -499,6 +561,7 @@ def compute_risk_tpsm_loss(
         "regime_ce": float(loss_regime.detach().cpu()),
         "tv": float(loss_tv.detach().cpu()),
         "severity": float(loss_severity.detach().cpu()),
+        "rank": float(loss_rank.detach().cpu()),
     }
 
 
@@ -722,7 +785,12 @@ def evaluate_risk_tpsm(model, loader, device, args, pos_weight=None, stage=3):
             lambda_brier=args.lambda_brier,
             lambda_tv=args.lambda_tv,
             lambda_severity=args.lambda_severity if args.use_severity_head else 0.0,
+            lambda_rank=args.lambda_rank,
+            rank_label_margin=args.rank_label_margin,
+            rank_max_pairs=args.rank_max_pairs,
             use_weighted_bce=args.use_weighted_bce,
+            risk_loss_type=args.risk_loss_type,
+            focal_gamma=args.focal_gamma,
         )
         losses.append(loss_parts)
         q_all.append(out["q_risk"].cpu().numpy())
@@ -792,7 +860,12 @@ def _train_one_epoch(model, loader, optimizer, device, args, pos_weight, stage):
             lambda_brier=args.lambda_brier,
             lambda_tv=args.lambda_tv,
             lambda_severity=args.lambda_severity if args.use_severity_head else 0.0,
+            lambda_rank=args.lambda_rank,
+            rank_label_margin=args.rank_label_margin,
+            rank_max_pairs=args.rank_max_pairs,
             use_weighted_bce=args.use_weighted_bce,
+            risk_loss_type=args.risk_loss_type,
+            focal_gamma=args.focal_gamma,
         )
         optimizer.zero_grad()
         loss.backward()
@@ -820,6 +893,23 @@ def _serializable_args(args, feature_dim=None, feature_names=None, thresholds=No
         "clip": float(args.feature_clip),
     }
     return data
+
+
+def selection_score(metrics, selection_metric="risk_bce_mean", bce_weight=0.25):
+    auc_keys = [key for key in metrics if key.startswith("auc_h")]
+    auc_mean = float(np.nanmean([metrics[key] for key in auc_keys])) if auc_keys else float("nan")
+    bce = float(metrics.get("risk_bce_mean", float("inf")))
+    brier = float(metrics.get("brier_mean", float("inf")))
+    metric = str(selection_metric)
+    if metric == "risk_bce_mean":
+        return -bce
+    if metric == "auc_mean":
+        return auc_mean
+    if metric == "brier_mean":
+        return -brier
+    if metric == "bce_auc_combo":
+        return auc_mean - float(bce_weight) * bce
+    raise ValueError(f"Unsupported selection_metric: {selection_metric}")
 
 
 def train_risk_tpsm(args):
@@ -866,12 +956,14 @@ def train_risk_tpsm(args):
         use_asset_conditioning=args.use_asset_conditioning,
         num_assets=len(assets),
         asset_emb_dim=args.asset_emb_dim,
+        use_attention_pooling=args.use_attention_pooling,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     cfg = _serializable_args(args, feature_dim=len(feature_names), feature_names=feature_names, thresholds=thresholds)
     cfg["num_assets"] = len(assets)
     cfg["asset_codes"] = [asset["code"] for asset in assets]
+    best_score = -float("inf")
     best_metric = float("inf")
     best_path = Path(args.checkpoint_dir) / "risk_tpsm_lite_best.pt"
     metrics_path = Path(args.output_dir) / "risk_tpsm_lite_metrics.jsonl"
@@ -885,6 +977,7 @@ def train_risk_tpsm(args):
             "epoch": row["epoch"],
             "stage": row["stage"],
             "best_valid_risk_bce": best_metric,
+            "best_selection_score": best_score,
         }
         for prefix in ("train", "valid"):
             for key, value in row[prefix].items():
@@ -917,15 +1010,21 @@ def train_risk_tpsm(args):
                 gpu_text = ""
                 if device.type == "cuda":
                     gpu_text = f" gpu_mem={torch.cuda.memory_allocated(device) / (1024 ** 2):.0f}MB"
+                current_score = selection_score(
+                    valid_metrics,
+                    selection_metric=args.selection_metric,
+                    bce_weight=args.selection_bce_weight,
+                )
                 print(
                     f"[RiskTPSM] ep={global_epoch:03d} stage={stage} "
                     f"train_bce={train_log.get('risk_bce', float('nan')):.5f} "
                     f"val_bce={valid_metrics.get('risk_bce_mean', float('nan')):.5f} "
                     f"val_brier={valid_metrics.get('brier_mean', float('nan')):.5f} "
-                    f"{auc_text}{gpu_text}",
+                    f"sel={current_score:.5f} {auc_text}{gpu_text}",
                     flush=True,
                 )
-                if valid_metrics["risk_bce_mean"] < best_metric:
+                if current_score > best_score:
+                    best_score = current_score
                     best_metric = valid_metrics["risk_bce_mean"]
                     torch.save(
                         {
@@ -937,13 +1036,18 @@ def train_risk_tpsm(args):
                             "pos_weight": pos_weight.detach().cpu() if pos_weight is not None else None,
                             "epoch": global_epoch,
                             "valid_metrics": valid_metrics,
+                            "selection_metric": args.selection_metric,
+                            "selection_score": best_score,
                         },
                         best_path,
                     )
 
     with open(Path(args.output_dir) / "risk_tpsm_lite_config.json", "w") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
-    print(f"[RiskTPSM] best checkpoint: {best_path} valid_risk_bce={best_metric:.6f}")
+    print(
+        f"[RiskTPSM] best checkpoint: {best_path} "
+        f"selection={args.selection_metric} score={best_score:.6f} valid_risk_bce={best_metric:.6f}"
+    )
     if args.export_after_train:
         export_args = SimpleNamespace(**vars(args))
         export_args.checkpoint = str(best_path)
@@ -1013,6 +1117,7 @@ def export_risk_tpsm_outputs(args):
         use_asset_conditioning=bool(getattr(cfg, "use_asset_conditioning", False)),
         num_assets=int(getattr(cfg, "num_assets", len(assets))),
         asset_emb_dim=int(getattr(cfg, "asset_emb_dim", 8)),
+        use_attention_pooling=bool(getattr(cfg, "use_attention_pooling", False)),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model.eval()
@@ -1096,6 +1201,7 @@ def add_risk_tpsm_args(parser: argparse.ArgumentParser):
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--use_asset_conditioning", action="store_true")
     parser.add_argument("--asset_emb_dim", type=int, default=8)
+    parser.add_argument("--use_attention_pooling", action="store_true")
     parser.add_argument("--threshold_quantile", type=float, default=0.7)
     parser.add_argument("--tau_risk", type=float, default=0.25)
     parser.add_argument("--b_up", type=float, default=0.25)
@@ -1106,6 +1212,17 @@ def add_risk_tpsm_args(parser: argparse.ArgumentParser):
     parser.add_argument("--lambda_brier", type=float, default=0.1)
     parser.add_argument("--lambda_tv", type=float, default=1e-3)
     parser.add_argument("--lambda_severity", type=float, default=0.0)
+    parser.add_argument("--lambda_rank", type=float, default=0.0)
+    parser.add_argument("--rank_label_margin", type=float, default=0.15)
+    parser.add_argument("--rank_max_pairs", type=int, default=4096)
+    parser.add_argument("--risk_loss_type", choices=["bce", "focal"], default="bce")
+    parser.add_argument("--focal_gamma", type=float, default=2.0)
+    parser.add_argument(
+        "--selection_metric",
+        choices=["risk_bce_mean", "auc_mean", "brier_mean", "bce_auc_combo"],
+        default="risk_bce_mean",
+    )
+    parser.add_argument("--selection_bce_weight", type=float, default=0.25)
     parser.add_argument("--use_severity_head", action="store_true")
     parser.add_argument("--no_weighted_bce", dest="use_weighted_bce", action="store_false")
     parser.set_defaults(use_weighted_bce=True)
