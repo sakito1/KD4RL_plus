@@ -28,8 +28,12 @@ class PGControllerNet(nn.Module):
         }
         if self.embedding_mode not in emb_multipliers:
             raise ValueError(f"Unknown embedding_mode: {self.embedding_mode}")
+        # Old SSM exports use z/h as 16+16 dims, while RiskTPSM-Lite can
+        # expose 32+32 through the same compatibility fields. LazyLinear keeps
+        # the controller input-compatible with both without changing the pooled
+        # controller state size.
         self.asset_projection = nn.Sequential(
-            nn.Linear(z_dim + h_dim, hidden_dim),
+            nn.LazyLinear(hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
         )

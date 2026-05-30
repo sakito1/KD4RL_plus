@@ -14,7 +14,7 @@ class EmbMonitorQNet(nn.Module):
         super().__init__()
         self.hidden_dim = int(hidden_dim)
         self.asset_projection = nn.Sequential(
-            nn.Linear(z_dim + h_dim, hidden_dim),
+            nn.LazyLinear(hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
         )
@@ -119,13 +119,20 @@ class DQNMonitorAgent:
         self.device = device
         self.q_net = EmbMonitorQNet(z_dim, h_dim, hidden_dim, fusion_hidden).to(device)
         self.target_net = EmbMonitorQNet(z_dim, h_dim, hidden_dim, fusion_hidden).to(device)
-        self.target_net.load_state_dict(self.q_net.state_dict())
         self.target_net.eval()
         self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=float(lr))
         self.gamma = float(gamma)
         self.target_update = int(target_update)
         self.grad_clip = float(grad_clip)
         self.update_steps = 0
+        self._target_initialized = False
+
+    def _sync_target_once_initialized(self):
+        if self._target_initialized:
+            return
+        self.target_net.load_state_dict(self.q_net.state_dict())
+        self.target_net.eval()
+        self._target_initialized = True
 
     def select_action(self, obs, epsilon=0.0):
         if random.random() < float(epsilon):
@@ -136,6 +143,7 @@ class DQNMonitorAgent:
                 obs["base_drift"], obs["candidate_switch_base"], obs["port_state"],
                 obs["held_p"], obs["candidate_costs"],
             )
+            self._sync_target_once_initialized()
         return int(torch.argmax(q, dim=1).item())
 
     def update(self, replay, batch_size):
@@ -149,6 +157,7 @@ class DQNMonitorAgent:
         ).gather(
             1, batch["actions"].unsqueeze(1)
         ).squeeze(1)
+        self._sync_target_once_initialized()
         # Target participates in the differentiable loss expression; no_grad
         # avoids critic gradients without creating an inference-only tensor.
         with torch.no_grad():
@@ -183,6 +192,7 @@ class DQNMonitorAgent:
         self.q_net.load_state_dict(checkpoint["q_net"])
         self.target_net.load_state_dict(checkpoint.get("target_net", checkpoint["q_net"]))
         self.update_steps = int(checkpoint.get("update_steps", 0))
+        self._target_initialized = True
         return checkpoint.get("metadata", {})
 
 

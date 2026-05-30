@@ -47,6 +47,26 @@ class PGControllerTests(unittest.TestCase):
         grads = [p.grad for p in net.parameters() if p.requires_grad]
         self.assertTrue(any(g is not None and torch.isfinite(g).all() for g in grads))
 
+    def test_policy_accepts_risk_lite_embedding_width(self):
+        net = PGControllerNet()
+        n = 5
+        obs = {
+            "ssm": {
+                "z": torch.randn(1, n, 32),
+                "h": torch.randn(1, n, 32),
+                "p": torch.rand(1, n),
+                "q_bear": torch.rand(1, n),
+                "q_bull": torch.rand(1, n),
+            },
+            "weights_drift": torch.softmax(torch.randn(1, n), dim=1),
+            "base_drift": torch.softmax(torch.randn(1, n), dim=1),
+            "candidate_switch_base": torch.softmax(torch.randn(1, n), dim=1),
+            "port_state": torch.randn(1, 6),
+            "held_p": torch.randn(1),
+            "candidate_costs": torch.randn(1, 3),
+        }
+        self.assertEqual(net(obs).shape, (1, 2))
+
     def test_risk_gate_prior_focuses_bearish_assets_initially(self):
         net = PGControllerNet(risk_gate_prior_scale=2.0)
         n = 2

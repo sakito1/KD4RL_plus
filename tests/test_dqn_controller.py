@@ -17,12 +17,12 @@ from dqn_monitor_experiment import (
 )
 
 
-def make_observation(num_assets=3):
+def make_observation(num_assets=3, latent_dim=16):
     weights = torch.tensor([[0.5, 0.3, 0.2]], dtype=torch.float32)
     return {
         "ssm": {
-            "z": torch.randn(1, num_assets, 16),
-            "h": torch.randn(1, num_assets, 16),
+            "z": torch.randn(1, num_assets, latent_dim),
+            "h": torch.randn(1, num_assets, latent_dim),
         },
         "weights_drift": weights,
         "base_drift": torch.tensor([[0.7, 0.2, 0.1]], dtype=torch.float32),
@@ -93,6 +93,17 @@ class ControllerStateTests(unittest.TestCase):
         replay.store(obs, 1, -0.1, obs, True)
         agent = DQNMonitorAgent(torch.device("cpu"))
         self.assertIsInstance(agent.update(replay, 2), float)
+
+    def test_q_state_accepts_risk_lite_embedding_width(self):
+        obs = make_observation(latent_dim=32)
+        obs["candidate_switch_base"] = torch.tensor([[0.1, 0.2, 0.7]])
+        obs["candidate_costs"] = torch.zeros(1, 3)
+        net = EmbMonitorQNet()
+        self.assertEqual(net(
+            obs["ssm"]["z"], obs["ssm"]["h"], obs["weights_drift"],
+            obs["base_drift"], obs["candidate_switch_base"], obs["port_state"],
+            obs["held_p"], obs["candidate_costs"],
+        ).shape, (1, 2))
 
     def test_long_hold_penalty_is_soft_after_target_only(self):
         self.assertEqual(long_hold_penalty(5, 5), 0.0)
