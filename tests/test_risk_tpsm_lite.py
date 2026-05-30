@@ -92,6 +92,23 @@ class RiskTPSMLiteTests(unittest.TestCase):
         grads = [p.grad for p in model.parameters() if p.requires_grad]
         self.assertTrue(any(g is not None and torch.isfinite(g).all() for g in grads))
 
+    def test_asset_conditioning_requires_and_uses_asset_id(self):
+        model = RiskTPSMLite(
+            in_dim=12,
+            emb_dim=16,
+            num_horizons=3,
+            use_asset_conditioning=True,
+            num_assets=4,
+            asset_emb_dim=6,
+        )
+        x = torch.randn(5, 63, 12)
+        asset_id = torch.tensor([0, 1, 2, 3, 0])
+        out = model(x, asset_id)
+        self.assertEqual(out["embedding"].shape, (5, 16))
+        self.assertEqual(out["q_risk"].shape, (5, 3))
+        with self.assertRaises(ValueError):
+            model(x)
+
     def test_risk_helpers_and_legacy_mapping(self):
         close = np.array([10.0, 11.0, 9.0, 12.0])
         dd = compute_rolling_drawdown(close, 3)
@@ -108,4 +125,3 @@ class RiskTPSMLiteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

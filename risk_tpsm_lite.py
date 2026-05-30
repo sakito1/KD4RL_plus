@@ -367,30 +367,59 @@ class RiskTPSMLite(nn.Module):
         tcn_channels: int = 32,
         dropout: float = 0.1,
         use_severity_head: bool = False,
+        use_asset_conditioning: bool = False,
+        num_assets: int = 0,
+        asset_emb_dim: int = 8,
     ):
         super().__init__()
         self.in_dim = int(in_dim)
         self.emb_dim = int(emb_dim)
         self.num_horizons = int(num_horizons)
         self.use_severity_head = bool(use_severity_head)
+        self.use_asset_conditioning = bool(use_asset_conditioning)
+        self.num_assets = int(num_assets)
+        self.asset_emb_dim = int(asset_emb_dim)
         self.encoder = nn.Sequential(
             CausalConvBlock(self.in_dim, tcn_channels, kernel_size=3, dilation=1, dropout=dropout),
             CausalConvBlock(tcn_channels, tcn_channels, kernel_size=3, dilation=2, dropout=dropout),
             CausalConvBlock(tcn_channels, tcn_channels, kernel_size=3, dilation=4, dropout=0.0),
         )
+        if self.use_asset_conditioning:
+            if self.num_assets <= 0:
+                raise ValueError("num_assets must be positive when use_asset_conditioning=True.")
+            self.asset_emb = nn.Embedding(self.num_assets, self.asset_emb_dim)
+            self.asset_film = nn.Sequential(
+                nn.Linear(self.asset_emb_dim, tcn_channels * 2),
+                nn.Tanh(),
+            )
+            self.asset_risk_bias = nn.Embedding(self.num_assets, self.num_horizons)
+            nn.init.zeros_(self.asset_risk_bias.weight)
+        else:
+            self.asset_emb = None
+            self.asset_film = None
+            self.asset_risk_bias = None
         self.emb_proj = nn.Linear(tcn_channels, self.emb_dim)
         self.emb_ln = nn.LayerNorm(self.emb_dim)
         self.risk_head = nn.Linear(self.emb_dim, self.num_horizons)
         self.regime_head = nn.Linear(self.emb_dim, self.num_horizons * 3)
         self.severity_head = nn.Linear(self.emb_dim, self.num_horizons) if self.use_severity_head else None
 
-    def forward(self, x):
+    def forward(self, x, asset_id=None):
         assert x.dim() == 3, f"expected x [B, W, F], got {tuple(x.shape)}"
         assert x.size(-1) == self.in_dim, f"expected F={self.in_dim}, got {x.size(-1)}"
         h = self.encoder(x.transpose(1, 2))
         last = h[:, :, -1]
+        if self.use_asset_conditioning:
+            if asset_id is None:
+                raise ValueError("asset_id is required when use_asset_conditioning=True.")
+            asset_id = asset_id.to(device=x.device, dtype=torch.long).view(-1)
+            asset_context = self.asset_emb(asset_id)
+            gamma, beta = self.asset_film(asset_context).chunk(2, dim=-1)
+            last = last * (1.0 + 0.1 * gamma) + 0.1 * beta
         embedding = self.emb_ln(self.emb_proj(last))
         risk_logits = self.risk_head(embedding)
+        if self.use_asset_conditioning:
+            risk_logits = risk_logits + 0.1 * self.asset_risk_bias(asset_id)
         q_risk = torch.sigmoid(risk_logits)
         regime_logits = self.regime_head(embedding).view(-1, self.num_horizons, 3)
         regime_probs = torch.softmax(regime_logits, dim=-1)
@@ -517,6 +546,7 @@ class RiskTPSMWindowDataset(Dataset):
         return {
             "x": torch.tensor(asset["X"][wi], dtype=torch.float32),
             "x_prev": torch.tensor(asset["X"][prev_wi], dtype=torch.float32),
+            "asset_id": torch.tensor(ai, dtype=torch.long),
             "prev_valid": torch.tensor(wi > 0, dtype=torch.bool),
             "y_risk": torch.tensor(asset["y_risk"][wi], dtype=torch.float32),
             "y_regime": torch.tensor(asset["y_regime"][wi], dtype=torch.float32),
@@ -555,7 +585,7 @@ def prepare_risk_tpsm_assets(args, thresholds=None, need_labels=True):
 
     raw_assets = []
     train_dd_values = [[] for _ in horizons]
-    for code in codes:
+    for asset_id, code in enumerate(codes):
         path = Path(args.data_dir) / f"{code}.csv"
         df = _read_stock_frame(path, max_rows=getattr(args, "max_rows", None))
         feat_df = build_risk_tpsm_features(
@@ -573,6 +603,7 @@ def prepare_risk_tpsm_assets(args, thresholds=None, need_labels=True):
         window_dates = dates[endpoints]
         asset = {
             "code": code,
+            "asset_id": asset_id,
             "df": df,
             "feature_names": list(feat_df.columns),
             "X": X,
@@ -679,9 +710,9 @@ def evaluate_risk_tpsm(model, loader, device, args, pos_weight=None, stage=3):
     regime_pred, regime_true = [], []
     for batch in loader:
         batch = _move_batch(batch, device)
-        out = model(batch["x"])
+        out = model(batch["x"], batch.get("asset_id"))
         if stage >= 3:
-            out["q_risk_prev"] = model(batch["x_prev"])["q_risk"]
+            out["q_risk_prev"] = model(batch["x_prev"], batch.get("asset_id"))["q_risk"]
         _, loss_parts = compute_risk_tpsm_loss(
             out,
             batch,
@@ -749,9 +780,9 @@ def _train_one_epoch(model, loader, optimizer, device, args, pos_weight, stage):
     logs = []
     for batch in loader:
         batch = _move_batch(batch, device)
-        out = model(batch["x"])
+        out = model(batch["x"], batch.get("asset_id"))
         if stage >= 3:
-            out["q_risk_prev"] = model(batch["x_prev"])["q_risk"].detach()
+            out["q_risk_prev"] = model(batch["x_prev"], batch.get("asset_id"))["q_risk"].detach()
         loss, loss_parts = compute_risk_tpsm_loss(
             out,
             batch,
@@ -832,15 +863,35 @@ def train_risk_tpsm(args):
         tcn_channels=args.tcn_channels,
         dropout=args.dropout,
         use_severity_head=args.use_severity_head,
+        use_asset_conditioning=args.use_asset_conditioning,
+        num_assets=len(assets),
+        asset_emb_dim=args.asset_emb_dim,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     cfg = _serializable_args(args, feature_dim=len(feature_names), feature_names=feature_names, thresholds=thresholds)
+    cfg["num_assets"] = len(assets)
+    cfg["asset_codes"] = [asset["code"] for asset in assets]
     best_metric = float("inf")
     best_path = Path(args.checkpoint_dir) / "risk_tpsm_lite_best.pt"
     metrics_path = Path(args.output_dir) / "risk_tpsm_lite_metrics.jsonl"
+    metrics_csv_path = Path(args.output_dir) / "risk_tpsm_lite_metrics.csv"
     stage_plan = [(1, args.stage1_epochs), (2, args.stage2_epochs), (3, args.stage3_epochs)]
     global_epoch = 0
+    flat_rows = []
+
+    def flatten_metrics(row):
+        out = {
+            "epoch": row["epoch"],
+            "stage": row["stage"],
+            "best_valid_risk_bce": best_metric,
+        }
+        for prefix in ("train", "valid"):
+            for key, value in row[prefix].items():
+                if isinstance(value, (int, float, np.floating)) and np.isfinite(value):
+                    out[f"{prefix}_{key}"] = float(value)
+        return out
+
     with open(metrics_path, "w") as mf:
         for stage, epochs in stage_plan:
             for _ in range(int(epochs)):
@@ -857,11 +908,22 @@ def train_risk_tpsm(args):
                 }
                 mf.write(json.dumps(row, ensure_ascii=False) + "\n")
                 mf.flush()
+                flat_rows.append(flatten_metrics(row))
+                pd.DataFrame(flat_rows).to_csv(metrics_csv_path, index=False)
+                auc_text = " ".join(
+                    f"auc_h{h}={valid_metrics.get(f'auc_h{h}', float('nan')):.3f}"
+                    for h in args.horizons
+                )
+                gpu_text = ""
+                if device.type == "cuda":
+                    gpu_text = f" gpu_mem={torch.cuda.memory_allocated(device) / (1024 ** 2):.0f}MB"
                 print(
                     f"[RiskTPSM] ep={global_epoch:03d} stage={stage} "
                     f"train_bce={train_log.get('risk_bce', float('nan')):.5f} "
                     f"val_bce={valid_metrics.get('risk_bce_mean', float('nan')):.5f} "
-                    f"val_brier={valid_metrics.get('brier_mean', float('nan')):.5f}"
+                    f"val_brier={valid_metrics.get('brier_mean', float('nan')):.5f} "
+                    f"{auc_text}{gpu_text}",
+                    flush=True,
                 )
                 if valid_metrics["risk_bce_mean"] < best_metric:
                     best_metric = valid_metrics["risk_bce_mean"]
@@ -902,12 +964,17 @@ def map_risk_outputs_to_legacy(q_risk, horizons):
 
 
 @torch.no_grad()
-def _infer_asset(model, X, device, batch_size=512):
+def _infer_asset(model, X, device, batch_size=512, asset_id=None):
     model.eval()
     embeddings, risks, regimes, severities = [], [], [], []
     for start in range(0, len(X), batch_size):
         xb = torch.tensor(X[start : start + batch_size], dtype=torch.float32, device=device)
-        out = model(xb)
+        aid = None
+        if model.use_asset_conditioning:
+            if asset_id is None:
+                raise ValueError("asset_id is required for asset-conditioned export.")
+            aid = torch.full((xb.size(0),), int(asset_id), dtype=torch.long, device=device)
+        out = model(xb, aid)
         embeddings.append(out["embedding"].cpu())
         risks.append(out["q_risk"].cpu())
         regimes.append(out["regime_probs"].cpu())
@@ -943,6 +1010,9 @@ def export_risk_tpsm_outputs(args):
         tcn_channels=int(cfg.tcn_channels),
         dropout=float(cfg.dropout),
         use_severity_head=bool(getattr(cfg, "use_severity_head", False)),
+        use_asset_conditioning=bool(getattr(cfg, "use_asset_conditioning", False)),
+        num_assets=int(getattr(cfg, "num_assets", len(assets))),
+        asset_emb_dim=int(getattr(cfg, "asset_emb_dim", 8)),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model.eval()
@@ -960,7 +1030,13 @@ def export_risk_tpsm_outputs(args):
 
     for asset in assets:
         code = asset["code"]
-        emb, q_risk, regime, severity = _infer_asset(model, asset["X"], device, batch_size=getattr(cfg, "infer_batch_size", 512))
+        emb, q_risk, regime, severity = _infer_asset(
+            model,
+            asset["X"],
+            device,
+            batch_size=getattr(cfg, "infer_batch_size", 512),
+            asset_id=asset.get("asset_id"),
+        )
         q_np = q_risk.numpy()
         reg_np = regime.numpy()
         aggregate, q_bear, q_bull = map_risk_outputs_to_legacy(q_np, cfg.horizons)
@@ -1018,6 +1094,8 @@ def add_risk_tpsm_args(parser: argparse.ArgumentParser):
     parser.add_argument("--emb_dim", type=int, default=16)
     parser.add_argument("--tcn_channels", type=int, default=32)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--use_asset_conditioning", action="store_true")
+    parser.add_argument("--asset_emb_dim", type=int, default=8)
     parser.add_argument("--threshold_quantile", type=float, default=0.7)
     parser.add_argument("--tau_risk", type=float, default=0.25)
     parser.add_argument("--b_up", type=float, default=0.25)
