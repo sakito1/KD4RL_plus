@@ -109,7 +109,11 @@ def verify_market_assets(market):
     if actual_hash != settings["checkpoint_sha256"]:
         raise RuntimeError(f"Checkpoint hash mismatch for {market}: {checkpoint}")
     ssm_dir = Path(ROOT) / settings["ssm_path"]
-    ssm_inputs = list(ssm_dir.glob("*.csv")) + list(ssm_dir.glob("*_ssm3_states.pt"))
+    stock_csvs = [
+        path for path in ssm_dir.glob("*.csv")
+        if not path.name.startswith("risk_tpsm_")
+    ]
+    ssm_inputs = stock_csvs + list(ssm_dir.glob("*_ssm3_states.pt"))
     if len(ssm_inputs) != settings["ssm_input_files"]:
         raise RuntimeError(
             f"SSM input contract mismatch for {market}: "
