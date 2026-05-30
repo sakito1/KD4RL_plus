@@ -1,3 +1,4 @@
+import argparse
 import os
 import numpy as np
 import pandas as pd
@@ -11,6 +12,11 @@ try:
     import utils.config as config
 except Exception:
     config = None
+
+
+class _PrintLogger:
+    def info(self, msg):
+        print(msg)
 
 # 定义 Label 列名
 COL_LABEL_MAIN = "label_ensemble_soft"  # 主目标 (Soft)
@@ -426,3 +432,44 @@ def full_pipeline(KD_path: str, logger, K: int = 2, horizon: int = 1, do_train: 
             run_split(all_X_tr[aid], all_y_mac_tr[aid], all_idx_tr[aid], all_price_tr[aid], "train")
             run_split(all_X_va[aid], all_y_mac_va[aid], all_idx_va[aid], all_price_va[aid], "val")
             run_split(all_X_te[aid], all_y_mac_te[aid], all_idx_te[aid], all_price_te[aid], "test")
+
+
+def build_cli_parser():
+    parser = argparse.ArgumentParser(description="SSM/TPSM training and export pipeline.")
+    parser.add_argument("--ssm_model_type", choices=["original", "risk_lite"], default="original")
+    parser.add_argument("--mode", choices=["train", "export", "train_export"], default="train")
+    parser.add_argument("--kd_path", default="checkpoints/risk_tpsm_lite")
+    parser.add_argument("--do_train", action="store_true", help="Train original SSM3 before exporting.")
+    parser.add_argument("--original_epochs", type=int, default=200)
+    parser.add_argument("--original_seq_len", type=int, default=720)
+    parser.add_argument("--original_stride", type=int, default=63)
+    parser.add_argument("--original_batch_size", type=int, default=256)
+
+    from risk_tpsm_lite import add_risk_tpsm_args
+
+    add_risk_tpsm_args(parser)
+    return parser
+
+
+def main():
+    parser = build_cli_parser()
+    args = parser.parse_args()
+    if args.ssm_model_type == "risk_lite":
+        from risk_tpsm_lite import run_risk_tpsm_cli
+
+        return run_risk_tpsm_cli(args)
+
+    logger = _PrintLogger()
+    return full_pipeline(
+        args.kd_path,
+        logger,
+        do_train=args.do_train,
+        epochs=args.original_epochs,
+        seq_len=args.original_seq_len,
+        stride=args.original_stride,
+        batch_size=args.original_batch_size,
+    )
+
+
+if __name__ == "__main__":
+    main()
