@@ -150,7 +150,7 @@ def run_id(stage, market, episodes, cfg):
     return "_".join(pieces)
 
 
-def run_one(stage, market, mode, episodes, cfg, validation_only, rerun):
+def run_one(stage, market, mode, episodes, cfg, validation_only, rerun, ssm_path=None):
     rid = run_id(stage, market, episodes, cfg)
     out_dir = ROOT / "results" / "pg_controller" / market / rid
     summary_path = out_dir / "summary.json"
@@ -197,6 +197,8 @@ def run_one(stage, market, mode, episodes, cfg, validation_only, rerun):
         cmd.append("--disable-risk-gate")
     if cfg.get("zero_policy_output", False):
         cmd.append("--zero-policy-output")
+    if ssm_path:
+        cmd.extend(["--ssm-path", ssm_path])
     if validation_only:
         cmd.append("--validation-only")
     subprocess.run(cmd, cwd=ROOT, check=True)
@@ -232,6 +234,11 @@ def main():
     parser.add_argument("--max-runs", type=int, default=None)
     parser.add_argument("--final-test", action="store_true")
     parser.add_argument("--rerun", action="store_true")
+    parser.add_argument(
+        "--ssm-path",
+        default=None,
+        help="Optional single SSM/Risk embedding directory override for all markets.",
+    )
     args = parser.parse_args()
 
     configs = default_configs()
@@ -249,6 +256,7 @@ def main():
                 cfg,
                 validation_only=not args.final_test,
                 rerun=args.rerun,
+                ssm_path=args.ssm_path.format(market=market) if args.ssm_path else None,
             )
             val = summary["best_validation"]
             print(

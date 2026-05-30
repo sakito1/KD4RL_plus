@@ -600,6 +600,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--market", choices=sorted(MARKETS), required=True)
     parser.add_argument("--mode", choices=["smoke", "full"], default="smoke")
+    parser.add_argument(
+        "--ssm-path",
+        default=None,
+        help="Optional SSM/Risk embedding directory override. Keeps original feature_ssm untouched.",
+    )
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--hidden-dim", type=int, default=32)
@@ -652,9 +657,12 @@ def main():
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("PG controller requires CUDA but torch cannot access the GPU.")
     device = torch.device(args.device)
+    if args.ssm_path:
+        MARKETS[args.market]["ssm_path"] = args.ssm_path
     market_cfg = MARKETS[args.market]
     provenance = verify_market_assets(args.market)
     apply_market_config(args.market)
+    runtime_config.dataset["ssm_data_path"] = provenance["ssm_path"]
     runtime_config.device = device
     runtime_config.trade_num = 10
     runtime_config.seed = market_cfg["source_seed"]
