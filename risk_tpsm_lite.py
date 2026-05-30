@@ -24,7 +24,7 @@ except Exception:
 
 
 EPS = 1e-8
-DEFAULT_HORIZONS = (5, 10, 20, 30)
+DEFAULT_HORIZONS = (5, 10, 20)
 
 
 def _as_list(value):
