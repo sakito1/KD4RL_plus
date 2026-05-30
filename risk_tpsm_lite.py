@@ -912,6 +912,15 @@ def selection_score(metrics, selection_metric="risk_bce_mean", bce_weight=0.25):
     raise ValueError(f"Unsupported selection_metric: {selection_metric}")
 
 
+def selected_checkpoint_path(checkpoint_policy, best_path, final_path):
+    policy = str(checkpoint_policy)
+    if policy == "best":
+        return Path(best_path)
+    if policy in ("final", "best_and_final"):
+        return Path(final_path)
+    raise ValueError(f"Unsupported checkpoint_policy: {checkpoint_policy}")
+
+
 def train_risk_tpsm(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -966,11 +975,14 @@ def train_risk_tpsm(args):
     best_score = -float("inf")
     best_metric = float("inf")
     best_path = Path(args.checkpoint_dir) / "risk_tpsm_lite_best.pt"
+    final_path = Path(args.checkpoint_dir) / "risk_tpsm_lite_final.pt"
     metrics_path = Path(args.output_dir) / "risk_tpsm_lite_metrics.jsonl"
     metrics_csv_path = Path(args.output_dir) / "risk_tpsm_lite_metrics.csv"
     stage_plan = [(1, args.stage1_epochs), (2, args.stage2_epochs), (3, args.stage3_epochs)]
     global_epoch = 0
     flat_rows = []
+    last_valid_metrics = None
+    last_selection_score = None
 
     def flatten_metrics(row):
         out = {
@@ -1015,6 +1027,8 @@ def train_risk_tpsm(args):
                     selection_metric=args.selection_metric,
                     bce_weight=args.selection_bce_weight,
                 )
+                last_valid_metrics = valid_metrics
+                last_selection_score = current_score
                 print(
                     f"[RiskTPSM] ep={global_epoch:03d} stage={stage} "
                     f"train_bce={train_log.get('risk_bce', float('nan')):.5f} "
@@ -1038,9 +1052,31 @@ def train_risk_tpsm(args):
                             "valid_metrics": valid_metrics,
                             "selection_metric": args.selection_metric,
                             "selection_score": best_score,
+                            "checkpoint_policy": "best",
                         },
                         best_path,
                     )
+
+    if last_valid_metrics is None:
+        raise ValueError("No training epochs were run. Increase stage epoch counts before saving a checkpoint.")
+
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "config": cfg,
+            "horizons": [int(h) for h in args.horizons],
+            "label_thresholds": thresholds,
+            "pos_weight": pos_weight.detach().cpu() if pos_weight is not None else None,
+            "epoch": global_epoch,
+            "valid_metrics": last_valid_metrics,
+            "selection_metric": args.selection_metric,
+            "selection_score": last_selection_score,
+            "checkpoint_policy": "final",
+        },
+        final_path,
+    )
+    selected_path = selected_checkpoint_path(args.checkpoint_policy, best_path, final_path)
 
     with open(Path(args.output_dir) / "risk_tpsm_lite_config.json", "w") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
@@ -1048,11 +1084,17 @@ def train_risk_tpsm(args):
         f"[RiskTPSM] best checkpoint: {best_path} "
         f"selection={args.selection_metric} score={best_score:.6f} valid_risk_bce={best_metric:.6f}"
     )
+    print(
+        f"[RiskTPSM] final checkpoint: {final_path} "
+        f"epoch={global_epoch} selection={args.selection_metric} "
+        f"score={last_selection_score:.6f} valid_risk_bce={last_valid_metrics.get('risk_bce_mean', float('nan')):.6f}"
+    )
+    print(f"[RiskTPSM] selected checkpoint ({args.checkpoint_policy}): {selected_path}")
     if args.export_after_train:
         export_args = SimpleNamespace(**vars(args))
-        export_args.checkpoint = str(best_path)
+        export_args.checkpoint = str(selected_path)
         export_risk_tpsm_outputs(export_args)
-    return best_path
+    return selected_path
 
 
 def map_risk_outputs_to_legacy(q_risk, horizons):
@@ -1190,6 +1232,15 @@ def add_risk_tpsm_args(parser: argparse.ArgumentParser):
     parser.add_argument("--output_dir", default="results/risk_tpsm_lite")
     parser.add_argument("--checkpoint_dir", default="checkpoints/risk_tpsm_lite")
     parser.add_argument("--checkpoint", default="")
+    parser.add_argument(
+        "--checkpoint_policy",
+        choices=["best", "final", "best_and_final"],
+        default="final",
+        help=(
+            "Checkpoint used for train_export/export_after_train. "
+            "final trains through all configured epochs and exports the converged last epoch."
+        ),
+    )
     parser.add_argument("--export_after_train", action="store_true")
     parser.add_argument("--window", type=int, default=63)
     parser.add_argument("--horizons", type=int, nargs="+", default=list(DEFAULT_HORIZONS))

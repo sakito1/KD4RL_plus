@@ -16,6 +16,7 @@ from risk_tpsm_lite import (
     map_risk_outputs_to_legacy,
     pairwise_ranking_loss,
     selection_score,
+    selected_checkpoint_path,
 )
 
 
@@ -142,6 +143,11 @@ class RiskTPSMLiteTests(unittest.TestCase):
         metrics_b = {"risk_bce_mean": 0.7, "brier_mean": 0.2, "auc_h5": 0.60, "auc_h10": 0.62}
         self.assertGreater(selection_score(metrics_b, "auc_mean"), selection_score(metrics_a, "auc_mean"))
         self.assertGreater(selection_score(metrics_a, "risk_bce_mean"), selection_score(metrics_b, "risk_bce_mean"))
+
+    def test_final_checkpoint_policy_is_selected_for_converged_training(self):
+        self.assertEqual(str(selected_checkpoint_path("final", "best.pt", "final.pt")), "final.pt")
+        self.assertEqual(str(selected_checkpoint_path("best_and_final", "best.pt", "final.pt")), "final.pt")
+        self.assertEqual(str(selected_checkpoint_path("best", "best.pt", "final.pt")), "best.pt")
 
     def test_risk_helpers_and_legacy_mapping(self):
         close = np.array([10.0, 11.0, 9.0, 12.0])
