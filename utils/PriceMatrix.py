@@ -4,6 +4,62 @@ import numpy as np
 import torch
 
 
+def _standardize_feature_columns(df, feature_cols):
+    df = df.copy()
+    eps = 1e-12
+
+    if 'adjfactor' in df.columns:
+        adjfactor = pd.to_numeric(df['adjfactor'], errors='coerce').fillna(1.0)
+    elif {'adjclose', 'close'}.issubset(df.columns):
+        close = pd.to_numeric(df['close'], errors='coerce')
+        adjclose = pd.to_numeric(df['adjclose'], errors='coerce')
+        adjfactor = (adjclose / (close + eps)).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    else:
+        adjfactor = pd.Series(1.0, index=df.index)
+
+    derived_specs = {
+        'adjopen': ('open', adjfactor),
+        'adjclose': ('close', adjfactor),
+        'adjhigh': ('high', adjfactor),
+        'adjlow': ('low', adjfactor),
+    }
+    for target, (source, factor) in derived_specs.items():
+        if target not in df.columns and source in df.columns:
+            df[target] = pd.to_numeric(df[source], errors='coerce') * factor
+
+    if 'amount' not in df.columns:
+        if {'close', 'volume'}.issubset(df.columns):
+            df['amount'] = (
+                pd.to_numeric(df['close'], errors='coerce')
+                * pd.to_numeric(df['volume'], errors='coerce')
+            )
+        elif 'volume' in df.columns:
+            df['amount'] = pd.to_numeric(df['volume'], errors='coerce')
+
+    if 'amp' not in df.columns or 'body' not in df.columns:
+        if {'adjopen', 'adjclose', 'adjhigh', 'adjlow'}.issubset(df.columns):
+            day_range = (
+                pd.to_numeric(df['adjhigh'], errors='coerce')
+                - pd.to_numeric(df['adjlow'], errors='coerce')
+                + eps
+            )
+            if 'amp' not in df.columns:
+                df['amp'] = day_range / (pd.to_numeric(df['adjopen'], errors='coerce') + eps)
+            if 'body' not in df.columns:
+                df['body'] = (
+                    pd.to_numeric(df['adjclose'], errors='coerce')
+                    - pd.to_numeric(df['adjopen'], errors='coerce')
+                ) / day_range
+
+    missing = [col for col in feature_cols if col not in df.columns]
+    if missing:
+        raise KeyError(f"Missing feature columns after derivation: {missing}")
+
+    df[feature_cols] = df[feature_cols].apply(pd.to_numeric, errors='coerce')
+    df[feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return df
+
+
 def Datamatrix_ssm_hidden(hidden_dir, stocks, all_dates):
     """
     专门加载 .pt 文件中的 h 和 z，并对齐到 all_dates
@@ -95,6 +151,7 @@ def process_files(file_paths, stocks, feature_cols):
     # 3. 遍历提取 CSV 数据并对齐
     for stock in stocks:
         df = asset_data[stock].reindex(common_dates)
+        df = _standardize_feature_columns(df, feature_cols)
 
         # A. 提取特征 (Features)
         # 填充缺失值防止 NaN

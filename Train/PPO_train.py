@@ -72,6 +72,8 @@ class HRL_Networks(nn.Module):
                 port_state_dim=port_state_dim,
                 hidden_dim=HIDDEN_DIM,
                 action_dim=num_stocks,
+                min_hold=getattr(cfg, "min_hold", 20),
+                max_hold=getattr(cfg, "max_hold", 40),
             ),
             outer_actor_args=dict(
                 lstm_dim=HIDDEN_DIM,
@@ -161,7 +163,8 @@ class HRL_Trainer:
     # 核心 Episode 运行逻辑 (支持 Phase 和 强制换仓)
     # ==============================================================================
     def run_episode(self, env, *, mode='train', phase='warmup_outer', fixed_cycle=None, disable_inner=False,
-                    use_rule_switch=False):
+                    use_rule_switch=False, rollout_update_steps=None, auto_update_phase=None,
+                    train_monitor=None):
         obs = env.reset()
         is_train = (mode == 'train')
         if is_train:
@@ -171,11 +174,19 @@ class HRL_Trainer:
 
         spec = self._get_phase_spec(phase)
 
-        T = env.episode_len
+        T = max(1, int(getattr(env, 'current_episode_len', env.episode_len)))
         m_hold = int(getattr(self.cfg, 'max_hold', 60))
         switch_schedule = sample_switch_schedule(T,m_hold, m_hold) if spec.use_schedule else None
 
-        ret_stats = {'total': 0.0, 'history': [env.portfolio_value.item()]}
+        ret_stats = {
+            'total': 0.0,
+            'history': [env.portfolio_value.item()],
+            'episode_start': int(getattr(env, 'current_episode_start', env.day)),
+            'episode_end': int(getattr(env, 'current_episode_end', env.stop_step)),
+        }
+        if hasattr(env, 'all_dates'):
+            ret_stats['start_date'] = str(env.all_dates[ret_stats['episode_start']].date())
+            ret_stats['end_date'] = str(env.all_dates[ret_stats['episode_end']].date())
         step_idx = 0
 
         # 统计计数器
@@ -196,6 +207,57 @@ class HRL_Trainer:
         # [Fix] 从配置读取最小/最大持仓，确保规则模式也遵守
         CFG_MIN_HOLD = int(getattr(self.cfg, 'min_hold', 5))  # 默认5天
         CFG_MAX_HOLD = int(getattr(self.cfg, 'max_hold', 60))  # 默认60天
+        rollout_update_steps = int(rollout_update_steps or 0)
+        stored_since_update = 0
+        loss_accum = {}
+        update_count = 0
+
+        def _merge_loss(loss_log):
+            nonlocal update_count
+            if not loss_log:
+                return
+            update_count += 1
+            for k, v in loss_log.items():
+                loss_accum.setdefault(k, []).append(float(v))
+
+        def _bootstrap_values(next_obs, done_flag):
+            if done_flag:
+                return {'val_inn': 0.0, 'val_out': 0.0, 'val_mon': 0.0}
+            with torch.no_grad():
+                last_out = self.agent.get_action(
+                    next_obs,
+                    mode=mode,
+                    force_switch=1,
+                    force_inner_zero=True,
+                    force_locked=True,
+                )
+            return {
+                'val_inn': last_out['val_inn'].item(),
+                'val_out': last_out['val_out'].item(),
+                'val_mon': last_out['val_mon'].item(),
+            }
+
+        def _finish_rollout(next_obs, done_flag):
+            if len(self.buffer.data.get('rew_mon', [])) <= 0:
+                return
+            self.buffer.finish_episode(_bootstrap_values(next_obs, done_flag))
+            if auto_update_phase is None:
+                return
+
+            loss_log = self.agent.update(
+                self.buffer.get_batch(),
+                phase=auto_update_phase,
+                train_monitor=train_monitor,
+            )
+            _merge_loss(loss_log)
+            self.buffer.clear()
+            if hasattr(self.buffer, 'mark_episode_start'):
+                self.buffer.mark_episode_start()
+            if (
+                    bool(getattr(self.cfg, "clear_cuda_cache_on_update", False))
+                    and getattr(self.device, "type", str(self.device)) == "cuda"
+            ):
+                torch.cuda.empty_cache()
 
         while True:
             duration = step_idx - last_switch_step
@@ -292,18 +354,9 @@ class HRL_Trainer:
             outer_action = out['act_out']
             is_switch_action = (out['act_mon'].item() == 1)
 
-            # Counterfactual monitor reward: value(controller decision)
-            # minus value(the unselected alternative), estimated by Outer Critic.
-            with torch.no_grad():
-                value_hold = self.agent.net.outer.value(obs['outer_state'], obs['base_drift']).squeeze(-1)
-                value_switch = self.agent.net.outer.value(obs['outer_state'], outer_action).squeeze(-1)
-                cf_switch_advantage = value_switch - value_hold
-                controller_value = torch.where(out['act_mon'] == 1, value_switch, value_hold)
-                counterfactual_value = torch.where(out['act_mon'] == 1, value_hold, value_switch)
-                monitor_reward = (
-                    (controller_value - counterfactual_value)
-                    * float(getattr(self.cfg, 'reward_scale_monitor', 1.0))
-                ).item()
+            # Controller reward comes from env.step as daily portfolio log-return.
+            # The old outer-critic counterfactual reward is deliberately disabled.
+            cf_switch_advantage = torch.zeros((), device=self.device)
 
             # === Update Counters ===
             is_scheduled_active = (
@@ -347,14 +400,27 @@ class HRL_Trainer:
 
             next_obs, _, done, info = env.step(weights_exec, base_used, outer_action=outer_action,
                                                is_switch=is_switch_action)
-            info['rewards']['monitor_reward'] = monitor_reward
             info['rewards']['monitor_cf_switch_advantage'] = cf_switch_advantage.item()
 
             if is_train:
+                inner_indices = out.get('inner_indices')
+                inner_target_full = info.get(
+                    'inner_stock_return_target',
+                    info.get('inner_next_return_target'),
+                )
+                if inner_indices is not None and isinstance(inner_target_full, torch.Tensor):
+                    target_full = inner_target_full.unsqueeze(0).expand(inner_indices.shape[0], -1)
+                    inner_target_used = torch.gather(target_full, dim=1, index=inner_indices)
+                else:
+                    inner_target_used = inner_target_full
+
                 self.buffer.store_daily({
                     'ssm': obs['ssm'],
                     'outer_state': obs['outer_state'],
-                    'inner_state': obs['inner_state'],
+                    'inner_state': out.get('inner_state_used', obs['inner_state']),
+                    'inner_base_used': out.get('inner_base_used', base_used),
+                    'inner_weights_drift': out.get('inner_weights_drift', obs['weights_drift']),
+                    'inner_indices': out.get('inner_indices', torch.empty(0, device=self.device, dtype=torch.long)),
                     'weights_drift': obs['weights_drift'],
                     'base_drift': obs['base_drift'],
                     'port_state': obs['port_state'],
@@ -382,7 +448,21 @@ class HRL_Trainer:
                     'rew_mon': info['rewards']['monitor_reward'],
                     'rew_alpha': info['rewards']['inner_reward'],
                     'rew_outer_raw': info['rewards']['outer_step_reward'],
+                    'outer_stock_return_target': info['outer_stock_return_target'],
+                    'inner_stock_return_target': inner_target_used,
+                    'inner_next_return_target': inner_target_used,
+                    'controller_switch_label': info['controller_switch_label'],
+                    'controller_sup_weight': info['controller_sup_weight'],
                 })
+                stored_since_update += 1
+
+                if (
+                        auto_update_phase is not None
+                        and rollout_update_steps > 0
+                        and stored_since_update >= rollout_update_steps
+                        and not done):
+                    _finish_rollout(next_obs, done_flag=False)
+                    stored_since_update = 0
 
             obs = next_obs
             ret_stats['history'].append(info['portfolio_value'])
@@ -401,19 +481,7 @@ class HRL_Trainer:
                             f"   [DEBUG Analysis] Th={RULE_THRESHOLD} | Avg Held_P={avg_p:.4f} | Days < Th Ratio: {low_ratio * 100:.1f}%")
 
                 if is_train:
-                    with torch.no_grad():
-                        last_out = self.agent.get_action(
-                            obs,
-                            mode=mode,
-                            force_switch=0,
-                            force_inner_zero=True,
-                            force_locked=True,
-                        )
-                    self.buffer.finish_episode({
-                        'val_inn': last_out['val_inn'].item(),
-                        'val_out': last_out['val_out'].item(),
-                        'val_mon': last_out['val_mon'].item(),
-                    })
+                    _finish_rollout(obs, done_flag=True)
                 break
 
             step_idx += 1
@@ -425,6 +493,11 @@ class HRL_Trainer:
         ret_stats['forced_switch_count'] = forced_switch_count
         ret_stats['forced_schedule_count'] = forced_schedule_count
         ret_stats['total_steps'] = step_idx
+        ret_stats['update_count'] = update_count
+        ret_stats['loss_log'] = {
+            k: float(np.mean(v)) if len(v) > 0 else 0.0
+            for k, v in loss_accum.items()
+        }
         return ret_stats
 
     def _get_phase_spec(self, phase: str) -> PhaseSpec:
@@ -509,6 +582,13 @@ class HRL_Trainer:
             # maximum holding days -> must switch
             if duration >= max_hold:
                 return 1, True
+
+            controller_check_stride = int(getattr(self.cfg, 'controller_check_stride_days', 1))
+            controller_check_stride = max(1, controller_check_stride)
+            if controller_check_stride > 1:
+                free_elapsed = duration - min_hold
+                if free_elapsed % controller_check_stride != 0:
+                    return 0, True
 
             # free decision window
             force_switch = None
@@ -626,6 +706,7 @@ class HRL_Trainer:
                        f"forced_h:{ret.get('forced_hold_count', 0)}, forced_s:{ret.get('forced_switch_count', 0)})")
             if 'inn_pi' in loss_log: log_str += f" | L_In:{loss_log['inn_pi']:.3f}"
             if 'out_pi' in loss_log: log_str += f" | L_Out:{loss_log['out_pi']:.3f}"
+            if 'out_pred' in loss_log: log_str += f" | L_OutPred:{loss_log['out_pred']:.3f}"
             if 'mon_pi' in loss_log: log_str += f" | L_Mon:{loss_log.get('mon_pi', 0):.3f}"
             self.logger.info(log_str)
 
@@ -798,6 +879,10 @@ class HRL_Trainer:
             os.path.join(self.run_dir, "test_s3_AllModules.csv"), index=False
         )
 
+        if not bool(getattr(self.cfg, "run_rule_switch_test", False)):
+            self.agent.net.train()
+            return
+
         # Scenario 4: Rule Based Switch (Multi-threshold)
         test_thresholds = [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6,0.65,0.7]
         original_th = getattr(self.cfg, 'rule_switch_threshold', 0.3)
@@ -870,6 +955,8 @@ def train_warmup_then_joint_with_monitor(trainer,
                                          joint_episodes: int = 100,
                                          fixed_cycle: int = 60,
                                          val_interval: int = None,
+                                         train_monitor: bool = False,
+                                         use_rule_switch_train: bool = True,
                                          save_prefix: str = "cf_monitor"):
     import numpy as np
     import os
@@ -879,6 +966,40 @@ def train_warmup_then_joint_with_monitor(trainer,
 
     # 强制设定：前 10 轮不验证
     MIN_WARMUP_STEPS = 6
+    train_episodes_per_epoch = int(
+        getattr(trainer.cfg, "train_episodes_per_epoch", getattr(trainer.cfg, "train_episode_count", 1))
+    )
+    train_episodes_per_epoch = max(1, train_episodes_per_epoch)
+    train_monitor = (
+        bool(getattr(trainer.cfg, "train_monitor_enabled"))
+        if hasattr(trainer.cfg, "train_monitor_enabled")
+        else bool(train_monitor)
+    )
+    use_rule_switch_train = bool(getattr(trainer.cfg, "use_rule_switch_train", use_rule_switch_train))
+    if not train_monitor:
+        warmup_monitor_episodes = 0
+    def _rollout_update_steps_for(stage_name: str) -> int:
+        by_stage = getattr(trainer.cfg, "rollout_update_steps_by_stage", None)
+        if isinstance(by_stage, dict) and stage_name in by_stage:
+            return int(by_stage[stage_name])
+        segments = getattr(trainer.cfg, f"{stage_name}_rollout_segments", None)
+        if segments is not None:
+            return int(fixed_cycle) * int(segments)
+        return int(getattr(trainer.cfg, "rollout_update_steps", 0) or 0)
+
+    for stage_name, episode_total in (
+            ("warmup_outer", warmup_outer_episodes),
+            ("warmup_inner", warmup_inner_episodes),
+            ("warmup_monitor", warmup_monitor_episodes),
+            ("joint", joint_episodes)):
+        if episode_total % train_episodes_per_epoch != 0:
+            raise ValueError(
+                f"{stage_name} has {episode_total} train episodes, which is not a complete number of "
+                f"train epochs with train_episodes_per_epoch={train_episodes_per_epoch}."
+            )
+
+    def _epoch_progress(ep: int) -> str:
+        return f"epoch {ep // train_episodes_per_epoch + 1}, slot {ep % train_episodes_per_epoch + 1}/{train_episodes_per_epoch}"
 
     # 文件名定义
     final_best_ckpt = f"best_model.pth"
@@ -890,8 +1011,14 @@ def train_warmup_then_joint_with_monitor(trainer,
     def _do_validate(tag: str):
         trainer.env.set_mode("val")
         trainer.agent.net.eval()
-        val_ret = trainer.run_episode(trainer.env, mode="eval", phase="joint",
-                                      disable_inner=False)
+        val_ret = trainer.run_episode(
+            trainer.env,
+            mode="eval",
+            phase="joint",
+            fixed_cycle=None,
+            disable_inner=False,
+            use_rule_switch=False,
+        )
         val_metrics = trainer._compute_metrics(val_ret["history"])
         trainer.env.set_mode("train")
         trainer.agent.net.train()
@@ -902,18 +1029,32 @@ def train_warmup_then_joint_with_monitor(trainer,
     # =========================================================
     # 1) Warmup Outer
     # =========================================================
-    trainer.logger.info(f"### [1/4] Warmup OUTER: {warmup_outer_episodes} eps (Min Warmup: {MIN_WARMUP_STEPS}) ###")
+    trainer.logger.info(
+        f"### [1/4] Warmup OUTER: {warmup_outer_episodes // train_episodes_per_epoch} epochs "
+        f"/ {warmup_outer_episodes} eps, update_every={_rollout_update_steps_for('warmup_outer')} steps "
+        f"(Min Warmup: {MIN_WARMUP_STEPS}) ###")
     trainer.agent.set_module_status("outer")
     phase_best_sharpe = -np.inf
 
     for ep in range(warmup_outer_episodes):
         # 每个 Episode 更新一次
-        ret = trainer.run_episode(trainer.env, mode="train", phase="warmup_outer", fixed_cycle=fixed_cycle)
-        loss_log = trainer.agent.update(trainer.buffer.get_batch(), phase="warmup_outer")
-        trainer.buffer.clear()
+        ret = trainer.run_episode(
+            trainer.env,
+            mode="train",
+            phase="warmup_outer",
+            fixed_cycle=fixed_cycle,
+            use_rule_switch=False,
+            rollout_update_steps=_rollout_update_steps_for("warmup_outer"),
+            auto_update_phase="warmup_outer",
+            train_monitor=train_monitor,
+        )
+        loss_log = ret.get("loss_log", {})
 
         trainer.logger.info(
-            f"[{save_prefix}] W-Out {ep + 1}/{warmup_outer_episodes} | L_out:{loss_log.get('out_pi', 0):.3f}")
+            f"[{save_prefix}] W-Out {ep + 1}/{warmup_outer_episodes} ({_epoch_progress(ep)}) | "
+            f"Updates:{ret.get('update_count', 0)} "
+            f"L_out:{loss_log.get('out_pi', 0):.3f} "
+            f"L_out_pred:{loss_log.get('out_pred', 0):.3f}")
 
         # 前 10 轮跳过，之后每 2 轮验证一次
         if (ep + 1) > MIN_WARMUP_STEPS and (ep + 1) % val_interval == 0:
@@ -931,17 +1072,30 @@ def train_warmup_then_joint_with_monitor(trainer,
     # =========================================================
     # 2) Warmup Inner
     # =========================================================
-    trainer.logger.info(f"### [2/4] Warmup INNER: {warmup_inner_episodes} eps (Min Warmup: {MIN_WARMUP_STEPS}) ###")
+    trainer.logger.info(
+        f"### [2/4] Warmup INNER: {warmup_inner_episodes // train_episodes_per_epoch} epochs "
+        f"/ {warmup_inner_episodes} eps, update_every={_rollout_update_steps_for('warmup_inner')} steps "
+        f"(Min Warmup: {MIN_WARMUP_STEPS}) ###")
     trainer.agent.set_module_status("inner")
     phase_best_sharpe = -np.inf
 
     for ep in range(warmup_inner_episodes):
-        ret = trainer.run_episode(trainer.env, mode="train", phase="warmup_inner", fixed_cycle=fixed_cycle)
-        loss_log = trainer.agent.update(trainer.buffer.get_batch(), phase="warmup_inner")
-        trainer.buffer.clear()
+        ret = trainer.run_episode(
+            trainer.env,
+            mode="train",
+            phase="warmup_inner",
+            fixed_cycle=fixed_cycle,
+            use_rule_switch=False,
+            rollout_update_steps=_rollout_update_steps_for("warmup_inner"),
+            auto_update_phase="warmup_inner",
+            train_monitor=train_monitor,
+        )
+        loss_log = ret.get("loss_log", {})
 
         trainer.logger.info(
-            f"[{save_prefix}] W-Inn {ep + 1}/{warmup_inner_episodes} | L_in:{loss_log.get('inn_pi', 0):.3f}")
+            f"[{save_prefix}] W-Inn {ep + 1}/{warmup_inner_episodes} ({_epoch_progress(ep)}) | "
+            f"Updates:{ret.get('update_count', 0)} L_in:{loss_log.get('inn_pi', 0):.3f} "
+            f"L_in_pred:{loss_log.get('inn_pred', 0):.3f}")
 
         if (ep + 1) > MIN_WARMUP_STEPS and (ep + 1) % val_interval == 0:
             m = _do_validate("warmup_inner")
@@ -956,54 +1110,88 @@ def train_warmup_then_joint_with_monitor(trainer,
         trainer.logger.info(f"   ↺ Phase Inner finished. Loaded best warmup_inner model.")
 
     # =========================================================
-    # 3) Warmup Monitor with outer-critic counterfactual reward
+    # 3) Warmup Controller with daily log-return reward and switch supervision
     # =========================================================
-    trainer.logger.info(f"### [3/4] Warmup MONITOR: {warmup_monitor_episodes} eps ###")
-    trainer.agent.set_module_status("monitor")
-    phase_best_sharpe = -np.inf
-
-    for ep in range(warmup_monitor_episodes):
-        trainer.run_episode(trainer.env, mode="train", phase="warmup_monitor")
-        loss_log = trainer.agent.update(trainer.buffer.get_batch(), phase="warmup_monitor")
-        trainer.buffer.clear()
+    if train_monitor and warmup_monitor_episodes > 0:
         trainer.logger.info(
-            f"[{save_prefix}] W-Mon {ep + 1}/{warmup_monitor_episodes} | "
-            f"L_mon:{loss_log.get('mon_pi', 0):.3f}")
-        if (ep + 1) % val_interval == 0:
-            m = _do_validate("warmup_monitor")
-            if float(m["sharpe"]) > phase_best_sharpe:
-                phase_best_sharpe = float(m["sharpe"])
-                trainer.save_model(warmup_mon_best_ckpt)
+            f"### [3/4] Warmup CONTROLLER: {warmup_monitor_episodes // train_episodes_per_epoch} epochs "
+            f"/ {warmup_monitor_episodes} eps, update_every={_rollout_update_steps_for('warmup_monitor')} steps ###")
+        trainer.agent.set_module_status("controller")
+        phase_best_sharpe = -np.inf
 
-    if os.path.exists(os.path.join(trainer.model_dir, warmup_mon_best_ckpt)):
-        trainer._load_model(warmup_mon_best_ckpt)
-        trainer.logger.info("   ↺ Phase Monitor finished. Loaded best warmup_monitor model.")
+        for ep in range(warmup_monitor_episodes):
+            ret = trainer.run_episode(
+                trainer.env,
+                mode="train",
+                phase="warmup_monitor",
+                fixed_cycle=None,
+                rollout_update_steps=_rollout_update_steps_for("warmup_monitor"),
+                auto_update_phase="warmup_monitor",
+                train_monitor=True,
+            )
+            loss_log = ret.get("loss_log", {})
+            trainer.logger.info(
+                f"[{save_prefix}] W-Ctrl {ep + 1}/{warmup_monitor_episodes} ({_epoch_progress(ep)}) | "
+                f"Updates:{ret.get('update_count', 0)} L_ctrl:{loss_log.get('mon_pi', 0):.3f} "
+                f"L_sup:{loss_log.get('mon_sup', 0):.3f}")
+            if (ep + 1) % val_interval == 0:
+                m = _do_validate("warmup_monitor")
+                if float(m["sharpe"]) > phase_best_sharpe:
+                    phase_best_sharpe = float(m["sharpe"])
+                    trainer.save_model(warmup_mon_best_ckpt)
+
+        if os.path.exists(os.path.join(trainer.model_dir, warmup_mon_best_ckpt)):
+            trainer._load_model(warmup_mon_best_ckpt)
+            trainer.logger.info("   ↺ Phase Controller finished. Loaded best warmup_monitor model.")
+    else:
+        trainer.logger.info("### [3/4] Warmup CONTROLLER: skipped (controller training disabled) ###")
 
     # =========================================================
     # 4) Joint Finetune
     # =========================================================
-    trainer.logger.info(f"### [4/4] JOINT (Outer+Inner+Monitor): {joint_episodes} eps ###")
-    trainer.agent.set_module_status("all")
+    trainer.logger.info(
+        f"### [4/4] JOINT (Outer+Inner+Controller): {joint_episodes // train_episodes_per_epoch} epochs "
+        f"/ {joint_episodes} eps, update_every={_rollout_update_steps_for('joint')} steps ###")
+    trainer.agent.set_module_status("all" if train_monitor else "outer_inner")
+    joint_lr_mult = float(getattr(trainer.cfg, "joint_lr_mult", 1.0))
+    if hasattr(trainer.agent, "set_lr_multiplier"):
+        joint_lrs = trainer.agent.set_lr_multiplier(joint_lr_mult)
+        trainer.logger.info(
+            "Joint fine-tune lr multiplier=%s -> monitor=%g outer=%g inner=%g",
+            joint_lr_mult,
+            joint_lrs.get("monitor", 0.0),
+            joint_lrs.get("outer", 0.0),
+            joint_lrs.get("inner", 0.0),
+        )
     global_best_sharpe = -np.inf
 
     for ep in range(joint_episodes):
-        ret = trainer.run_episode(trainer.env, mode="train", phase="joint")
-        batch = trainer.buffer.get_batch()
-
-        loss = trainer.agent.update(batch, phase="joint")
-        trainer.buffer.clear()
+        ret = trainer.run_episode(
+            trainer.env,
+            mode="train",
+            phase="joint",
+            fixed_cycle=None,
+            use_rule_switch=False,
+            rollout_update_steps=_rollout_update_steps_for("joint"),
+            auto_update_phase="joint",
+            train_monitor=train_monitor,
+        )
+        loss = ret.get("loss_log", {})
 
         trainer.logger.info(
-            f"[{save_prefix}] Joint {ep + 1}/{joint_episodes} | "
+            f"[{save_prefix}] Joint {ep + 1}/{joint_episodes} ({_epoch_progress(ep)}) | "
+            f"Updates:{ret.get('update_count', 0)} "
             f"L_out:{loss.get('out_pi', 0):.3f} L_in:{loss.get('inn_pi', 0):.3f} "
-            f"L_mon:{loss.get('mon_pi', 0):.3f}")
-
-        # 联合训练阶段始终开启验证
-        m = _do_validate("joint")
-        if float(m["sharpe"]) > global_best_sharpe:
-            global_best_sharpe = float(m["sharpe"])
-            trainer.save_model(final_best_ckpt)
-            trainer.logger.info(f"       (🏆 New Final Best Saved: {global_best_sharpe:.4f})")
+            f"L_out_pred:{loss.get('out_pred', 0):.3f} "
+            f"L_in_pred:{loss.get('inn_pred', 0):.3f} "
+            f"L_ctrl:{loss.get('mon_pi', 0):.3f} L_ctrl_sup:{loss.get('mon_sup', 0):.3f}")
+        # 联合训练默认按 val_interval 验证，避免每个长 episode 都完整跑验证集。
+        if (ep + 1) % val_interval == 0 or (ep + 1) == joint_episodes:
+            m = _do_validate("joint")
+            if float(m["sharpe"]) > global_best_sharpe:
+                global_best_sharpe = float(m["sharpe"])
+                trainer.save_model(final_best_ckpt)
+                trainer.logger.info(f"       (🏆 New Final Best Saved: {global_best_sharpe:.4f})")
 
     trainer.save_model(final_last_ckpt)
     return {
@@ -1035,6 +1223,12 @@ def main(cun_path, logger_ignored, seed_list=None):
     parser.add_argument('--trade_num', type=int, default=10)
     parser.add_argument('--ssm_dim', type=int, default=16)
     parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--outer_pred_coef', type=float, default=0.1)
+    parser.add_argument('--inner_pred_coef', type=float, default=0.05)
+    parser.add_argument('--inner_gate_reg_coef', type=float, default=1e-4)
+    parser.add_argument('--train_episodes_per_epoch', type=int, default=5)
+    parser.add_argument('--train_start_stride_days', type=int, default=5)
+    parser.add_argument('--train_episode_to_end', type=bool, default=True)
 
     args = parser.parse_args(args=[]) # 避免并行时命令行参数干扰
 
@@ -1059,20 +1253,29 @@ def main(cun_path, logger_ignored, seed_list=None):
         cfg.device = device
 
         # Init
-        env = PPO_Env(logger=local_logger)
+        env = PPO_Env(
+            logger=local_logger,
+            train_episodes_per_epoch=args.train_episodes_per_epoch,
+            train_start_stride_days=args.train_start_stride_days,
+            train_episode_to_end=args.train_episode_to_end,
+        )
         networks = HRL_Networks(args.ssm_dim, env.num_stocks, cfg).to(device)
         agent = HRL_PPO_Agent(networks, cfg)
-        buffer = HRL_Buffer(capacity=3000, device=device)
+        buffer = HRL_Buffer(
+            capacity=3000,
+            device=device,
+            outer_reward_scale=getattr(cfg, 'reward_scale_outer', 1.0),
+        )
 
         trainer = HRL_Trainer(agent, env, buffer, cfg, local_logger)
         env.set_mode('train')
 
         res = train_warmup_then_joint_with_monitor(
             trainer,
-            warmup_outer_episodes=46,
-            warmup_inner_episodes=46,
-            warmup_monitor_episodes=20,
-            joint_episodes=20,
+            warmup_outer_episodes=25,
+            warmup_inner_episodes=25,
+            warmup_monitor_episodes=10,
+            joint_episodes=15,
             fixed_cycle=cfg.max_hold,
             save_prefix="exp_cf_mon",
 
@@ -1094,9 +1297,10 @@ def run_single_seed_single_threshold(
         seed: int,
         threshold: float,
         train_if_needed: bool = False,
-        warmup_outer_episodes: int = 46,
-        warmup_inner_episodes: int = 46,
-        joint_episodes: int = 20,
+        warmup_outer_episodes: int = 25,
+        warmup_inner_episodes: int = 25,
+        warmup_monitor_episodes: int = 10,
+        joint_episodes: int = 15,
 ):
     """
     针对单个 seed + 单个 threshold 的定向补充实验入口。
@@ -1119,6 +1323,12 @@ def run_single_seed_single_threshold(
     parser.add_argument('--trade_num', type=int, default=10)
     parser.add_argument('--ssm_dim', type=int, default=16)
     parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--outer_pred_coef', type=float, default=0.1)
+    parser.add_argument('--inner_pred_coef', type=float, default=0.05)
+    parser.add_argument('--inner_gate_reg_coef', type=float, default=1e-4)
+    parser.add_argument('--train_episodes_per_epoch', type=int, default=5)
+    parser.add_argument('--train_start_stride_days', type=int, default=5)
+    parser.add_argument('--train_episode_to_end', type=bool, default=True)
 
     args = parser.parse_args(args=[])
     args.cun_path = os.path.join(cun_path, 'ppo')
@@ -1139,10 +1349,19 @@ def run_single_seed_single_threshold(
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     cfg.device = device
 
-    env = PPO_Env(logger=logger)
+    env = PPO_Env(
+        logger=logger,
+        train_episodes_per_epoch=args.train_episodes_per_epoch,
+        train_start_stride_days=args.train_start_stride_days,
+        train_episode_to_end=args.train_episode_to_end,
+    )
     networks = HRL_Networks(args.ssm_dim, env.num_stocks, cfg).to(device)
     agent = HRL_PPO_Agent(networks, cfg)
-    buffer = HRL_Buffer(capacity=3000, device=device)
+    buffer = HRL_Buffer(
+        capacity=3000,
+        device=device,
+        outer_reward_scale=getattr(cfg, 'reward_scale_outer', 1.0),
+    )
 
     trainer = HRL_Trainer(agent, env, buffer, cfg, logger)
     env.set_mode('train')
@@ -1155,7 +1374,7 @@ def run_single_seed_single_threshold(
             trainer,
             warmup_outer_episodes=warmup_outer_episodes,
             warmup_inner_episodes=warmup_inner_episodes,
-            warmup_monitor_episodes=max(1, joint_episodes // 4),
+            warmup_monitor_episodes=warmup_monitor_episodes,
             joint_episodes=joint_episodes,
             fixed_cycle=cfg.max_hold,
             save_prefix=f"single_seed_{seed}",

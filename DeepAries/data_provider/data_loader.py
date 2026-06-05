@@ -41,6 +41,10 @@ class TimeSeriesDataset(Dataset):
                  flag='train',
                  valid_year=2020,
                  test_year=2021,
+                 train_start_date=None,
+                 train_end_date=None,
+                 valid_end_date=None,
+                 test_end_date=None,
                  size=None,
                  use_multi_horizon=True,
                  lookaheads=[1, 5, 20],
@@ -59,6 +63,10 @@ class TimeSeriesDataset(Dataset):
         self.flag = flag
         self.valid_year = valid_year
         self.test_year = test_year
+        self.train_start_date = train_start_date
+        self.train_end_date = train_end_date
+        self.valid_end_date = valid_end_date
+        self.test_end_date = test_end_date
         self.use_multi_horizon = use_multi_horizon
         self.lookaheads = lookaheads
         self.scale = scale
@@ -83,13 +91,32 @@ class TimeSeriesDataset(Dataset):
         df_raw['date'] = pd.to_datetime(df_raw['date']).dt.tz_localize(None)
         df_raw = df_raw.set_index(['date', 'tic']).sort_index()
 
-        # # Split data by year
-        df_train = df_raw[df_raw.index.get_level_values('date') < self.valid_year]
-        df_val = df_raw[
-            (df_raw.index.get_level_values('date') >= self.valid_year) &
-            (df_raw.index.get_level_values('date') < self.test_year)
-            ]
-        df_test = df_raw[df_raw.index.get_level_values('date') >= self.test_year]
+        dates = df_raw.index.get_level_values('date')
+        train_start = pd.to_datetime(self.train_start_date) if self.train_start_date else dates.min()
+        valid_start = pd.to_datetime(self.valid_year)
+        test_start = pd.to_datetime(self.test_year)
+        train_end = pd.to_datetime(self.train_end_date) if self.train_end_date else None
+        valid_end = pd.to_datetime(self.valid_end_date) if self.valid_end_date else None
+        test_end = pd.to_datetime(self.test_end_date) if self.test_end_date else None
+
+        if train_end is not None:
+            train_mask = (dates >= train_start) & (dates <= train_end)
+        else:
+            train_mask = (dates >= train_start) & (dates < valid_start)
+
+        if valid_end is not None:
+            val_mask = (dates >= valid_start) & (dates <= valid_end)
+        else:
+            val_mask = (dates >= valid_start) & (dates < test_start)
+
+        if test_end is not None:
+            test_mask = (dates >= test_start) & (dates <= test_end)
+        else:
+            test_mask = dates >= test_start
+
+        df_train = df_raw[train_mask]
+        df_val = df_raw[val_mask]
+        df_test = df_raw[test_mask]
 
         if self.flag == 'train':
             df_split = df_train

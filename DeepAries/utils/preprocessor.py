@@ -7,6 +7,14 @@ from scipy.stats import zscore as standard_zscore
 EPS = 1e-12
 
 
+def _label_price_col(df):
+    if "close" in df.columns:
+        return "close"
+    if "adjclose" in df.columns:
+        return "adjclose"
+    raise KeyError("DeepAries label generation requires either 'close' or 'adjclose'.")
+
+
 def moe_label(df, pred_lens):
     """
     Generate MOE labels by calculating cumulative returns for multiple prediction intervals.
@@ -24,6 +32,7 @@ def moe_label(df, pred_lens):
         A Series of MOE labels as integers (e.g., [0, 1, 2]) corresponding to the best prediction interval for each date.
     """
     df = df.sort_index()
+    price_col = _label_price_col(df)
 
     # Determine the maximum prediction interval and calculate the number of liquidation periods
     max_len = max(pred_lens)
@@ -35,8 +44,8 @@ def moe_label(df, pred_lens):
 
         for i in range(num_intervals):
             # Get start and end prices for each interval
-            shift_start = df.groupby("tic")["close"].shift(-i * pred_len)
-            shift_end = df.groupby("tic")["close"].shift(- (i + 1) * pred_len)
+            shift_start = df.groupby("tic")[price_col].shift(-i * pred_len)
+            shift_end = df.groupby("tic")[price_col].shift(- (i + 1) * pred_len)
             interval_return = (shift_end - shift_start) / shift_start
             interval_return = interval_return.fillna(0)
 
@@ -73,8 +82,9 @@ def generate_labels_single(df, lookahead=5):
         DataFrame with an additional 'return_ratio' column.
     """
     df = df.sort_index()
-    df["close_current"] = df.groupby("tic")["close"].shift(0)
-    df["close_future"] = df.groupby("tic")["close"].shift(-lookahead)
+    price_col = _label_price_col(df)
+    df["close_current"] = df.groupby("tic")[price_col].shift(0)
+    df["close_future"] = df.groupby("tic")[price_col].shift(-lookahead)
     df["return_ratio"] = (df["close_future"] - df["close_current"]) / df["close_current"]
     df = df.drop(columns=["close_current", "close_future"])
     return df.dropna(subset=["return_ratio"])
@@ -99,9 +109,10 @@ def generate_labels_multiple_lookaheads(df, lookaheads=[1, 5, 20]):
         DataFrame with additional return ratio columns.
     """
     df = df.sort_index()
-    df["close_current"] = df.groupby("tic")["close"].shift(0)
+    price_col = _label_price_col(df)
+    df["close_current"] = df.groupby("tic")[price_col].shift(0)
     for lh in lookaheads:
-        df_future = df.groupby("tic")["close"].shift(-lh)
+        df_future = df.groupby("tic")[price_col].shift(-lh)
         df[f"return_ratio_{lh}"] = (df_future - df["close_current"]) / df["close_current"]
     df = df.drop(columns=["close_current"])
     label_cols = [f"return_ratio_{lh}" for lh in lookaheads]

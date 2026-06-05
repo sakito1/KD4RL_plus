@@ -25,6 +25,58 @@ except Exception:
 
 EPS = 1e-8
 DEFAULT_HORIZONS = (5, 10, 20)
+DEFAULT_ORIGINAL_FEATURE_CANDIDATES = (
+    # Always prefer the compact HRL/raw columns available in both markets.
+    "adjopen",
+    "adjhigh",
+    "adjlow",
+    "adjclose",
+    "amount",
+    "volume",
+    "amp",
+    "body",
+    # If the richer original SSM feature table is used, add a few diverse
+    # technical factors without letting the feature count explode.
+    "kmid2",
+    "kup2",
+    "klow",
+    "ksft2",
+    "roc_5",
+    "roc_20",
+    "std_20",
+    "rank_20",
+    "qtld_20",
+    "cntn_20",
+    "sumn_20",
+)
+DEFAULT_RISK_LITE_FEATURES = (
+    "ret_1d",
+    "ret_5d",
+    "ret_20d",
+    "open_close_ret",
+    "high_low_range",
+    "vol_10d",
+    "downside_vol_10d",
+    "loss_ratio_10d",
+    "vol_20d",
+    "downside_vol_20d",
+    "drawdown_20d",
+    "drawdown_60d",
+    "volume_ratio_20d",
+)
+LOG_SCALE_ORIGINAL_FEATURES = {
+    "open",
+    "high",
+    "low",
+    "close",
+    "adjopen",
+    "adjhigh",
+    "adjlow",
+    "adjclose",
+    "amount",
+    "volume",
+    "vol",
+}
 
 
 def _as_list(value):
@@ -50,6 +102,34 @@ def _find_column(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
     return None
 
 
+def _feature_key(name):
+    return str(name).strip().lower()
+
+
+def _prefixed_original_name(name):
+    return f"orig_{_feature_key(name)}"
+
+
+def _select_original_feature_columns(df, original_feature_names=None, limit=12):
+    lower_to_col = {c.lower(): c for c in df.columns}
+    candidates = original_feature_names or DEFAULT_ORIGINAL_FEATURE_CANDIDATES
+    selected = []
+    for name in candidates:
+        col = lower_to_col.get(str(name).lower())
+        if col is None:
+            continue
+        low = col.lower()
+        if low.startswith(("label_", "ssm3_", "risk_", "regime_", "dd_pred")):
+            continue
+        if low in {"date", "weekday", "day", "month", "unnamed: 0"}:
+            continue
+        if col not in selected:
+            selected.append(col)
+        if int(limit) > 0 and len(selected) >= int(limit):
+            break
+    return selected
+
+
 def _safe_np(x, fill=0.0):
     return np.nan_to_num(np.asarray(x, dtype=np.float64), nan=fill, posinf=fill, neginf=fill)
 
@@ -62,6 +142,45 @@ def causal_rolling_zscore(x, lookback=252, min_periods=5, clip=5.0):
     z = (s - mean) / (std + EPS)
     z = np.nan_to_num(z.to_numpy(dtype=np.float64), nan=0.0, posinf=clip, neginf=-clip)
     return np.clip(z, -clip, clip).astype(np.float32)
+
+
+def causal_rolling_minmax(x, lookback=252, min_periods=5):
+    """Causal rolling min-max scaling that only uses current and past values."""
+    s = pd.Series(np.asarray(x, dtype=np.float64))
+    roll_min = s.rolling(int(lookback), min_periods=int(min_periods)).min()
+    roll_max = s.rolling(int(lookback), min_periods=int(min_periods)).max()
+    denom = roll_max - roll_min
+    scaled = (s - roll_min) / (denom + EPS)
+    scaled = scaled.to_numpy(dtype=np.float64)
+    flat = denom.to_numpy(dtype=np.float64) <= EPS
+    scaled[flat] = 0.5
+    scaled = np.nan_to_num(scaled, nan=0.5, posinf=1.0, neginf=0.0)
+    return np.clip(scaled, 0.0, 1.0).astype(np.float32)
+
+
+def _normalization_type(value):
+    if isinstance(value, dict):
+        value = value.get("type", "zscore")
+    value = str(value or "minmax").lower()
+    aliases = {
+        "causal_rolling_zscore": "zscore",
+        "rolling_zscore": "zscore",
+        "causal_rolling_minmax": "minmax",
+        "rolling_minmax": "minmax",
+        "maxmin": "minmax",
+        "max-min": "minmax",
+    }
+    value = aliases.get(value, value)
+    if value not in {"zscore", "minmax"}:
+        raise ValueError(f"Unsupported normalization: {value}")
+    return value
+
+
+def normalize_feature_series(values, normalization="minmax", lookback=252, min_periods=5, clip=5.0):
+    norm = _normalization_type(normalization)
+    if norm == "zscore":
+        return causal_rolling_zscore(values, lookback=lookback, min_periods=min_periods, clip=clip)
+    return causal_rolling_minmax(values, lookback=lookback, min_periods=min_periods)
 
 
 def compute_rolling_drawdown(close, lookback):
@@ -86,12 +205,21 @@ def build_risk_tpsm_features(
     df: pd.DataFrame,
     window: int = 63,
     normalization_lookback: int = 252,
+    normalization: str = "minmax",
     clip: float = 5.0,
     use_cross_sectional: bool = False,
+    feature_preset: str = "hybrid_lite",
+    original_feature_names=None,
+    original_feature_limit: int = 12,
+    selected_feature_names=None,
+    target_feature_count: int = 0,
 ) -> pd.DataFrame:
-    """Build causal stock-level risk features for Risk-TPSM-Lite.
+    """Build causal stock-level hybrid features for Risk-TPSM-Lite.
 
-    The output is already causal-normalized. No full-sample mean/std is used.
+    The default `hybrid_lite` preset combines a compact set of the original
+    stock features with lightweight downside-risk features. Every selected
+    column is causal-normalized by rolling min-max or z-score. No full-sample
+    statistics are used.
     Cross-sectional features are intentionally a no-op here; the hook is kept so
     market-relative features can be added without changing the training entry.
     """
@@ -112,33 +240,33 @@ def build_risk_tpsm_features(
     volume = np.maximum(_safe_np(df[vol_col], fill=np.nan), EPS) if vol_col else None
 
     log_close = np.log(close)
-    raw = {}
+    risk_raw = {}
 
     r_1d = np.zeros_like(close, dtype=np.float64)
     r_1d[1:] = log_close[1:] - log_close[:-1]
-    raw["ret_1d"] = r_1d
+    risk_raw["ret_1d"] = r_1d
 
     for length in (5, 10, 20, 30):
         ret = np.zeros_like(close, dtype=np.float64)
         if len(close) > length:
             ret[length:] = log_close[length:] - log_close[:-length]
-        raw[f"ret_{length}d"] = ret
+        risk_raw[f"ret_{length}d"] = ret
 
     if open_ is not None:
-        raw["open_close_ret"] = np.log(close / open_)
+        risk_raw["open_close_ret"] = np.log(close / open_)
     if high is not None and low is not None:
-        raw["high_low_range"] = np.log(high / low)
+        risk_raw["high_low_range"] = np.log(high / low)
 
     for length in (5, 10, 20, 30):
-        raw[f"vol_{length}d"] = (
+        risk_raw[f"vol_{length}d"] = (
             pd.Series(r_1d)
             .rolling(length, min_periods=2)
             .std(ddof=0)
             .fillna(0.0)
             .to_numpy(dtype=np.float64)
         )
-        raw[f"downside_vol_{length}d"] = compute_downside_volatility(r_1d, length)
-        raw[f"loss_ratio_{length}d"] = (
+        risk_raw[f"downside_vol_{length}d"] = compute_downside_volatility(r_1d, length)
+        risk_raw[f"loss_ratio_{length}d"] = (
             pd.Series((r_1d < 0.0).astype(np.float64))
             .rolling(length, min_periods=1)
             .mean()
@@ -146,8 +274,8 @@ def build_risk_tpsm_features(
             .to_numpy(dtype=np.float64)
         )
 
-    raw["drawdown_20d"] = compute_rolling_drawdown(close, 20)
-    raw["drawdown_60d"] = compute_rolling_drawdown(close, 60)
+    risk_raw["drawdown_20d"] = compute_rolling_drawdown(close, 20)
+    risk_raw["drawdown_60d"] = compute_rolling_drawdown(close, 60)
 
     if volume is not None:
         log_volume = np.log(volume)
@@ -160,9 +288,9 @@ def build_risk_tpsm_features(
                 .fillna(1.0)
                 .to_numpy(dtype=np.float64)
             )
-            raw[f"volume_ratio_{length}d"] = np.log(volume / (ma + EPS))
-        raw["volume_log"] = log_volume
-        raw["volume_vol_20d"] = (
+            risk_raw[f"volume_ratio_{length}d"] = np.log(volume / (ma + EPS))
+        risk_raw["volume_log"] = log_volume
+        risk_raw["volume_vol_20d"] = (
             pd.Series(log_volume)
             .rolling(20, min_periods=2)
             .std(ddof=0)
@@ -170,10 +298,50 @@ def build_risk_tpsm_features(
             .to_numpy(dtype=np.float64)
         )
 
+    raw = {}
+    if str(feature_preset) != "risk_only":
+        for col in _select_original_feature_columns(
+            df, original_feature_names=original_feature_names, limit=original_feature_limit
+        ):
+            values = _safe_np(df[col], fill=np.nan)
+            if col.lower() in LOG_SCALE_ORIGINAL_FEATURES:
+                values = np.log(np.maximum(values, EPS))
+            raw[_prefixed_original_name(col)] = values
+    raw.update(risk_raw)
+
+    if selected_feature_names:
+        feature_order = [str(name) for name in selected_feature_names]
+    elif str(feature_preset) == "hybrid_lite":
+        original_names = [
+            _prefixed_original_name(col)
+            for col in _select_original_feature_columns(
+                df, original_feature_names=original_feature_names, limit=original_feature_limit
+            )
+        ]
+        feature_order = original_names + [name for name in DEFAULT_RISK_LITE_FEATURES if name in raw]
+    elif str(feature_preset) in ("risk_only", "hybrid_full"):
+        feature_order = list(raw.keys())
+    else:
+        raise ValueError(f"Unsupported feature_preset: {feature_preset}")
+
+    missing = [name for name in feature_order if name not in raw]
+    if missing:
+        raise ValueError(f"Requested RiskTPSM features are missing from dataframe: {missing[:8]}")
+    if int(target_feature_count) > 0 and len(feature_order) != int(target_feature_count):
+        raise ValueError(
+            f"RiskTPSM feature count mismatch: got {len(feature_order)}, "
+            f"expected {int(target_feature_count)}. "
+            "Adjust --original_feature_limit/--original_features or set --target_feature_count 0."
+        )
+
     features = {}
-    for name, values in raw.items():
-        features[name] = causal_rolling_zscore(
-            values, lookback=normalization_lookback, min_periods=5, clip=clip
+    for name in feature_order:
+        features[name] = normalize_feature_series(
+            raw[name],
+            normalization=normalization,
+            lookback=normalization_lookback,
+            min_periods=5,
+            clip=clip,
         )
     out = pd.DataFrame(features, index=df.index)
     return out.replace([np.inf, -np.inf], 0.0).fillna(0.0).astype(np.float32)
@@ -357,7 +525,7 @@ class CausalConvBlock(nn.Module):
 
 
 class RiskTPSMLite(nn.Module):
-    """Light causal TCN for stock-level downside-risk embeddings."""
+    """Light temporal encoder for stock-level downside-risk embeddings."""
 
     def __init__(
         self,
@@ -371,6 +539,9 @@ class RiskTPSMLite(nn.Module):
         num_assets: int = 0,
         asset_emb_dim: int = 8,
         use_attention_pooling: bool = False,
+        encoder_type: str = "attention_lstm",
+        lstm_hidden_dim: int | None = None,
+        lstm_layers: int = 1,
     ):
         super().__init__()
         self.in_dim = int(in_dim)
@@ -380,17 +551,37 @@ class RiskTPSMLite(nn.Module):
         self.use_asset_conditioning = bool(use_asset_conditioning)
         self.num_assets = int(num_assets)
         self.asset_emb_dim = int(asset_emb_dim)
-        self.use_attention_pooling = bool(use_attention_pooling)
-        self.encoder = nn.Sequential(
-            CausalConvBlock(self.in_dim, tcn_channels, kernel_size=3, dilation=1, dropout=dropout),
-            CausalConvBlock(tcn_channels, tcn_channels, kernel_size=3, dilation=2, dropout=dropout),
-            CausalConvBlock(tcn_channels, tcn_channels, kernel_size=3, dilation=4, dropout=0.0),
-        )
+        self.encoder_type = str(encoder_type)
+        self.tcn_channels = int(tcn_channels)
+        self.lstm_hidden_dim = int(lstm_hidden_dim or tcn_channels)
+        self.lstm_layers = int(lstm_layers)
+        self.use_attention_pooling = bool(use_attention_pooling) or self.encoder_type == "attention_lstm"
+
+        if self.encoder_type == "tcn":
+            encoder_dim = int(tcn_channels)
+            self.encoder = nn.Sequential(
+                CausalConvBlock(self.in_dim, encoder_dim, kernel_size=3, dilation=1, dropout=dropout),
+                CausalConvBlock(encoder_dim, encoder_dim, kernel_size=3, dilation=2, dropout=dropout),
+                CausalConvBlock(encoder_dim, encoder_dim, kernel_size=3, dilation=4, dropout=0.0),
+            )
+        elif self.encoder_type == "attention_lstm":
+            encoder_dim = self.lstm_hidden_dim
+            lstm_dropout = float(dropout) if self.lstm_layers > 1 else 0.0
+            self.encoder = nn.LSTM(
+                input_size=self.in_dim,
+                hidden_size=encoder_dim,
+                num_layers=self.lstm_layers,
+                batch_first=True,
+                dropout=lstm_dropout,
+            )
+        else:
+            raise ValueError(f"Unsupported encoder_type: {encoder_type}")
+
         if self.use_attention_pooling:
             self.attn_pool = nn.Sequential(
-                nn.Linear(tcn_channels, max(tcn_channels // 2, 4)),
+                nn.Linear(encoder_dim, max(encoder_dim // 2, 4)),
                 nn.Tanh(),
-                nn.Linear(max(tcn_channels // 2, 4), 1),
+                nn.Linear(max(encoder_dim // 2, 4), 1),
             )
             self.pool_mix = nn.Parameter(torch.tensor(0.5))
         else:
@@ -401,7 +592,7 @@ class RiskTPSMLite(nn.Module):
                 raise ValueError("num_assets must be positive when use_asset_conditioning=True.")
             self.asset_emb = nn.Embedding(self.num_assets, self.asset_emb_dim)
             self.asset_film = nn.Sequential(
-                nn.Linear(self.asset_emb_dim, tcn_channels * 2),
+                nn.Linear(self.asset_emb_dim, encoder_dim * 2),
                 nn.Tanh(),
             )
             self.asset_risk_bias = nn.Embedding(self.num_assets, self.num_horizons)
@@ -410,7 +601,7 @@ class RiskTPSMLite(nn.Module):
             self.asset_emb = None
             self.asset_film = None
             self.asset_risk_bias = None
-        self.emb_proj = nn.Linear(tcn_channels, self.emb_dim)
+        self.emb_proj = nn.Linear(encoder_dim, self.emb_dim)
         self.emb_ln = nn.LayerNorm(self.emb_dim)
         self.risk_head = nn.Linear(self.emb_dim, self.num_horizons)
         self.regime_head = nn.Linear(self.emb_dim, self.num_horizons * 3)
@@ -419,10 +610,18 @@ class RiskTPSMLite(nn.Module):
     def forward(self, x, asset_id=None):
         assert x.dim() == 3, f"expected x [B, W, F], got {tuple(x.shape)}"
         assert x.size(-1) == self.in_dim, f"expected F={self.in_dim}, got {x.size(-1)}"
-        h = self.encoder(x.transpose(1, 2))
-        last = h[:, :, -1]
-        if self.use_attention_pooling:
-            h_time = h.transpose(1, 2)
+        if self.encoder_type == "tcn":
+            h = self.encoder(x.transpose(1, 2))
+            last = h[:, :, -1]
+            if self.use_attention_pooling:
+                h_time = h.transpose(1, 2)
+                attn = torch.softmax(self.attn_pool(h_time).squeeze(-1), dim=-1)
+                pooled = torch.sum(h_time * attn.unsqueeze(-1), dim=1)
+                mix = torch.sigmoid(self.pool_mix)
+                last = mix * last + (1.0 - mix) * pooled
+        else:
+            h_time, _ = self.encoder(x)
+            last = h_time[:, -1, :]
             attn = torch.softmax(self.attn_pool(h_time).squeeze(-1), dim=-1)
             pooled = torch.sum(h_time * attn.unsqueeze(-1), dim=1)
             mix = torch.sigmoid(self.pool_mix)
@@ -655,7 +854,13 @@ def prepare_risk_tpsm_assets(args, thresholds=None, need_labels=True):
             df,
             window=args.window,
             normalization_lookback=args.normalization_lookback,
+            normalization=getattr(args, "normalization", "minmax"),
             clip=args.feature_clip,
+            feature_preset=getattr(args, "feature_preset", "hybrid_lite"),
+            original_feature_names=getattr(args, "original_features", None),
+            original_feature_limit=getattr(args, "original_feature_limit", 12),
+            selected_feature_names=getattr(args, "feature_names", None),
+            target_feature_count=getattr(args, "target_feature_count", 0),
         )
         close_col = _find_column(df, ["adjclose", "close"])
         close = np.maximum(_safe_np(df[close_col], fill=np.nan), EPS)
@@ -880,6 +1085,12 @@ def _serializable_args(args, feature_dim=None, feature_names=None, thresholds=No
     for key, value in list(data.items()):
         if isinstance(value, Path):
             data[key] = str(value)
+    data.setdefault("encoder_type", getattr(args, "encoder_type", "attention_lstm"))
+    data.setdefault(
+        "lstm_hidden_dim",
+        int(getattr(args, "lstm_hidden_dim", getattr(args, "tcn_channels", 32))),
+    )
+    data.setdefault("lstm_layers", int(getattr(args, "lstm_layers", 1)))
     data["horizons"] = [int(h) for h in data["horizons"]]
     if feature_dim is not None:
         data["feature_dim"] = int(feature_dim)
@@ -887,11 +1098,15 @@ def _serializable_args(args, feature_dim=None, feature_names=None, thresholds=No
         data["feature_names"] = list(feature_names)
     if thresholds is not None:
         data["label_thresholds"] = [float(x) for x in thresholds]
+    norm_type = _normalization_type(getattr(args, "normalization", "minmax"))
     data["normalization"] = {
-        "type": "causal_rolling_zscore",
+        "type": norm_type,
         "lookback": int(args.normalization_lookback),
-        "clip": float(args.feature_clip),
     }
+    if norm_type == "zscore":
+        data["normalization"]["clip"] = float(args.feature_clip)
+    else:
+        data["normalization"]["feature_range"] = [0.0, 1.0]
     return data
 
 
@@ -966,6 +1181,9 @@ def train_risk_tpsm(args):
         num_assets=len(assets),
         asset_emb_dim=args.asset_emb_dim,
         use_attention_pooling=args.use_attention_pooling,
+        encoder_type=getattr(args, "encoder_type", "attention_lstm"),
+        lstm_hidden_dim=getattr(args, "lstm_hidden_dim", getattr(args, "tcn_channels", 32)),
+        lstm_layers=getattr(args, "lstm_layers", 1),
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -1135,6 +1353,14 @@ def _infer_asset(model, X, device, batch_size=512, asset_id=None):
 
 def _merge_checkpoint_config(args, ckpt_config):
     merged = dict(ckpt_config)
+    if "normalization" not in merged:
+        merged["normalization"] = {
+            "type": "zscore",
+            "lookback": int(merged.get("normalization_lookback", 252)),
+            "clip": float(merged.get("feature_clip", 5.0)),
+        }
+    if "encoder_type" not in merged:
+        merged["encoder_type"] = "tcn"
     for key in ("data_dir", "output_dir", "stock_file", "checkpoint", "device", "max_stocks", "max_rows"):
         value = getattr(args, key, None)
         if value not in (None, ""):
@@ -1160,6 +1386,9 @@ def export_risk_tpsm_outputs(args):
         num_assets=int(getattr(cfg, "num_assets", len(assets))),
         asset_emb_dim=int(getattr(cfg, "asset_emb_dim", 8)),
         use_attention_pooling=bool(getattr(cfg, "use_attention_pooling", False)),
+        encoder_type=str(getattr(cfg, "encoder_type", "tcn")),
+        lstm_hidden_dim=int(getattr(cfg, "lstm_hidden_dim", getattr(cfg, "tcn_channels", 32))),
+        lstm_layers=int(getattr(cfg, "lstm_layers", 1)),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model.eval()
@@ -1169,6 +1398,8 @@ def export_risk_tpsm_outputs(args):
         "checkpoint": str(args.checkpoint),
         "horizons": cfg.horizons,
         "feature_names": feature_names,
+        "normalization": getattr(cfg, "normalization", "minmax"),
+        "encoder_type": getattr(cfg, "encoder_type", "tcn"),
         "legacy_semantics": (
             "In risk_lite mode, ssm3_p/ssm3_q_bear/ssm3_q_bull are downside-risk "
             "proxies, not original uptrend or transition probabilities."
@@ -1245,10 +1476,55 @@ def add_risk_tpsm_args(parser: argparse.ArgumentParser):
     parser.add_argument("--window", type=int, default=63)
     parser.add_argument("--horizons", type=int, nargs="+", default=list(DEFAULT_HORIZONS))
     parser.add_argument("--vol_lookback", type=int, default=20)
+    parser.add_argument(
+        "--normalization",
+        choices=["minmax", "zscore"],
+        default="minmax",
+        help="Causal rolling feature normalization. minmax uses current/past rolling min and max.",
+    )
     parser.add_argument("--normalization_lookback", type=int, default=252)
     parser.add_argument("--feature_clip", type=float, default=5.0)
+    parser.add_argument(
+        "--feature_preset",
+        choices=["hybrid_lite", "hybrid_full", "risk_only"],
+        default="hybrid_lite",
+        help=(
+            "hybrid_lite uses compact original stock features plus compact risk features; "
+            "risk_only preserves the old pure risk-feature path."
+        ),
+    )
+    parser.add_argument(
+        "--original_features",
+        nargs="*",
+        default=None,
+        help="Optional ordered original feature names to include before risk features.",
+    )
+    parser.add_argument(
+        "--feature_names",
+        nargs="*",
+        default=None,
+        help=(
+            "Optional exact normalized feature names used by build_risk_tpsm_features, "
+            "for example orig_adjopen orig_adjhigh ..."
+        ),
+    )
+    parser.add_argument("--original_feature_limit", type=int, default=12)
+    parser.add_argument(
+        "--target_feature_count",
+        type=int,
+        default=25,
+        help="Require this exact input feature count after feature selection. Use 0 to disable.",
+    )
     parser.add_argument("--emb_dim", type=int, default=16)
+    parser.add_argument(
+        "--encoder_type",
+        choices=["attention_lstm", "tcn"],
+        default="attention_lstm",
+        help="Temporal encoder used to learn the risk embedding.",
+    )
     parser.add_argument("--tcn_channels", type=int, default=32)
+    parser.add_argument("--lstm_hidden_dim", type=int, default=32)
+    parser.add_argument("--lstm_layers", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--use_asset_conditioning", action="store_true")
     parser.add_argument("--asset_emb_dim", type=int, default=8)

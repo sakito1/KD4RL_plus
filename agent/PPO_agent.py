@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 from torch.distributions import Categorical
@@ -16,17 +17,19 @@ class HRL_Buffer:
     4. Must be cleared after every update.
     """
 
-    def __init__(self, capacity, device, gamma=0.99, gae_lambda=0.95):
+    def __init__(self, capacity, device, gamma=0.99, gae_lambda=0.95, outer_reward_scale=1.0):
         self.device = device
         self.capacity = capacity
         self.gamma = gamma
         self.gae_lambda = gae_lambda
+        self.outer_reward_scale = float(outer_reward_scale)
         self.clear()
 
     def clear(self):
         # Initialize storage lists
         self.data = {
             'ssm': [], 'outer_state': [], 'inner_state': [],
+            'inner_base_used': [], 'inner_weights_drift': [], 'inner_indices': [],
             'port_state': [], 'weights_drift': [], 'base_drift': [],
             'base_used': [], 'weights_exec': [],
             'act_mon': [], 'logp_mon': [],
@@ -35,6 +38,11 @@ class HRL_Buffer:
             'val_mon': [], 'val_out': [], 'val_inn': [],
             'rew_mon': [], 'rew_alpha': [], 'rew_outer_raw': [],
             'is_switch': [], 'is_locked': [], 'dones': [],
+            'outer_stock_return_target': [],
+            'inner_stock_return_target': [],
+            'inner_next_return_target': [],
+            'controller_switch_label': [],
+            'controller_sup_weight': [],
             # GAE results will be stored here
             'adv_inn': [], 'ret_inn': [],
             'adv_mon': [], 'ret_mon': [],
@@ -134,7 +142,6 @@ class HRL_Buffer:
 
         adv = torch.zeros(length, device=self.device)
         ret = torch.zeros(length, device=self.device)
-
         switch_indices = torch.where(sw == 1)[0]
         if switch_indices.numel() == 0:
             # 没有外层决策点：也要对齐长度（全部 0）
@@ -148,7 +155,7 @@ class HRL_Buffer:
             start = boundaries[i]
             end = boundaries[i + 1]
 
-            segment_rew = torch.sum(rew_out[start:end])
+            segment_rew = torch.sum(rew_out[start:end]) * self.outer_reward_scale
 
             last_step = end - 1
             if last_step >= 0 and dones[last_step] > 0.5:
@@ -218,10 +225,31 @@ class HRL_PPO_Agent:
         self.opt_mon = optim.Adam(self.net.mon.parameters(), lr=config.lr_monitor)
         self.opt_out = optim.Adam(self.net.outer.parameters(), lr=config.lr_outer)
         self.opt_inn = optim.Adam(self.net.inner.parameters(), lr=config.lr_inner)
+        self.base_lrs = {
+            "monitor": float(config.lr_monitor),
+            "outer": float(config.lr_outer),
+            "inner": float(config.lr_inner),
+        }
 
         self.mse_loss = nn.MSELoss()
         self.min_clip = -5
         self.max_clip = 5
+
+    @staticmethod
+    def _set_optimizer_lr(optimizer, lr):
+        for group in optimizer.param_groups:
+            group["lr"] = float(lr)
+
+    def set_lr_multiplier(self, multiplier=1.0):
+        multiplier = float(multiplier)
+        self._set_optimizer_lr(self.opt_mon, self.base_lrs["monitor"] * multiplier)
+        self._set_optimizer_lr(self.opt_out, self.base_lrs["outer"] * multiplier)
+        self._set_optimizer_lr(self.opt_inn, self.base_lrs["inner"] * multiplier)
+        return {
+            "monitor": self.base_lrs["monitor"] * multiplier,
+            "outer": self.base_lrs["outer"] * multiplier,
+            "inner": self.base_lrs["inner"] * multiplier,
+        }
 
     def set_module_status(self, mode='all'):
         """灵活冻结/解冻模块。"""
@@ -239,9 +267,44 @@ class HRL_PPO_Agent:
         elif mode == 'outer':
             for p in self.net.outer.parameters():
                 p.requires_grad = True
+        elif mode == 'outer_inner':
+            for p in self.net.outer.parameters():
+                p.requires_grad = True
+            for p in self.net.inner.parameters():
+                p.requires_grad = True
         elif mode == 'monitor':
             for p in self.net.mon.parameters():
                 p.requires_grad = True
+        elif mode == 'controller':
+            for p in self.net.mon.parameters():
+                p.requires_grad = True
+
+    @staticmethod
+    def _normalize_rows(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        denom = x.sum(dim=1, keepdim=True)
+        fallback = torch.ones_like(x) / float(max(x.shape[1], 1))
+        return torch.where(denom.abs() > eps, x / (denom + eps), fallback)
+
+    def _select_inner_inputs(self, obs, base_used, weight_drift):
+        """Crop inner inputs to the currently tradable/topK assets."""
+        inner_state = obs['inner_state']
+        B, N = base_used.shape
+        K = min(int(getattr(self.cfg, 'trade_num', N)), N)
+        indices = torch.topk(base_used, k=K, dim=1).indices
+
+        _, _, T, Fdim = inner_state.shape
+        state_idx = indices.view(B, K, 1, 1).expand(-1, -1, T, Fdim)
+        inner_state_sel = torch.gather(inner_state, dim=1, index=state_idx)
+        base_sel = torch.gather(base_used, dim=1, index=indices)
+        drift_sel = torch.gather(weight_drift, dim=1, index=indices)
+        base_sel = self._normalize_rows(base_sel)
+        drift_sel = self._normalize_rows(drift_sel)
+        return inner_state_sel, base_sel, drift_sel, indices
+
+    @staticmethod
+    def _scatter_selected_weights(selected_weights, indices, num_assets):
+        full = selected_weights.new_zeros((selected_weights.shape[0], num_assets))
+        return full.scatter(1, indices, selected_weights)
 
     def get_action(self, obs, mode='train', force_switch=None, force_inner_zero=False, force_locked=False):
         is_train = (mode == 'train')
@@ -252,34 +315,40 @@ class HRL_PPO_Agent:
         # =========================
         # Outer
         # =========================
-        act_out, act_out_raw, logp_out, _, _ = self.net.outer.pi(
-            obs['outer_state'],
-            weight_drift,
-            deterministic=(not is_train)
-        )
-        val_out = self.net.outer.value(obs['outer_state'], weight_drift)
+        # 固定持仓的 hold 日不需要产生新的外层组合，跳过最贵的 LSTM/CAAN。
+        # switch 日和自由 monitor 决策日仍正常计算 outer actor/critic。
+        needs_outer_action = (force_switch is None) or (int(force_switch) == 1)
+        if needs_outer_action:
+            act_out, act_out_raw, logp_out, _, _ = self.net.outer.pi(
+                obs['outer_state'],
+                weight_drift,
+                deterministic=(not is_train)
+            )
+            val_out = self.net.outer.value(obs['outer_state'], weight_drift)
+        else:
+            B = weight_drift.shape[0]
+            act_out = base_drift
+            act_out_raw = torch.zeros_like(weight_drift)
+            logp_out = torch.zeros((B,), device=self.device)
+            val_out = torch.zeros((B, 1), device=self.device)
 
         # =========================
         # Monitor
         # =========================
-        act_mon_samp, logp_mon_samp, _, _ = self.net.mon.pi(
-            obs['ssm']['z'], obs['ssm']['h'], obs['ssm']['p'],
-            obs['ssm']['q_bear'], obs['ssm']['q_bull'],
-            weight_drift, obs['port_state'], deterministic=(not is_train)
-        )
-        val_mon = self.net.mon.value(
-            obs['ssm']['z'], obs['ssm']['h'], obs['ssm']['p'],
-            obs['ssm']['q_bear'], obs['ssm']['q_bull'],
-            weight_drift, obs['port_state']
-        )
-
         if force_switch is not None:
             B = weight_drift.shape[0]
             act_mon = torch.full((B,), force_switch, dtype=torch.long, device=self.device)
-            logp_mon = logp_mon_samp if is_train else torch.zeros((B,), device=self.device)
+            logp_mon = torch.zeros((B,), device=self.device)
+            val_mon = torch.zeros((B, 1), device=self.device)
             is_locked_val = 1 if force_locked else 0
             is_locked = torch.full((B,), is_locked_val, dtype=torch.long, device=self.device)
         else:
+            act_mon_samp, logp_mon_samp, _, _, val_mon = self.net.mon(
+                obs['ssm']['z'], obs['ssm']['h'], obs['ssm']['p'],
+                obs['ssm']['q_bear'], obs['ssm']['q_bull'],
+                weight_drift, obs['port_state'], switch_action=act_out,
+                deterministic=(not is_train)
+            )
             act_mon = act_mon_samp
             logp_mon = logp_mon_samp
             is_locked = torch.zeros_like(act_mon)
@@ -290,39 +359,44 @@ class HRL_PPO_Agent:
         # =========================
         # Inner
         # =========================
+        inner_state_used, inner_base_used, inner_weight_drift, inner_indices = self._select_inner_inputs(
+            obs, base_used, weight_drift
+        )
         if force_inner_zero:
             B, N = weight_drift.shape
-            act_inn_raw = torch.zeros((B, N), device=self.device)
+            K = inner_indices.shape[1]
+            act_inn_raw = torch.zeros((B, K), device=self.device)
             logp_inn = torch.zeros((B,), device=self.device)
-            val_inn = self.net.inner.value(obs['inner_state'], base_used, weight_drift)
+            val_inn = self.net.inner.value(inner_state_used, inner_base_used, inner_weight_drift)
             weights_exec = base_used
         else:
             # 直接生成可执行权重（weights_exec），同时返回 score_sample 作为 PPO 的“原始动作变量”
             # 这样：执行动作稳定可控，训练仍然符合 PPO（ratio 用 score_sample 的 logp）
             if hasattr(self.net.inner, "build_inner_action_simple"):
                 alpha = float(getattr(self.cfg, "inner_max_boundary", 1.0))
-                w_new, score_sample, logp_inn, _, val_inn = self.net.inner.build_inner_action_simple(
-                    obs['inner_state'],
-                    base_used,
-                    weight_drift,
+                w_new_sel, score_sample, logp_inn, _, val_inn = self.net.inner.build_inner_action_simple(
+                    inner_state_used,
+                    inner_base_used,
+                    inner_weight_drift,
                     alpha=alpha,
                     deterministic=(not is_train),
                 )
-                weights_exec = w_new
+                weights_exec = self._scatter_selected_weights(w_new_sel, inner_indices, base_used.shape[1])
                 act_inn_raw = score_sample
             else:
                 # 兼容旧实现：用 raw_signal 生成最终权重
                 act_inn_raw, logp_inn, _ = self.net.inner.pi(
-                    obs['inner_state'],
-                    base_used,
-                    weight_drift,
+                    inner_state_used,
+                    inner_base_used,
+                    inner_weight_drift,
                     deterministic=(not is_train)
                 )
-                val_inn = self.net.inner.value(obs['inner_state'], base_used, weight_drift)
+                val_inn = self.net.inner.value(inner_state_used, inner_base_used, inner_weight_drift)
 
                 action_for_calc = torch.clamp(act_inn_raw, -3.0, 3.0)
-                adjusted = base_used * torch.exp(action_for_calc * self.cfg.inner_max_boundary)
-                weights_exec = adjusted / (adjusted.sum(dim=1, keepdim=True) + 1e-12)
+                adjusted = inner_base_used * torch.exp(action_for_calc * self.cfg.inner_max_boundary)
+                w_new_sel = adjusted / (adjusted.sum(dim=1, keepdim=True) + 1e-12)
+                weights_exec = self._scatter_selected_weights(w_new_sel, inner_indices, base_used.shape[1])
 
         return {
             'act_mon': act_mon,
@@ -340,15 +414,21 @@ class HRL_PPO_Agent:
             'act_inn_raw': act_inn_raw,
             'logp_inn': logp_inn,
             'val_inn': val_inn,
-            'weights_exec': weights_exec
+            'weights_exec': weights_exec,
+            'inner_state_used': inner_state_used,
+            'inner_base_used': inner_base_used,
+            'inner_weights_drift': inner_weight_drift,
+            'inner_indices': inner_indices,
         }
 
-    def update(self, buffer_data, phase='joint'):
+    def update(self, buffer_data, phase='joint', train_monitor=None):
         bs = int(len(buffer_data.get('rew_mon', [])))
         if bs <= 0:
             return {}
 
         ppo_epochs = int(getattr(self.cfg, 'ppo_epochs', 1))
+        if train_monitor is None:
+            train_monitor = bool(getattr(self.cfg, 'train_monitor_enabled', True))
         metrics = {}
 
         for _ in range(ppo_epochs):
@@ -356,7 +436,7 @@ class HRL_PPO_Agent:
                 l_inn = self._update_inner(buffer_data)
                 self._log_metric(metrics, 'inn', l_inn)
 
-            if phase in ['warmup_monitor', 'joint', 'round_monitor']:
+            if train_monitor and phase in ['warmup_monitor', 'joint', 'round_monitor']:
                 mask_free = torch.as_tensor(buffer_data['is_locked'] == 0, device=self.device, dtype=torch.bool)
                 if torch.count_nonzero(mask_free).item() > 0:
                     l_mon = self._update_monitor(buffer_data, mask_free)
@@ -394,34 +474,7 @@ class HRL_PPO_Agent:
             return out
 
     def _update_inner(self, data):
-        self.opt_inn.zero_grad()
-
-        # 用“旧动作”计算 new_logp(a_old)，避免重新采样导致 PPO ratio 失真
-        feat = self.net.inner.encode(
-            data['inner_state'],
-            data['base_used'],
-            data['weights_drift'],
-        )
-        dist = self.net.inner.get_dist(feat)
-        new_logp = dist.log_prob(data['act_inn_raw']).sum(dim=1)  # [B]
-        entropy = dist.entropy().mean()  # scalar
-        ratio = torch.exp(torch.clamp(new_logp - data['logp_inn'], min=self.min_clip, max=self.max_clip))
-
-        adv = data['adv_inn']
-        adv = self._normalize_adv(adv)
-
-        surr1 = ratio * adv
-        surr2 = torch.clamp(ratio, 1.0 - self.clip_range, 1.0 + self.clip_range) * adv
-        loss_pi = -torch.min(surr1, surr2).mean()
-
-        val = self.net.inner.value(
-            data['inner_state'],
-            data['base_used'],
-            data['weights_drift']
-        )
-        loss_v = self.mse_loss(val.squeeze(-1), data['ret_inn'])
-
-        loss_total = loss_pi + self.vf_coef * loss_v - self.ent_coef * entropy
+        self.opt_inn.zero_grad(set_to_none=True)
 
         def _param_stats(params):
             with torch.no_grad():
@@ -438,60 +491,170 @@ class HRL_PPO_Agent:
         w_norm0, w_mean0 = _param_stats(params)
         w_flat0 = torch.cat([p.data.view(-1) for p in params]).clone()
 
-        # backward + step ...
-        loss_total.backward()
+        adv_all = self._normalize_adv(data['adv_inn'])
+        total = int(adv_all.shape[0])
+        batch_size = max(1, int(getattr(self.cfg, 'inner_batch_size', 256)))
+        perm = torch.randperm(total, device=self.device)
+
+        loss_pi_sum = 0.0
+        loss_v_sum = 0.0
+        loss_pred_sum = 0.0
+        loss_gate_sum = 0.0
+        entropy_sum = 0.0
+        pred_coef = float(getattr(self.cfg, 'inner_pred_coef', 0.01))
+        gate_coef = float(getattr(self.cfg, 'inner_gate_reg_coef', 1e-4))
+        target_key = 'inner_stock_return_target' if 'inner_stock_return_target' in data else 'inner_next_return_target'
+
+        for start in range(0, total, batch_size):
+            idx = perm[start:start + batch_size]
+            weight = float(idx.numel()) / float(total)
+
+            inner_state = data['inner_state'][idx]
+            base_used = data.get('inner_base_used', data['base_used'])[idx]
+            weights_drift = data.get('inner_weights_drift', data['weights_drift'])[idx]
+
+            # 用“旧动作”计算 new_logp(a_old)，避免重新采样导致 PPO ratio 失真。
+            # 同一批次只编码一次，actor/critic 复用特征，避免重复跑 TCN。
+            feat = self.net.inner.encode(inner_state, base_used, weights_drift)
+            dist = self.net.inner.get_dist(feat)
+            new_logp = dist.log_prob(data['act_inn_raw'][idx]).sum(dim=1)
+            entropy = dist.entropy().mean()
+            ratio = torch.exp(torch.clamp(new_logp - data['logp_inn'][idx], min=self.min_clip, max=self.max_clip))
+
+            adv = adv_all[idx]
+            surr1 = ratio * adv
+            surr2 = torch.clamp(ratio, 1.0 - self.clip_range, 1.0 + self.clip_range) * adv
+            loss_pi = -torch.min(surr1, surr2).mean()
+
+            beta_rep = torch.sum(feat * base_used.unsqueeze(-1), dim=1)
+            attn_scores = self.net.inner.alpha_query(feat).squeeze(-1)
+            alpha = F.softmax(attn_scores, dim=-1).unsqueeze(-1)
+            alpha_rep = torch.sum(feat * alpha, dim=1)
+            global_rep = torch.cat([beta_rep, alpha_rep], dim=-1)
+            val = self.net.inner.value_head(global_rep)
+            loss_v = self.mse_loss(val.squeeze(-1), data['ret_inn'][idx])
+
+            pred_next_return = self.net.inner.pred_head(feat).squeeze(-1)
+            loss_pred = F.smooth_l1_loss(pred_next_return, data[target_key][idx])
+            loss_gate = self.net.inner.gate_regularization()
+
+            loss_total = (
+                loss_pi
+                + self.vf_coef * loss_v
+                + pred_coef * loss_pred
+                + gate_coef * loss_gate
+                - self.ent_coef * entropy
+            )
+            (loss_total * weight).backward()
+
+            loss_pi_sum += loss_pi.item() * idx.numel()
+            loss_v_sum += loss_v.item() * idx.numel()
+            loss_pred_sum += loss_pred.item() * idx.numel()
+            loss_gate_sum += loss_gate.item() * idx.numel()
+            entropy_sum += entropy.item() * idx.numel()
+
         self.opt_inn.step()
 
         w_norm1, w_mean1 = _param_stats(params)
         d_norm, d_mean = _param_delta(params, w_flat0)
 
         print(f"[INNER] w_norm {w_norm0:.4e}->{w_norm1:.4e} | Δnorm {d_norm:.4e} Δmean {d_mean:.4e}")
-        return {'pi': loss_pi.item(), 'v': loss_v.item(), 'ent': entropy.item()}
+        if (
+                bool(getattr(self.cfg, "clear_cuda_cache_on_update", False))
+                and getattr(self.device, "type", str(self.device)) == "cuda"
+        ):
+            torch.cuda.empty_cache()
+        return {
+            'pi': loss_pi_sum / total,
+            'v': loss_v_sum / total,
+            'pred': loss_pred_sum / total,
+            'gate': loss_gate_sum / total,
+            'ent': entropy_sum / total,
+        }
 
     def _update_outer(self, data, mask):
-        self.opt_out.zero_grad()
+        self.opt_out.zero_grad(set_to_none=True)
 
-        if isinstance(data['outer_state'], list):
-            valid_indices = torch.where(mask)[0].cpu().tolist()
-            subset_list = [data['outer_state'][i] for i in valid_indices]
-            state_subset = torch.stack(subset_list)
-            if state_subset.dim() == 5 and state_subset.shape[1] == 1:
-                state_subset = state_subset.squeeze(1)
-            state_subset = state_subset.to(self.device)
-        else:
-            state_subset = data['outer_state'][mask]
+        valid_indices = torch.where(mask)[0]
+        total = int(valid_indices.numel())
+        if total <= 0:
+            return {'pi': 0.0, 'v': 0.0, 'pred': 0.0, 'ent': 0.0}
 
-        # 用“旧动作”计算 new_logp(a_old)，避免重新采样导致 PPO ratio 失真
-        feat = self.net.outer.encode(state_subset, data['weights_drift'][mask])
-        dist = self.net.outer.get_dist(feat)
-        old_raw = data['act_out_raw'][mask]
-        new_logp = dist.log_prob(old_raw).sum(dim=1)  # [B_mask]
-        entropy = dist.entropy().mean()
-        ratio = torch.exp(torch.clamp(new_logp - data['logp_out'][mask], min=self.min_clip, max=self.max_clip))
+        adv_all = data['adv_out'][valid_indices]
+        if adv_all.numel() > 1:
+            adv_all = self._normalize_adv(adv_all)
 
-        adv = data['adv_out'][mask]
-        # 只对有效外层决策点归一化（mask 后的向量）
-        if adv.numel() > 1:
-            adv = self._normalize_adv(adv)
+        batch_size = max(1, int(getattr(self.cfg, 'outer_update_batch_size', 32)))
+        perm = torch.randperm(total, device=self.device)
+        pred_coef = float(getattr(self.cfg, 'outer_pred_coef', 0.1))
 
-        surr1 = ratio * adv
-        surr2 = torch.clamp(ratio, 1.0 - self.clip_range, 1.0 + self.clip_range) * adv
-        loss_pi = -torch.min(surr1, surr2).mean()
+        loss_pi_sum = 0.0
+        loss_v_sum = 0.0
+        loss_pred_sum = 0.0
+        entropy_sum = 0.0
 
-        val = self.net.outer.value(
-            state_subset,
-            data['weights_drift'][mask]
-        )
-        loss_v = self.mse_loss(val.squeeze(-1), data['ret_out'][mask])
+        for start in range(0, total, batch_size):
+            local_idx = perm[start:start + batch_size]
+            idx = valid_indices[local_idx]
+            weight = float(idx.numel()) / float(total)
 
-        loss_total = loss_pi + self.vf_coef * loss_v - self.ent_coef * entropy
-        loss_total.backward()
+            if isinstance(data['outer_state'], list):
+                subset_list = [data['outer_state'][int(i)] for i in idx.detach().cpu().tolist()]
+                state_subset = torch.stack(subset_list)
+                if state_subset.dim() == 5 and state_subset.shape[1] == 1:
+                    state_subset = state_subset.squeeze(1)
+                state_subset = state_subset.to(self.device)
+            else:
+                state_subset = data['outer_state'][idx]
+
+            weights_drift = data['weights_drift'][idx]
+
+            # 同一批次只跑一次 LSTM/CAAN encoder，actor、critic、预测头复用 feat。
+            feat = self.net.outer.encode(state_subset, weights_drift)
+            dist = self.net.outer.get_dist(feat)
+            old_raw = data['act_out_raw'][idx]
+            new_logp = dist.log_prob(old_raw).sum(dim=1)
+            entropy = dist.entropy().mean()
+            ratio = torch.exp(torch.clamp(new_logp - data['logp_out'][idx], min=self.min_clip, max=self.max_clip))
+
+            adv = adv_all[local_idx]
+            surr1 = ratio * adv
+            surr2 = torch.clamp(ratio, 1.0 - self.clip_range, 1.0 + self.clip_range) * adv
+            loss_pi = -torch.min(surr1, surr2).mean()
+
+            scores = torch.matmul(feat, self.net.outer.market_query.transpose(0, 1))
+            attn = F.softmax(scores, dim=1)
+            market_rep = torch.sum(feat * attn, dim=1)
+            w_rep = self.net.outer.w_proj(weights_drift)
+            val = self.net.outer.v_head(torch.cat([market_rep, w_rep], dim=-1))
+            loss_v = self.mse_loss(val.squeeze(-1), data['ret_out'][idx])
+
+            pred_stock_return = self.net.outer.pred_head(feat).squeeze(-1)
+            loss_pred = F.smooth_l1_loss(pred_stock_return, data['outer_stock_return_target'][idx])
+
+            loss_total = loss_pi + self.vf_coef * loss_v + pred_coef * loss_pred - self.ent_coef * entropy
+            (loss_total * weight).backward()
+
+            loss_pi_sum += loss_pi.item() * idx.numel()
+            loss_v_sum += loss_v.item() * idx.numel()
+            loss_pred_sum += loss_pred.item() * idx.numel()
+            entropy_sum += entropy.item() * idx.numel()
 
         if self.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(list(self.net.outer.parameters()), self.max_grad_norm)
 
         self.opt_out.step()
-        return {'pi': loss_pi.item(), 'v': loss_v.item(), 'ent': entropy.item()}
+        if (
+                bool(getattr(self.cfg, "clear_cuda_cache_on_update", False))
+                and getattr(self.device, "type", str(self.device)) == "cuda"
+        ):
+            torch.cuda.empty_cache()
+        return {
+            'pi': loss_pi_sum / total,
+            'v': loss_v_sum / total,
+            'pred': loss_pred_sum / total,
+            'ent': entropy_sum / total,
+        }
 
     def _update_monitor(self, data, mask):
         self.opt_mon.zero_grad()
@@ -502,6 +665,7 @@ class HRL_PPO_Agent:
             ssm['z'], ssm['h'], ssm['p'], ssm['q_bear'], ssm['q_bull'],
             data['weights_drift'][mask],
             data['port_state'][mask],
+            switch_action=data['act_out'][mask],
         )
         logits = self.net.mon.actor_head(feat)
         dist = Categorical(logits=logits)
@@ -521,11 +685,26 @@ class HRL_PPO_Agent:
         v = self.net.mon.v_head(feat)
         loss_v = self.mse_loss(v.squeeze(-1), data['ret_mon'][mask])
 
-        loss_total = loss_pi + self.vf_coef * loss_v - self.ent_coef * entropy
+        loss_sup = logits.new_tensor(0.0)
+        sup_coef = float(getattr(self.cfg, 'controller_sup_coef', getattr(self.cfg, 'monitor_sup_coef', 0.0)))
+        if sup_coef > 0.0 and 'controller_switch_label' in data and 'controller_sup_weight' in data:
+            labels = data['controller_switch_label'][mask].float().view(-1)
+            weights = data['controller_sup_weight'][mask].float().view(-1)
+            valid_sup = torch.isfinite(labels) & torch.isfinite(weights) & (weights > 0)
+            if torch.count_nonzero(valid_sup).item() > 0:
+                switch_logit = logits[:, 1] - logits[:, 0]
+                raw_sup = F.binary_cross_entropy_with_logits(
+                    switch_logit[valid_sup],
+                    labels[valid_sup],
+                    reduction='none',
+                )
+                loss_sup = (raw_sup * weights[valid_sup]).mean()
+
+        loss_total = loss_pi + self.vf_coef * loss_v + sup_coef * loss_sup - self.ent_coef * entropy
         loss_total.backward()
 
         if self.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(list(self.net.mon.parameters()), self.max_grad_norm)
 
         self.opt_mon.step()
-        return {'pi': loss_pi.item(), 'v': loss_v.item(), 'ent': entropy.item()}
+        return {'pi': loss_pi.item(), 'v': loss_v.item(), 'sup': loss_sup.item(), 'ent': entropy.item()}

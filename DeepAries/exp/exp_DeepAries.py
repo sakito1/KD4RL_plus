@@ -25,7 +25,7 @@ class TradingEnvironment:
     """
     def __init__(self, args):
         self.args = args
-        self.initial_amount = 1.0
+        self.initial_amount = float(getattr(args, "initial_amount", 1.0))
         self.seq_len = self.args.seq_len
         self.fee_rate = self.args.fee_rate
         # For complex fee structure, sell fee (cs) is doubled.
@@ -379,8 +379,13 @@ class Exp_DeepAries(Exp_Basic):
         self.model.eval()
         env_test = TradingEnvironment(self.args)
         env_test.reset()
-        portfolio_values = [1.0]
+        portfolio_values = [env_test.portfolio_value]
         portfolio_dates = [backtest_dataset.unique_dates[0]]
+        decision_dates = []
+        decision_end_dates = []
+        horizon_memory = []
+        rebalance_returns = []
+        weight_rows = []
         i = 0
         while i < n_data:
             batch_x, batch_y, batch_x_mark, batch_y_mark, ground_true = \
@@ -391,22 +396,95 @@ class Exp_DeepAries(Exp_Basic):
                 scores, log_prob, entropy, selected_period_indices = self.model.pi(
                     batch_x, batch_x_mark, dec_inp, batch_y_mark
                 )
-            # Retrieve current date from the dataset based on sequence length
-            current_date = backtest_dataset.unique_dates[i + self.args.seq_len]
+            # Retrieve current date from the dataset based on sequence length.
+            current_pos = i + self.args.seq_len
+            current_date = backtest_dataset.unique_dates[current_pos]
             top_indices = torch.topk(scores, self.args.num_stocks, dim=0).indices
             selected_scores = scores[top_indices]
             topk_weights = torch.softmax(selected_scores / self.temperature, dim=0)
             final_weights = torch.zeros_like(scores)
             final_weights[top_indices] = topk_weights
             returns = ground_true[:, selected_period_indices]
-            chosen_horizon = self.horizons[selected_period_indices]
+            selected_idx = int(selected_period_indices.item()) if hasattr(selected_period_indices, "item") else int(selected_period_indices)
+            chosen_horizon = int(self.horizons[selected_idx])
+            horizon_end_pos = min(current_pos + chosen_horizon, len(backtest_dataset.unique_dates) - 1)
+            horizon_end_date = backtest_dataset.unique_dates[horizon_end_pos]
             reward = env_test.step(final_weights, returns)
+            decision_dates.append(current_date)
+            decision_end_dates.append(horizon_end_date)
+            horizon_memory.append(int(chosen_horizon))
+            rebalance_returns.append(float(reward))
+            weight_rows.append(final_weights.detach().cpu().numpy())
             portfolio_values.append(env_test.portfolio_value)
-            portfolio_dates.append(current_date)
+            portfolio_dates.append(horizon_end_date)
             i += chosen_horizon
 
         final_pf = env_test.portfolio_value
-        self.logger.info(f"[BackTest] Final Portfolio Value = {final_pf:.4f}")
+        self.logger.info(f"[BackTest] Rebalance-horizon Portfolio Value = {final_pf:.4f}")
+
+        tickers = backtest_dataset.df.index.get_level_values("tic").unique().tolist()
+        if weight_rows:
+            decision_weights_df = pd.DataFrame(
+                np.vstack(weight_rows),
+                index=pd.to_datetime(decision_dates),
+                columns=tickers,
+            )
+        else:
+            decision_weights_df = pd.DataFrame(columns=tickers)
+
+        daily_returns = []
+        daily_weight_rows = []
+        daily_weight_dates = []
+        daily_start_date = pd.to_datetime(decision_dates[0]) if decision_dates else pd.to_datetime(portfolio_dates[0])
+        daily_portfolio_dates = [daily_start_date]
+        daily_portfolio_values = [env_test.initial_amount]
+        raw_path = os.path.join(self.args.root_path, self.args.data_path)
+        close_panel = None
+        if weight_rows and os.path.exists(raw_path):
+            raw_df = pd.read_csv(raw_path)
+            price_col = "adjclose" if "adjclose" in raw_df.columns else "close" if "close" in raw_df.columns else None
+            if price_col is not None and {"date", "tic"}.issubset(raw_df.columns):
+                raw_df["date"] = pd.to_datetime(raw_df["date"]).dt.tz_localize(None)
+                raw_df = raw_df[raw_df["tic"].isin(tickers)]
+                close_panel = (
+                    raw_df.pivot(index="date", columns="tic", values=price_col)
+                    .sort_index()
+                    .reindex(columns=tickers)
+                    .ffill()
+                    .dropna(how="any")
+                )
+
+        if close_panel is not None and not close_panel.empty:
+            close_dates = close_panel.index
+            for dec_date, end_date, weights in zip(pd.to_datetime(decision_dates), pd.to_datetime(decision_end_dates), weight_rows):
+                start_loc = int(close_dates.searchsorted(dec_date, side="left"))
+                end_loc = int(close_dates.searchsorted(end_date, side="right")) - 1
+                if start_loc < 0 or end_loc <= start_loc or start_loc >= len(close_dates):
+                    continue
+                end_loc = min(end_loc, len(close_dates) - 1)
+                weights = np.asarray(weights, dtype=np.float64)
+                for loc in range(start_loc, end_loc):
+                    current_close = close_panel.iloc[loc].to_numpy(dtype=np.float64)
+                    next_close = close_panel.iloc[loc + 1].to_numpy(dtype=np.float64)
+                    ret_vec = next_close / (current_close + 1e-12) - 1.0
+                    day_ret = float(np.sum(weights * ret_vec))
+                    daily_returns.append(day_ret)
+                    daily_weight_dates.append(close_dates[loc])
+                    daily_weight_rows.append(weights)
+                    daily_portfolio_values.append(daily_portfolio_values[-1] * (1.0 + day_ret))
+                    daily_portfolio_dates.append(close_dates[loc + 1])
+
+        if daily_returns:
+            portfolio_values = daily_portfolio_values
+            portfolio_dates = daily_portfolio_dates
+            final_pf = portfolio_values[-1]
+            weights_df = pd.DataFrame(daily_weight_rows, index=pd.to_datetime(daily_weight_dates), columns=tickers)
+            metric_returns = np.asarray(daily_returns, dtype=np.float64)
+            metric_frequency = "daily_close_to_close"
+        else:
+            weights_df = decision_weights_df.copy()
+            metric_returns = np.asarray(rebalance_returns, dtype=np.float64)
+            metric_frequency = "rebalance_fallback"
 
         # Compute portfolio metrics
         initial_pf = portfolio_values[0]
@@ -415,22 +493,108 @@ class Exp_DeepAries(Exp_Basic):
         # Convert portfolio_dates to pandas Timestamps (if not already)
         dates = pd.to_datetime(portfolio_dates)
         days = (dates[-1] - dates[0]).days
-        annualized_return = (final_pf ** (365 / days) - 1) if days > 0 else 0.0
+        annualized_return = ((final_pf / initial_pf) ** (365 / days) - 1) if days > 0 else 0.0
 
         # Calculate maximum drawdown
         cummax = np.maximum.accumulate(portfolio_values)
         drawdowns = (np.array(portfolio_values) - cummax) / cummax
         max_drawdown = drawdowns.min()
+        if len(metric_returns) > 1:
+            periods_per_year = 252.0 if metric_frequency == "daily_close_to_close" else len(metric_returns) / max(days / 365.0, 1e-12)
+            ann_return_mean = metric_returns.mean() * periods_per_year
+            ann_vol = metric_returns.std() * np.sqrt(periods_per_year)
+            sharpe = ann_return_mean / ann_vol if ann_vol > 0 else np.nan
+        else:
+            ann_return_mean = 0.0
+            ann_vol = 0.0
+            sharpe = np.nan
 
         # Log and print portfolio performance metrics
-        self.logger.info(f"Total Return: {total_return * 100:.2f}%")
-        self.logger.info(f"Annualized Return: {annualized_return * 100:.2f}%")
-        self.logger.info(f"Maximum Drawdown: {max_drawdown * 100:.2f}%")
+        self.logger.info(f"\n=========== 回测结果: {setting}===========")
+        self.logger.info(f"初始组合价值: {initial_pf:.2f}")
+        self.logger.info(f"最终组合价值: {final_pf:.2f}")
+        self.logger.info("\n====== 测试区间绩效 ======")
+        self.logger.info(f"累计收益: {total_return:.2%}")
+        self.logger.info(f"年化收益: {ann_return_mean:.2%}")
+        self.logger.info(f"年化收益(CAGR): {annualized_return:.2%}")
+        self.logger.info(f"年化波动率: {ann_vol:.2%}")
+        self.logger.info(f"夏普比率: {sharpe:.2f}")
+        self.logger.info(f"最大回撤: {abs(max_drawdown):.2%}")
+        self.logger.info("=================================\n")
 
         print(f"Final Portfolio Value: {final_pf:.4f}")
-        print(f"Total Return: {total_return * 100:.2f}%")
-        print(f"Annualized Return: {annualized_return * 100:.2f}%")
-        print(f"Maximum Drawdown: {max_drawdown * 100:.2f}%")
+        print(f"累计收益: {total_return:.2%}")
+        print(f"年化收益: {ann_return_mean:.2%}")
+        print(f"年化收益(CAGR): {annualized_return:.2%}")
+        print(f"年化波动率: {ann_vol:.2%}")
+        print(f"夏普比率: {sharpe:.2f}")
+        print(f"最大回撤: {abs(max_drawdown):.2%}")
+
+        result_dir = os.path.join(self.args.results_root, setting)
+        os.makedirs(result_dir, exist_ok=True)
+        actions_dir = os.path.join(result_dir, "actions")
+        os.makedirs(actions_dir, exist_ok=True)
+
+        portfolio_df = pd.DataFrame({
+            "date": pd.to_datetime(portfolio_dates),
+            "portfolio_value": portfolio_values,
+        })
+        portfolio_df["period_return"] = portfolio_df["portfolio_value"].pct_change().fillna(0.0)
+        portfolio_df.to_csv(os.path.join(result_dir, "portfolio_performance.csv"), index=False)
+
+        decision_df = pd.DataFrame({
+            "date": pd.to_datetime(decision_dates),
+            "end_date": pd.to_datetime(decision_end_dates),
+            "chosen_horizon": horizon_memory,
+            "period_return": rebalance_returns,
+            "portfolio_value": env_test.asset_memory[1:],
+        })
+        decision_df.to_csv(os.path.join(result_dir, "rebalance_decisions.csv"), index=False)
+
+        decision_weights_df.to_csv(os.path.join(result_dir, "rebalance_weights.csv"))
+        weights_df.to_csv(os.path.join(actions_dir, "test.csv"))
+        weights_df.to_csv(os.path.join(result_dir, "daily_weights.csv"))
+
+        metrics = {
+            "initial_value": float(initial_pf),
+            "final_value": float(final_pf),
+            "cumulative_return": float(total_return),
+            "annualized_return": float(ann_return_mean),
+            "annualized_return_cagr": float(annualized_return),
+            "annualized_return_mean": float(ann_return_mean),
+            "annualized_volatility": float(ann_vol),
+            "sharpe": float(sharpe) if not np.isnan(sharpe) else np.nan,
+            "max_drawdown": float(max_drawdown),
+            "num_rebalances": int(len(rebalance_returns)),
+            "metric_frequency": metric_frequency,
+            "start_date": str(pd.to_datetime(portfolio_dates[0]).date()),
+            "end_date": str(pd.to_datetime(portfolio_dates[-1]).date()),
+        }
+        pd.DataFrame([metrics]).to_csv(os.path.join(result_dir, "backtest_metrics.csv"), index=False)
+        pd.Series(metrics).to_json(
+            os.path.join(result_dir, "backtest_metrics.json"),
+            force_ascii=False,
+            indent=2,
+        )
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(pd.to_datetime(portfolio_dates), portfolio_values, label="Cumulative Returns")
+        plt.title("Cumulative Returns")
+        plt.xlabel("Date")
+        plt.ylabel("Portfolio Value")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(result_dir, "cumulative_returns.png"), bbox_inches="tight")
+        plt.close()
+
+        if not weights_df.empty:
+            plt.figure(figsize=(15, 6))
+            weights_df.plot(kind="area", stacked=True, title="Asset Allocation Over Time", figsize=(15, 6))
+            plt.xlabel("Date")
+            plt.ylabel("Weight")
+            plt.tight_layout()
+            plt.savefig(os.path.join(result_dir, "asset_allocation.png"), bbox_inches="tight")
+            plt.close()
 
         return final_pf
 

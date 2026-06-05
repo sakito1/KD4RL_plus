@@ -17,6 +17,7 @@ class PPO_Env(gym.Env):
                  outer_window: int = None,
                  inner_window: int = None,
                  max_hold: int = None,
+                 min_hold: int = None,
                  episode_len: int = None,
                  train_date_range: tuple = None,
                  val_date_range: tuple = None,
@@ -24,6 +25,11 @@ class PPO_Env(gym.Env):
                  initial_amount: int = None,
                  transaction_cost_pct: float = None,
                  risk_gamma: float = 5.0,
+                 train_episodes_per_epoch: int = None,
+                 train_start_stride_days: int = None,
+                 train_episode_count: int = None,
+                 train_episode_start_stride: int = None,
+                 train_episode_to_end: bool = None,
                  cun_file: str = None,
                  logger=None):
 
@@ -33,17 +39,28 @@ class PPO_Env(gym.Env):
         outer_window = config.outer_window if outer_window is None else outer_window
         inner_window = config.inner_window if inner_window is None else inner_window
         max_hold = config.max_hold if max_hold is None else max_hold
+        min_hold = getattr(config, 'min_hold', 20) if min_hold is None else min_hold
         episode_len = config.episode_len if episode_len is None else episode_len
         train_date_range = (config.train_start_date, config.train_end_date) if train_date_range is None else train_date_range
         val_date_range = (config.valid_start_date, config.valid_end_date) if val_date_range is None else val_date_range
         test_date_range = (config.test_start_date, config.test_end_date) if test_date_range is None else test_date_range
         initial_amount = config.initial_amount if initial_amount is None else initial_amount
         transaction_cost_pct = config.TRANSACTION_COST_RATE if transaction_cost_pct is None else transaction_cost_pct
+        if train_episodes_per_epoch is None:
+            train_episodes_per_epoch = train_episode_count
+        if train_start_stride_days is None:
+            train_start_stride_days = train_episode_start_stride
+        if train_episodes_per_epoch is None:
+            train_episodes_per_epoch = getattr(config, 'train_episodes_per_epoch', getattr(config, 'train_episode_count', 5))
+        if train_start_stride_days is None:
+            train_start_stride_days = getattr(config, 'train_start_stride_days', getattr(config, 'train_episode_start_stride', 5))
+        train_episode_to_end = getattr(config, 'train_episode_to_end', False) if train_episode_to_end is None else train_episode_to_end
 
         self.dataset = dataset
         self.outer_window = outer_window
         self.inner_window = inner_window
         self.max_hold = max_hold
+        self.min_hold = int(min_hold)
         self.initial_amount = initial_amount
         self.transaction_cost_pct = transaction_cost_pct
         self.risk_gamma = risk_gamma
@@ -52,6 +69,17 @@ class PPO_Env(gym.Env):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.stride = 200
         self.episode_len = episode_len
+        self.train_episodes_per_epoch = max(1, int(train_episodes_per_epoch))
+        self.train_start_stride_days = max(1, int(train_start_stride_days))
+        self.train_episode_count = self.train_episodes_per_epoch
+        self.train_episode_start_stride = self.train_start_stride_days
+        self.train_episode_to_end = bool(train_episode_to_end)
+        self.train_episode_stop_idx = None
+        self.train_ptr = 0
+        self.completed_train_epoch_count = 0
+        self.current_episode_start = 0
+        self.current_episode_end = 0
+        self.current_episode_len = int(episode_len)
 
         # Reward scaling (global)
         self.reward_scale_portfolio = float(getattr(config, 'reward_scale_portfolio', 10.0))
@@ -59,6 +87,10 @@ class PPO_Env(gym.Env):
         self.reward_scale_outer = float(getattr(config, 'reward_scale_outer', 10.0))
         self.reward_scale_inner = float(getattr(config, 'reward_scale_inner', 1000.0))
         self.reward_scale_monitor = float(getattr(config, 'reward_scale_monitor', 10.0))
+        self.reward_scale_controller = float(getattr(config, 'reward_scale_controller', self.reward_scale_monitor))
+        self.controller_sup_horizon = int(getattr(config, 'controller_sup_horizon', self.min_hold))
+        self.controller_sup_scale = float(getattr(config, 'controller_sup_scale', 0.05))
+        self.controller_sup_max_weight = float(getattr(config, 'controller_sup_max_weight', 5.0))
 
         self.monitor_reward_mode = getattr(config, 'monitor_reward_mode', 'mean')
 
@@ -81,11 +113,21 @@ class PPO_Env(gym.Env):
         self.total_days = len(self.all_dates)
         self.num_stocks = loaded_data['data'].shape[0]
         self.feat_names = self.dataset.get('features_name', [])
-        self.price_indices = [
+        self.ohlc_indices = [
             i for i, c in enumerate(self.feat_names)
-            if any(x in c.lower() for x in ['adjopen', 'adjhigh', 'adjlow', 'adjclose', 'amount'])
+            if any(x in c.lower() for x in ['adjopen', 'adjhigh', 'adjlow', 'adjclose'])
         ]
-        self.other_indices = [i for i in range(len(self.feat_names)) if i not in self.price_indices]
+        self.amount_indices = [
+            i for i, c in enumerate(self.feat_names)
+            if 'amount' in c.lower()
+        ]
+        self.price_indices = list(self.ohlc_indices)
+        self.adjclose_index = next(
+            (i for i, c in enumerate(self.feat_names) if c.lower() == 'adjclose'),
+            self.ohlc_indices[-1] if len(self.ohlc_indices) > 0 else None,
+        )
+        scaled_indices = set(self.ohlc_indices + self.amount_indices)
+        self.other_indices = [i for i in range(len(self.feat_names)) if i not in scaled_indices]
         self.features = torch.tensor(loaded_data['data'], dtype=torch.float32, device=self.device)
         self.prices = torch.tensor(loaded_data['prices'], dtype=torch.float32, device=self.device)
 
@@ -134,15 +176,17 @@ class PPO_Env(gym.Env):
         with open(path) as f:
             return [i.strip() for i in f.readlines()]
 
+    def _episode_ratio_limit(self):
+        return min(int(getattr(self, 'stop_step', self.total_days - 2)), self.ratio.shape[1])
+
     def _get_indices_range(self, date_range, use_stride=False):
         start_date, end_date = pd.to_datetime(date_range)
         start_idx = np.searchsorted(self.all_dates, start_date)
-        end_idx = np.searchsorted(self.all_dates, end_date)
+        end_idx = np.searchsorted(self.all_dates, end_date, side='right')
 
         min_start = max(self.outer_window, self.inner_window)
         start_idx = max(start_idx, min_start)
-        max_end = self.total_days - 2
-        end_idx = min(end_idx, max_end)
+        end_idx = min(end_idx, self.total_days)
 
         if start_idx >= end_idx:
             return []
@@ -168,13 +212,45 @@ class PPO_Env(gym.Env):
         if self.mode == 'train':
             raw_indices = self.idx_map['train']
             if not raw_indices: return
-            absolute_limit = self.total_days - 2
-            valid_starts = [t for t in raw_indices if t + self.episode_len <= absolute_limit]
-            self.train_indices_pool = valid_starts[::self.stride]
-            random.shuffle(self.train_indices_pool)
-            self.train_ptr = 0
-            if self.logger:
-                self.logger.info(f"Mode TRAIN. Pool Size: {len(self.train_indices_pool)}")
+            pool_signature = (
+                self.train_episode_to_end,
+                self.train_episodes_per_epoch,
+                self.train_start_stride_days,
+                self.episode_len,
+                raw_indices[0],
+                raw_indices[-1],
+            )
+            if getattr(self, '_train_pool_signature', None) != pool_signature:
+                if self.train_episode_to_end:
+                    train_start = raw_indices[0]
+                    train_end = raw_indices[-1]
+                    candidate_starts = [
+                        train_start + k * self.train_start_stride_days
+                        for k in range(self.train_episodes_per_epoch)
+                    ]
+                    self.train_indices_pool = [t for t in candidate_starts if t < train_end]
+                    if not self.train_indices_pool:
+                        self.train_indices_pool = [train_start]
+                    self.train_episode_stop_idx = train_end
+                else:
+                    absolute_limit = self.total_days - 2
+                    valid_starts = [t for t in raw_indices if t + self.episode_len <= absolute_limit]
+                    self.train_indices_pool = valid_starts[::self.stride]
+                    random.shuffle(self.train_indices_pool)
+                    self.train_episode_stop_idx = None
+                self.train_ptr = 0
+                self.completed_train_epoch_count = 0
+                self._train_pool_signature = pool_signature
+                if self.logger:
+                    if self.train_episode_to_end:
+                        start_dates = [str(self.all_dates[t].date()) for t in self.train_indices_pool]
+                        self.logger.info(
+                            "Mode TRAIN. DeepAries-style train epochs: "
+                            f"{len(self.train_indices_pool)} starts/epoch, stride_days={self.train_start_stride_days}, "
+                            f"end={self.all_dates[self.train_episode_stop_idx].date()}, starts={start_dates}"
+                        )
+                    else:
+                        self.logger.info(f"Mode TRAIN. Pool Size: {len(self.train_indices_pool)}")
         else:
             if self.logger:
                 self.logger.info(f"Mode {mode_name.upper()}. Sequential.")
@@ -185,15 +261,28 @@ class PPO_Env(gym.Env):
 
         if self.mode == 'train':
             if self.train_ptr >= len(self.train_indices_pool):
-                random.shuffle(self.train_indices_pool)
                 self.train_ptr = 0
-                if self.logger: self.logger.info("Epoch reshuffle.")
+                self.completed_train_epoch_count += 1
+                if not self.train_episode_to_end:
+                    random.shuffle(self.train_indices_pool)
+                    if self.logger: self.logger.info(f"Completed train epoch {self.completed_train_epoch_count}; reshuffled pool.")
+                elif self.logger:
+                    self.logger.info(
+                        f"Completed train epoch {self.completed_train_epoch_count}; restarting fixed train episode starts."
+                    )
             self.day = self.train_indices_pool[self.train_ptr]
             self.train_ptr += 1
-            self.stop_step = self.day + self.episode_len
+            if self.train_episode_to_end:
+                self.stop_step = int(self.train_episode_stop_idx)
+            else:
+                self.stop_step = self.day + self.episode_len
         else:
             self.day = indices[0]
             self.stop_step = indices[-1]
+
+        self.current_episode_start = int(self.day)
+        self.current_episode_end = int(self.stop_step)
+        self.current_episode_len = max(1, self.current_episode_end - self.current_episode_start)
 
         self.portfolio_value = torch.tensor(self.initial_amount, dtype=torch.float32, device=self.device)
         init_w = torch.ones(self.num_stocks, dtype=torch.float32, device=self.device) / self.num_stocks
@@ -216,7 +305,7 @@ class PPO_Env(gym.Env):
 
         逻辑：模拟实际资金曲线，而非每日再平衡。
         """
-        max_h = min(horizon, self.ratio.shape[1] - start_day)
+        max_h = min(horizon, self._episode_ratio_limit() - start_day)
         if max_h <= 1:
             return torch.tensor(0.0, device=self.device)
 
@@ -258,7 +347,7 @@ class PPO_Env(gym.Env):
         if horizon <= 0:
             return torch.tensor(0.0, device=self.device)
 
-        max_h = min(horizon, self.ratio.shape[1] - start_day)
+        max_h = min(horizon, self._episode_ratio_limit() - start_day)
         if max_h <= 0:
             return torch.tensor(0.0, device=self.device)
 
@@ -266,6 +355,18 @@ class PPO_Env(gym.Env):
         g = torch.prod(self.ratio[:, start_day:start_day + max_h], dim=1)
         port_g = torch.sum(w * g)
         return torch.log(port_g + 1e-12)
+
+    def _future_stock_return_target(self, start_day: int, horizon: int) -> torch.Tensor:
+        """DeepAries-style pred target: each stock's future cumulative return."""
+        if horizon <= 0:
+            return torch.zeros(self.num_stocks, dtype=torch.float32, device=self.device)
+
+        max_h = min(horizon, self._episode_ratio_limit() - start_day)
+        if max_h <= 0:
+            return torch.zeros(self.num_stocks, dtype=torch.float32, device=self.device)
+
+        growth = torch.prod(self.ratio[:, start_day:start_day + max_h], dim=1)
+        return torch.log(growth.clamp_min(1e-8))
 
     # =====================================================================
     # =====================================================================
@@ -287,41 +388,7 @@ class PPO_Env(gym.Env):
         # =====================================================================
         # =====================================================================
 
-        current_holdings_drift = self.prev_base_weight * r_past
-        current_holdings_drift = current_holdings_drift / (current_holdings_drift.sum() + 1e-8)
-
-        remain_days = int(max(self.max_hold - self.t_held, 0))
-        look_ahead_days = max(remain_days, 1)
-
-        future_trend_ret = self._future_outer_sum(current_holdings_drift.detach(), self.day, look_ahead_days)
-
-        CRASH_THRESHOLD = -0.05
-        BOOM_THRESHOLD = 0.1
-
-        is_crash = (future_trend_ret < CRASH_THRESHOLD)
-        is_boom = (future_trend_ret > BOOM_THRESHOLD)
-        smooth = (future_trend_ret - CRASH_THRESHOLD)/(BOOM_THRESHOLD - CRASH_THRESHOLD)
-
-        if is_crash.item():
-            if is_switch:
-                step_monitor = -2.0 * smooth
-            else:
-                step_monitor = 2.0 * smooth
-
-        elif is_boom.item():
-            if is_switch:
-                step_monitor = -2.0 * smooth
-            else:
-                step_monitor = 2.0 * smooth
-
-        else:
-            if is_switch:
-                step_monitor = -1* smooth
-            else:
-                step_monitor = 1 * smooth
-
-        step_monitor = torch.tensor(step_monitor, dtype=torch.float32, device=self.device)
-        step_monitor = step_monitor  * self.reward_scale_monitor
+        current_holdings_drift = self._normalize(self.prev_base_weight * r_past)
 
         # =====================================================================
         # =====================================================================
@@ -351,20 +418,38 @@ class PPO_Env(gym.Env):
 
         # =====================================================================
         # =====================================================================
-        portfolio_return = torch.log(torch.sum(final_weights * r_future) * val_t1_net / val_t1_raw)
-        base_return_val = torch.log(torch.sum(new_base_weight * r_future))
+        portfolio_gross = (
+            torch.sum(final_weights * r_future).clamp_min(1e-8)
+            * (val_t1_net / (val_t1_raw + 1e-8)).clamp_min(1e-8)
+        )
+        portfolio_return = torch.log(portfolio_gross.clamp_min(1e-8))
+        base_return_val = torch.log(torch.sum(new_base_weight * r_future).clamp_min(1e-8))
+        outer_return_log = portfolio_return
+        outer_stock_return_target = self._future_stock_return_target(self.day, self.max_hold)
+        inner_stock_return_target = self._future_stock_return_target(self.day, self.min_hold)
+
+        candidate_switch_weight = (
+            outer_action.flatten().detach()
+            if outer_action is not None
+            else new_base_weight
+        )
+        sup_h = max(1, int(self.controller_sup_horizon))
+        hold_20 = self._future_outer_sum(weight_drifted_norm.detach(), self.day, sup_h)
+        switch_20 = self._future_outer_sum(candidate_switch_weight.detach(), self.day, sup_h)
+        switch_turnover = torch.sum(torch.abs(self._normalize(candidate_switch_weight) - weight_drifted_norm.detach()))
+        switch_adv_20 = switch_20 - hold_20 - switch_turnover * self.transaction_cost_pct
+        controller_switch_label = (switch_adv_20 > 0).float()
+        controller_sup_weight = torch.clamp(
+            torch.abs(switch_adv_20) / max(self.controller_sup_scale, 1e-8),
+            0.0,
+            self.controller_sup_max_weight,
+        )
 
         step_alpha = portfolio_return - base_return_val
         # =====================================================================
         # =====================================================================
-        if is_switch:
-            sharpe = self._calc_future_sharpe(new_base_weight, self.day, horizon=self.max_hold)
-            benchmark_weights = torch.ones(self.num_stocks, device=self.device) / self.num_stocks
-            sharpe_benchmark = self._calc_future_sharpe(benchmark_weights, self.day, horizon=self.max_hold)
-            step_outer_raw = sharpe - sharpe_benchmark
-        else:
-            step_outer_raw = torch.tensor(0.0, device=self.device)
-        # step_outer_raw = self._calc_outer_step_reward(base_return_val, self.risk_gamma)
+        step_outer_raw = outer_return_log
+        step_monitor = portfolio_return * self.reward_scale_controller
 
         # =====================================================================
         # =====================================================================
@@ -384,7 +469,7 @@ class PPO_Env(gym.Env):
             'rewards': {
                 'portfolio_return': portfolio_return.item() * self.reward_scale_portfolio,
                 'outer_step_reward': step_outer_raw.item(),
-                # 'outer_step_reward': portfolio_return.item() * self.reward_scale_outer,
+                'outer_return_rate': outer_return_log.item(),
                 # 'inner_reward': portfolio_return.item() * self.reward_scale_portfolio,
                 'inner_reward': step_alpha.item() * self.reward_scale_inner,
                 'monitor_reward': step_monitor.item(),
@@ -392,6 +477,14 @@ class PPO_Env(gym.Env):
                 'cost_rate': cost_rate.item(),
             },
             'portfolio_value': val_t1_net.item(),
+            'outer_stock_return_target': outer_stock_return_target.detach(),
+            'inner_stock_return_target': inner_stock_return_target.detach(),
+            'inner_next_return_target': inner_stock_return_target.detach(),
+            'controller_switch_label': controller_switch_label.detach(),
+            'controller_sup_weight': controller_sup_weight.detach(),
+            'controller_switch_adv_20': switch_adv_20.detach(),
+            'controller_hold_20': hold_20.detach(),
+            'controller_switch_20': switch_20.detach(),
             'date': self.all_dates[self.day]
         }
 
@@ -451,11 +544,32 @@ class PPO_Env(gym.Env):
 
         norm_state = torch.zeros_like(raw_feat)
 
-        if len(self.price_indices) > 0:
-            p_idx = self.price_indices
-            last_val = raw_feat[:, -1, p_idx].unsqueeze(1)
-            norm_state[:, :, p_idx] = raw_feat[:, :, p_idx] / (last_val + 1e-8)
-        norm_state[:, :, self.other_indices] = raw_feat[:, :, self.other_indices]
+        if len(self.ohlc_indices) > 0:
+            p_idx = self.ohlc_indices
+            if self.adjclose_index is not None:
+                last_close = raw_feat[:, -1, self.adjclose_index].view(-1, 1, 1)
+                norm_state[:, :, p_idx] = torch.log(
+                    (raw_feat[:, :, p_idx] / (last_close + 1e-8)).clamp_min(1e-8)
+                )
+            else:
+                last_val = raw_feat[:, -1, p_idx].unsqueeze(1)
+                norm_state[:, :, p_idx] = torch.log(
+                    (raw_feat[:, :, p_idx] / (last_val + 1e-8)).clamp_min(1e-8)
+                )
+
+        def _window_zscore(x):
+            mean = x.mean(dim=1, keepdim=True)
+            std = x.std(dim=1, unbiased=False, keepdim=True).clamp_min(1e-6)
+            return ((x - mean) / std).clamp(-5.0, 5.0)
+
+        if len(self.amount_indices) > 0:
+            a_idx = self.amount_indices
+            amount = torch.log1p(raw_feat[:, :, a_idx].clamp_min(0.0))
+            norm_state[:, :, a_idx] = _window_zscore(amount)
+
+        if len(self.other_indices) > 0:
+            o_idx = self.other_indices
+            norm_state[:, :, o_idx] = _window_zscore(raw_feat[:, :, o_idx])
 
         return norm_state, self.h_tensor[:, start:end, :]
 

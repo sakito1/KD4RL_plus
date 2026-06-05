@@ -53,7 +53,8 @@ inner_max_boundary = 0.8 # 内层每次交易的最大比例
 outer_window = 120
 inner_window = 10
 outer_horizon = 20
-max_hold = 30 # 最大持有期
+max_hold = 40 # 最大持有期
+min_hold = 20
 episode_len=720
 max_rule_consecutive_low = 3
 # 通过env的observation获取的数据为action dim，state shape为(num_stocks, window_size, num_features)
@@ -87,8 +88,11 @@ monitor_transaction_cost_coef = 1.0
 reward_scale_portfolio = 100.0
 reward_scale_base = 100.0
 reward_scale_outer = 100.0
-reward_scale_inner = 1000.0
-reward_scale_monitor = 1.0
+reward_scale_inner = 2000.0
+reward_scale_monitor = 100.0
+reward_scale_controller = 100.0
+controller_sup_coef = 0.05
+controller_sup_horizon = 20
 
 
 # alphastock 参数

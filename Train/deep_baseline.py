@@ -5,10 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pandas as pd
-
 import utils.config as config
 from AlphaStock.Train import Alpha_stock
+from create_DeepAries_data import save_deeparies_data
+from create_deeptrader_data import deeptrader_files
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +69,11 @@ def _run_alphastock(cun_path, logger, smoke):
 
 
 def _run_deeptrader(cun_path, logger, market, smoke):
+    logger.info(
+        "Preparing DeepTrader input from feature_ssm: %s",
+        config.dataset.get("ssm_data_path"),
+    )
+    deeptrader_files()
     source_config = ROOT / "DeepTrader" / "src" / ("hyper_SH.json" if market == "sh" else "hyper_NAS.json")
     with source_config.open() as fh:
         settings = json.load(fh)
@@ -91,40 +96,71 @@ def _run_deeptrader(cun_path, logger, market, smoke):
 
 
 def _prepare_deeparies_input(cun_path, market, smoke):
-    source = ROOT / "DeepAries" / "data" / market / f"{market}_data.csv"
     target_dir = Path(cun_path) / "DeepAries" / market / "input" / market
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / f"{market}_data.csv"
-    raw = pd.read_csv(source)
-    if "open" not in raw.columns:
-        raw["open"] = raw["adjopen"]
-        raw["close"] = raw["adjclose"]
-        raw["high"] = raw["adjhigh"]
-        raw["low"] = raw["adjlow"]
-        raw["volume"] = raw["amount"]
-    raw["date"] = pd.to_datetime(raw["date"])
-    if smoke:
-        tickers = raw["tic"].drop_duplicates().iloc[:3]
-        raw = raw[
-            raw["tic"].isin(tickers) &
-            raw["date"].between("2023-01-03", "2024-02-16")
-        ]
-    raw.to_csv(target, index=False)
-    return target_dir
+    stocks_limit = 3 if smoke else None
+    summary = save_deeparies_data(
+        market=market,
+        output_root=target_dir,
+        start_date=config.train_start_date,
+        end_date=config.test_end_date,
+        stocks_limit=stocks_limit,
+    )
+    return target_dir, summary
 
 
 def _run_deeparies(cun_path, logger, market, smoke):
-    root_path = _prepare_deeparies_input(cun_path, market, smoke)
+    root_path, summary = _prepare_deeparies_input(cun_path, market, smoke)
     output_dir = Path(cun_path) / "DeepAries" / market
+    alphastock_param = config.alphastcok
+    alphastock_trade_num = int(alphastock_param.get("model_param", {}).get("trade_num", 10))
+    deeparies_num_stocks = min(alphastock_trade_num, int(summary["stocks"]))
+    deeparies_train_epochs = int(alphastock_param.get("num_epoch", 1))
+    deeparies_seq_len = int(alphastock_param.get("look_back", 20))
+    deeparies_initial_amount = float(getattr(config, "initial_amount", 1.0))
+    deeparies_fee_rate = 0.0
+    logger.info(
+        "Prepared DeepAries input: %s stocks, %s dates, %s ~ %s",
+        summary["stocks"], summary["dates"], summary["start"], summary["end"],
+    )
+    logger.info("DeepAries features from: %s", summary["feature_path"])
+    logger.info("DeepAries feature columns: %s", summary["feature_cols"])
+    logger.info(
+        "DeepAries split: train [%s, %s], val [%s, %s], test [%s, %s]",
+        config.train_start_date,
+        config.train_end_date,
+        config.valid_start_date,
+        config.valid_end_date,
+        config.test_start_date,
+        config.test_end_date,
+    )
+    logger.info(
+        "DeepAries AlphaStock-aligned settings: train_epochs=%s, seq_len=%s, "
+        "num_stocks=%s, initial_amount=%s, fee_rate=%s",
+        deeparies_train_epochs,
+        deeparies_seq_len,
+        deeparies_num_stocks,
+        deeparies_initial_amount,
+        deeparies_fee_rate,
+    )
     cmd = [
         sys.executable, "main.py", "--market", market, "--root_path", str(root_path),
         "--data_path", f"{market}_data.csv", "--results_root", str(output_dir / "results"),
         "--checkpoints", str(output_dir / "checkpoints"),
         "--seed", str(getattr(config, "seed", 42)),
+        "--valid_year", str(config.valid_start_date),
+        "--test_year", str(config.test_start_date),
+        "--train_start_date", str(config.train_start_date),
+        "--train_end_date", str(config.train_end_date),
+        "--valid_end_date", str(config.valid_end_date),
+        "--test_end_date", str(config.test_end_date),
+        "--seq_len", str(deeparies_seq_len),
+        "--train_epochs", str(deeparies_train_epochs),
+        "--num_stocks", str(deeparies_num_stocks),
+        "--initial_amount", str(deeparies_initial_amount),
+        "--fee_rate", str(deeparies_fee_rate),
     ]
     if smoke:
         cmd.extend([
-            "--valid_year", "2023-11-01", "--test_year", "2024-01-02",
             "--seq_len", "10", "--label_len", "2", "--horizons", "1", "5",
             "--num_stocks", "3", "--d_model", "32", "--n_heads", "2",
             "--e_layers", "1", "--d_ff", "64", "--train_epochs", "1",

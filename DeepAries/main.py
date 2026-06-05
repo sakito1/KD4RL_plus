@@ -49,9 +49,17 @@ def main():
 
     # [Forecasting Task Settings]
     parser.add_argument('--valid_year', type=str, default='2020-12-31',
-                        help='Validation period end date')
+                        help='Validation period start date')
     parser.add_argument('--test_year', type=str, default='2021-12-31',
                         help='Test period start date')
+    parser.add_argument('--train_start_date', type=str, default=None,
+                        help='Explicit training period start date')
+    parser.add_argument('--train_end_date', type=str, default=None,
+                        help='Explicit training period end date (inclusive)')
+    parser.add_argument('--valid_end_date', type=str, default=None,
+                        help='Explicit validation period end date (inclusive)')
+    parser.add_argument('--test_end_date', type=str, default=None,
+                        help='Explicit test period end date (inclusive)')
     parser.add_argument('--seq_len', type=int, default=20,
                         help='Input sequence length')
     parser.add_argument('--label_len', type=int, default=5,
@@ -115,6 +123,8 @@ def main():
     # [Portfolio Management Settings]
     parser.add_argument('--fee_rate', type=float, default=0.0001,
                         help='Transaction fee rate')
+    parser.add_argument('--initial_amount', type=float, default=1.0,
+                        help='Initial portfolio value')
     parser.add_argument('--complex_fee', action='store_true', default=False,
                         help='Enable complex fee calculation')
     parser.add_argument('--num_stocks', type=int, default=20,

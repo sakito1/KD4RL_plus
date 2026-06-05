@@ -44,11 +44,35 @@ class RiskTPSMLiteTests(unittest.TestCase):
         self.assertEqual(len(feat), len(df))
         self.assertTrue(np.isfinite(feat.values).all())
         self.assertGreater(feat.shape[1], 10)
+        self.assertIn("orig_adjopen", feat.columns)
+        self.assertIn("orig_amount", feat.columns)
+        self.assertIn("drawdown_20d", feat.columns)
+        self.assertLessEqual(feat.shape[1], 25)
+        self.assertGreaterEqual(float(feat.values.min()), -1e-6)
+        self.assertLessEqual(float(feat.values.max()), 1.0 + 1e-6)
 
         df_changed = df.copy()
         df_changed.iloc[80:, df_changed.columns.get_loc("adjclose")] *= 3.0
         feat_changed = build_risk_tpsm_features(df_changed, window=20)
         np.testing.assert_allclose(feat.iloc[:70].values, feat_changed.iloc[:70].values, atol=1e-6)
+
+    def test_feature_builder_preserves_legacy_and_checkpoint_feature_sets(self):
+        df = make_price_frame()
+        risk_only = build_risk_tpsm_features(df, feature_preset="risk_only")
+        self.assertNotIn("orig_adjopen", risk_only.columns)
+        self.assertIn("ret_30d", risk_only.columns)
+
+        selected = build_risk_tpsm_features(
+            df,
+            selected_feature_names=["orig_adjclose", "ret_1d", "drawdown_20d"],
+        )
+        self.assertEqual(selected.columns.tolist(), ["orig_adjclose", "ret_1d", "drawdown_20d"])
+
+        wide_df = df.copy()
+        for i, col in enumerate(("volume", "amp", "body", "kmid2", "kup2", "klow", "ksft2"), start=1):
+            wide_df[col] = 1.0 + i * 0.01 + np.linspace(0.0, 0.1, len(wide_df))
+        full = build_risk_tpsm_features(wide_df, target_feature_count=25)
+        self.assertEqual(full.shape[1], 25)
 
     def test_label_shapes_and_masks(self):
         close = make_price_frame(90)["adjclose"].values
@@ -118,10 +142,21 @@ class RiskTPSMLiteTests(unittest.TestCase):
             emb_dim=16,
             num_horizons=3,
             use_attention_pooling=True,
+            encoder_type="tcn",
         )
         x = torch.randn(6, 20, 12)
         out = model(x)
         self.assertEqual(out["q_risk"].shape, (6, 3))
+        lstm_model = RiskTPSMLite(
+            in_dim=12,
+            emb_dim=16,
+            num_horizons=3,
+            encoder_type="attention_lstm",
+            lstm_hidden_dim=10,
+        )
+        lstm_out = lstm_model(x)
+        self.assertEqual(lstm_out["embedding"].shape, (6, 16))
+        self.assertEqual(lstm_out["q_risk"].shape, (6, 3))
         y = torch.tensor(
             [
                 [0.1, 0.2, 0.3],

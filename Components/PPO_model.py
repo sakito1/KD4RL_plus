@@ -54,6 +54,39 @@ class CausalConv1dBlock(nn.Module):
         return y
 
 
+class FeatureSEGate(nn.Module):
+    """Lightweight feature recalibration for short-horizon inner decisions."""
+
+    def __init__(self, in_features, hidden_dim=None, min_scale=0.5, max_scale=2.0):
+        super().__init__()
+        self.in_features = int(in_features)
+        self.min_scale = float(min_scale)
+        self.max_scale = float(max_scale)
+        hidden_dim = int(hidden_dim or max(self.in_features * 2, 16))
+        self.net = nn.Sequential(
+            nn.Linear(self.in_features, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, self.in_features),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        init_prob = (1.0 - self.min_scale) / max(self.max_scale - self.min_scale, 1e-8)
+        init_prob = min(max(init_prob, 1e-4), 1.0 - 1e-4)
+        nn.init.constant_(self.net[-1].bias, torch.logit(torch.tensor(init_prob)).item())
+        self.last_gate = None
+
+    def forward(self, x):
+        # x: [B, N, T, F]
+        pooled = x.mean(dim=2)
+        gate = self.min_scale + (self.max_scale - self.min_scale) * torch.sigmoid(self.net(pooled))
+        self.last_gate = gate
+        return x * gate.unsqueeze(2), gate
+
+    def regularization(self):
+        if self.last_gate is None:
+            return None
+        return (self.last_gate - 1.0).pow(2).mean()
+
+
 # ==============================================================================
 # 1. 基础组件 (Attention & LSTM & CAAN)
 # ==============================================================================
@@ -189,6 +222,14 @@ class OuterAC(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(hidden_dim, 1),
         )
+        # DeepAries-style auxiliary head: predict each stock's future return
+        # from its own encoded representation, instead of predicting the
+        # realized return of the already selected portfolio.
+        self.pred_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def encode(self, outer_input, weights_drift):
         asset_features = self.asset_lstm(outer_input)           # [B, N, lstm_dim]
@@ -233,6 +274,13 @@ class OuterAC(nn.Module):
         v_in = torch.cat([market_rep, w_rep], dim=-1)
         return self.v_head(v_in)                                # [B, 1]
 
+    def pred_stock_return(self, outer_input, weights_drift):
+        feat = self.encode(outer_input, weights_drift)           # [B, N, hidden_dim]
+        return self.pred_head(feat).squeeze(-1)                  # [B, N]
+
+    def pred_return(self, outer_input, weights_drift, action_weights=None):
+        return self.pred_stock_return(outer_input, weights_drift)
+
     def forward(self, outer_input, weights_drift, deterministic=False):
         actions, raw_action, log_prob, entropy, scores = self.pi(
             outer_input, weights_drift, deterministic=deterministic
@@ -257,6 +305,7 @@ class InnerAC(nn.Module):
         super().__init__()
         self.max_boundary = max_boundary
         self.hidden_dim = hidden_dim
+        self.feature_gate = FeatureSEGate(in_features)
 
         # ---- Causal TCN encoder (very small) ----
         # 两层因果卷积：dilation=1,2 覆盖 window=5 的有效感受野
@@ -291,16 +340,28 @@ class InnerAC(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
+        self.pred_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def _encode_tcn(self, inner_input: torch.Tensor) -> torch.Tensor:
         """TCN 编码：将每资产窗口序列编码为 [B, N, H]（取最后一个时间步）。"""
         B, N, T, M = inner_input.shape
+        inner_input, _ = self.feature_gate(inner_input)
         # [B, N, T, M] -> [B*N, M, T]
         x = inner_input.reshape(B * N, T, M).permute(0, 2, 1)
         x = self.tcn1(x)
         x = self.tcn2(x)  # [B*N, H, T]
         feat = x[:, :, -1].reshape(B, N, self.hidden_dim)
         return feat
+
+    def gate_regularization(self):
+        reg = self.feature_gate.regularization()
+        if reg is None:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        return reg
 
     def encode(self, inner_input, base_used_t, weight_drift):
         # 1) per-asset short-window encoding
@@ -338,6 +399,10 @@ class InnerAC(nn.Module):
         alpha_rep = torch.sum(feat * alpha, dim=1)                     # [B, H]
         global_rep = torch.cat([beta_rep, alpha_rep], dim=-1)
         return self.value_head(global_rep)                             # [B, 1]
+
+    def pred_next_return(self, inner_input, base_used_t, weight_drift):
+        feat = self.encode(inner_input, base_used_t, weight_drift)      # [B, N, H]
+        return self.pred_head(feat).squeeze(-1)                         # [B, N]
 
     def forward(self, inner_input, base_used_t, weight_drift, deterministic=False):
         raw_signal, log_prob, entropy = self.pi(
@@ -386,30 +451,87 @@ class InnerAC(nn.Module):
 
 class MonitorAC(nn.Module):
     """
-    EmbMonitor-ZH for hold/rebalance decisions.
+    Controller for hold/switch decisions.
 
-    The pretrained SSM latent pair [z, h] is projected per asset and pooled
-    with the live holding weights.  Only the resulting portfolio embedding is
-    used for the hold/switch action and its monitor value estimate.
+    It compares the current live portfolio against the latest outer candidate
+    using stock-level z embeddings, weighted p signals, turnover, and the
+    holding-time gate from port_state.
     """
 
-    def __init__(self, z_dim, h_dim, port_state_dim, hidden_dim=32, action_dim=None):
+    def __init__(
+            self,
+            z_dim,
+            h_dim,
+            port_state_dim,
+            hidden_dim=32,
+            action_dim=None,
+            min_hold=20,
+            max_hold=40,
+    ):
         super().__init__()
-        self.asset_feat_dim = z_dim + h_dim
-        self.hidden_dim = hidden_dim
+        self.z_dim = int(z_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.min_hold = int(min_hold)
+        self.max_hold = int(max_hold)
 
         self.asset_projection = nn.Sequential(
-            nn.Linear(self.asset_feat_dim, hidden_dim),
+            nn.Linear(self.z_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
         )
 
+        controller_dim = hidden_dim * 4 + 6
+        self.controller_mlp = nn.Sequential(
+            nn.Linear(controller_dim, hidden_dim * 2),
+            nn.LayerNorm(hidden_dim * 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+        )
         self.actor_head = nn.Linear(hidden_dim, 2)
         self.v_head = nn.Linear(hidden_dim, 1)
 
     def encode(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None):
-        asset_emb = self.asset_projection(torch.cat([z, h], dim=-1))
-        return torch.sum(asset_emb * weights_drift.unsqueeze(-1), dim=1)
+        asset_emb = self.asset_projection(z)
+        weights = weights_drift / (weights_drift.sum(dim=1, keepdim=True) + 1e-8)
+        if switch_action is None:
+            candidate_weights = weights
+        else:
+            candidate_weights = switch_action / (switch_action.sum(dim=1, keepdim=True) + 1e-8)
+        weighted_emb = torch.sum(asset_emb * weights.unsqueeze(-1), dim=1)
+        candidate_emb = torch.sum(asset_emb * candidate_weights.unsqueeze(-1), dim=1)
+        mean_emb = torch.mean(asset_emb, dim=1)
+        diff_emb = candidate_emb - weighted_emb
+
+        hold_ratio = port_state[:, :1].clamp(0.0, 10.0)
+        max_hold = max(float(self.max_hold), 1.0)
+        free_den = max(float(self.max_hold - self.min_hold), 1.0)
+        hold_days = hold_ratio * max_hold
+        free_ratio = torch.clamp((hold_days - float(self.min_hold)) / free_den, 0.0, 1.0)
+        turnover = torch.sum(torch.abs(candidate_weights - weights), dim=1, keepdim=True)
+        p_cur = torch.sum(weights * p, dim=1, keepdim=True)
+        p_cand = torch.sum(candidate_weights * p, dim=1, keepdim=True)
+        p_delta = p_cand - p_cur
+
+        controller_state = torch.cat(
+            [
+                weighted_emb,
+                candidate_emb,
+                diff_emb,
+                mean_emb,
+                hold_ratio,
+                free_ratio,
+                turnover,
+                p_cur,
+                p_cand,
+                p_delta,
+            ],
+            dim=-1,
+        )
+        return self.controller_mlp(controller_state)
 
     def pi(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None,
            deterministic=False):
@@ -427,13 +549,15 @@ class MonitorAC(nn.Module):
 
     def forward(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None,
                 deterministic=False):
-        action, log_prob, entropy, logits = self.pi(
-            z, h, p, q_bear, q_bull, weights_drift, port_state,
-            switch_action=switch_action, deterministic=deterministic
-        )
-        v = self.value(
+        feat = self.encode(
             z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=switch_action
         )
+        logits = self.actor_head(feat)
+        dist = Categorical(logits=logits)
+        action = torch.argmax(logits, dim=-1) if deterministic else dist.sample()
+        log_prob = dist.log_prob(action)
+        entropy = dist.entropy().mean()
+        v = self.v_head(feat)
         return action, log_prob, entropy, logits, v
 
 
@@ -461,5 +585,5 @@ class FullModel(nn.Module):
         }
         self.inner = InnerAC(**inner_args)
 
-        # Monitor: 直接复用 monitor_args
+        # Controller/Monitor: 直接复用 monitor_args
         self.mon = MonitorAC(**monitor_args)
