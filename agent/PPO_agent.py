@@ -289,6 +289,10 @@ class HRL_PPO_Agent:
         """Crop inner inputs to the currently tradable/topK assets."""
         inner_state = obs['inner_state']
         B, N = base_used.shape
+        if not bool(getattr(self.cfg, 'inner_use_topk', False)):
+            indices = torch.arange(N, device=base_used.device).view(1, N).expand(B, -1)
+            return inner_state, base_used, weight_drift, indices
+
         K = min(int(getattr(self.cfg, 'trade_num', N)), N)
         indices = torch.topk(base_used, k=K, dim=1).indices
 
@@ -427,6 +431,8 @@ class HRL_PPO_Agent:
             return {}
 
         ppo_epochs = int(getattr(self.cfg, 'ppo_epochs', 1))
+        if phase == 'warmup_inner':
+            ppo_epochs = int(getattr(self.cfg, 'inner_ppo_epochs', ppo_epochs))
         if train_monitor is None:
             train_monitor = bool(getattr(self.cfg, 'train_monitor_enabled', True))
         metrics = {}
@@ -487,9 +493,11 @@ class HRL_PPO_Agent:
                 d = flat - old
                 return d.norm().item(), d.abs().mean().item()
 
-        params = [p for p in self.net.inner.parameters() if p.requires_grad]
-        w_norm0, w_mean0 = _param_stats(params)
-        w_flat0 = torch.cat([p.data.view(-1) for p in params]).clone()
+        debug_inner_update_stats = bool(getattr(self.cfg, "debug_inner_update_stats", False))
+        if debug_inner_update_stats:
+            params = [p for p in self.net.inner.parameters() if p.requires_grad]
+            w_norm0, _ = _param_stats(params)
+            w_flat0 = torch.cat([p.data.view(-1) for p in params]).clone()
 
         adv_all = self._normalize_adv(data['adv_inn'])
         total = int(adv_all.shape[0])
@@ -499,11 +507,14 @@ class HRL_PPO_Agent:
         loss_pi_sum = 0.0
         loss_v_sum = 0.0
         loss_pred_sum = 0.0
-        loss_gate_sum = 0.0
         entropy_sum = 0.0
-        pred_coef = float(getattr(self.cfg, 'inner_pred_coef', 0.01))
-        gate_coef = float(getattr(self.cfg, 'inner_gate_reg_coef', 1e-4))
-        target_key = 'inner_stock_return_target' if 'inner_stock_return_target' in data else 'inner_next_return_target'
+        pred_coef = float(getattr(self.cfg, 'inner_pred_coef', 0.0))
+        use_pred_loss = pred_coef > 0.0
+        target_key = None
+        if use_pred_loss:
+            target_key = 'inner_stock_return_target' if 'inner_stock_return_target' in data else 'inner_next_return_target'
+            if target_key not in data:
+                raise KeyError("inner_pred_coef > 0 requires inner stock return targets in the PPO buffer.")
 
         for start in range(0, total, batch_size):
             idx = perm[start:start + batch_size]
@@ -534,15 +545,16 @@ class HRL_PPO_Agent:
             val = self.net.inner.value_head(global_rep)
             loss_v = self.mse_loss(val.squeeze(-1), data['ret_inn'][idx])
 
-            pred_next_return = self.net.inner.pred_head(feat).squeeze(-1)
-            loss_pred = F.smooth_l1_loss(pred_next_return, data[target_key][idx])
-            loss_gate = self.net.inner.gate_regularization()
+            if use_pred_loss:
+                pred_next_return = self.net.inner.pred_head(feat).squeeze(-1)
+                loss_pred = F.smooth_l1_loss(pred_next_return, data[target_key][idx])
+            else:
+                loss_pred = feat.new_tensor(0.0)
 
             loss_total = (
                 loss_pi
                 + self.vf_coef * loss_v
                 + pred_coef * loss_pred
-                + gate_coef * loss_gate
                 - self.ent_coef * entropy
             )
             (loss_total * weight).backward()
@@ -550,15 +562,14 @@ class HRL_PPO_Agent:
             loss_pi_sum += loss_pi.item() * idx.numel()
             loss_v_sum += loss_v.item() * idx.numel()
             loss_pred_sum += loss_pred.item() * idx.numel()
-            loss_gate_sum += loss_gate.item() * idx.numel()
             entropy_sum += entropy.item() * idx.numel()
 
         self.opt_inn.step()
 
-        w_norm1, w_mean1 = _param_stats(params)
-        d_norm, d_mean = _param_delta(params, w_flat0)
-
-        print(f"[INNER] w_norm {w_norm0:.4e}->{w_norm1:.4e} | Δnorm {d_norm:.4e} Δmean {d_mean:.4e}")
+        if debug_inner_update_stats:
+            w_norm1, _ = _param_stats(params)
+            d_norm, d_mean = _param_delta(params, w_flat0)
+            print(f"[INNER] w_norm {w_norm0:.4e}->{w_norm1:.4e} | d_norm {d_norm:.4e} d_mean {d_mean:.4e}")
         if (
                 bool(getattr(self.cfg, "clear_cuda_cache_on_update", False))
                 and getattr(self.device, "type", str(self.device)) == "cuda"
@@ -568,7 +579,6 @@ class HRL_PPO_Agent:
             'pi': loss_pi_sum / total,
             'v': loss_v_sum / total,
             'pred': loss_pred_sum / total,
-            'gate': loss_gate_sum / total,
             'ent': entropy_sum / total,
         }
 

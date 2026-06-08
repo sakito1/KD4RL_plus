@@ -91,6 +91,8 @@ class PPO_Env(gym.Env):
         self.controller_sup_horizon = int(getattr(config, 'controller_sup_horizon', self.min_hold))
         self.controller_sup_scale = float(getattr(config, 'controller_sup_scale', 0.05))
         self.controller_sup_max_weight = float(getattr(config, 'controller_sup_max_weight', 5.0))
+        self.controller_sup_coef = float(getattr(config, 'controller_sup_coef', getattr(config, 'monitor_sup_coef', 0.0)))
+        self.controller_sup_enabled = self.controller_sup_coef > 0.0
 
         self.monitor_reward_mode = getattr(config, 'monitor_reward_mode', 'mean')
 
@@ -121,13 +123,17 @@ class PPO_Env(gym.Env):
             i for i, c in enumerate(self.feat_names)
             if 'amount' in c.lower()
         ]
-        self.price_indices = list(self.ohlc_indices)
+        self.price_indices = [
+            i for i, c in enumerate(self.feat_names)
+            if any(x in c.lower() for x in ['adjopen', 'adjhigh', 'adjlow', 'adjclose', 'amount'])
+        ]
         self.adjclose_index = next(
             (i for i, c in enumerate(self.feat_names) if c.lower() == 'adjclose'),
             self.ohlc_indices[-1] if len(self.ohlc_indices) > 0 else None,
         )
-        scaled_indices = set(self.ohlc_indices + self.amount_indices)
+        scaled_indices = set(self.price_indices)
         self.other_indices = [i for i in range(len(self.feat_names)) if i not in scaled_indices]
+        self.inner_norm_mode = str(getattr(config, 'inner_norm_mode', 'legacy')).lower()
         self.features = torch.tensor(loaded_data['data'], dtype=torch.float32, device=self.device)
         self.prices = torch.tensor(loaded_data['prices'], dtype=torch.float32, device=self.device)
 
@@ -297,6 +303,39 @@ class PPO_Env(gym.Env):
 
         return self._get_observation()
 
+    def reset_at(self, start_idx: int, stop_idx: int = None):
+        """Reset to an explicit absolute day window without advancing train pointers."""
+        start_idx = int(start_idx)
+        if stop_idx is None:
+            stop_idx = start_idx + int(self.episode_len)
+        stop_idx = int(stop_idx)
+        if start_idx < self.outer_window:
+            raise ValueError(f"start_idx={start_idx} is before outer_window={self.outer_window}")
+        if start_idx >= self.total_days - 2:
+            raise ValueError(f"start_idx={start_idx} is outside available data.")
+        stop_idx = min(stop_idx, self.total_days - 2)
+        if stop_idx <= start_idx:
+            raise ValueError(f"stop_idx={stop_idx} must be after start_idx={start_idx}")
+
+        self.day = start_idx
+        self.stop_step = stop_idx
+        self.current_episode_start = int(self.day)
+        self.current_episode_end = int(self.stop_step)
+        self.current_episode_len = max(1, self.current_episode_end - self.current_episode_start)
+
+        self.portfolio_value = torch.tensor(self.initial_amount, dtype=torch.float32, device=self.device)
+        init_w = torch.ones(self.num_stocks, dtype=torch.float32, device=self.device) / self.num_stocks
+        self.prev_weights = init_w.clone()
+        self.prev_base_weight = init_w.clone()
+
+        self.t_held = 0
+        self.peak_value = self.initial_amount
+        self.segment_init_value = self.initial_amount
+        self.cumulative_alpha = 0.0
+        self.cumulative_risk = 0.0
+
+        return self._get_observation()
+
 
     # =====================================================================
     # =====================================================================
@@ -428,22 +467,29 @@ class PPO_Env(gym.Env):
         outer_stock_return_target = self._future_stock_return_target(self.day, self.max_hold)
         inner_stock_return_target = self._future_stock_return_target(self.day, self.min_hold)
 
-        candidate_switch_weight = (
-            outer_action.flatten().detach()
-            if outer_action is not None
-            else new_base_weight
-        )
-        sup_h = max(1, int(self.controller_sup_horizon))
-        hold_20 = self._future_outer_sum(weight_drifted_norm.detach(), self.day, sup_h)
-        switch_20 = self._future_outer_sum(candidate_switch_weight.detach(), self.day, sup_h)
-        switch_turnover = torch.sum(torch.abs(self._normalize(candidate_switch_weight) - weight_drifted_norm.detach()))
-        switch_adv_20 = switch_20 - hold_20 - switch_turnover * self.transaction_cost_pct
-        controller_switch_label = (switch_adv_20 > 0).float()
-        controller_sup_weight = torch.clamp(
-            torch.abs(switch_adv_20) / max(self.controller_sup_scale, 1e-8),
-            0.0,
-            self.controller_sup_max_weight,
-        )
+        if self.controller_sup_enabled:
+            candidate_switch_weight = (
+                outer_action.flatten().detach()
+                if outer_action is not None
+                else new_base_weight
+            )
+            sup_h = max(1, int(self.controller_sup_horizon))
+            hold_20 = self._future_outer_sum(weight_drifted_norm.detach(), self.day, sup_h)
+            switch_20 = self._future_outer_sum(candidate_switch_weight.detach(), self.day, sup_h)
+            switch_turnover = torch.sum(torch.abs(self._normalize(candidate_switch_weight) - weight_drifted_norm.detach()))
+            switch_adv_20 = switch_20 - hold_20 - switch_turnover * self.transaction_cost_pct
+            controller_switch_label = (switch_adv_20 > 0).float()
+            controller_sup_weight = torch.clamp(
+                torch.abs(switch_adv_20) / max(self.controller_sup_scale, 1e-8),
+                0.0,
+                self.controller_sup_max_weight,
+            )
+        else:
+            hold_20 = portfolio_return.new_tensor(0.0)
+            switch_20 = portfolio_return.new_tensor(0.0)
+            switch_adv_20 = portfolio_return.new_tensor(0.0)
+            controller_switch_label = portfolio_return.new_tensor(0.0)
+            controller_sup_weight = portfolio_return.new_tensor(0.0)
 
         step_alpha = portfolio_return - base_return_val
         # =====================================================================
@@ -543,6 +589,15 @@ class PPO_Env(gym.Env):
         raw_feat = self.features[:, start:end, :]
 
         norm_state = torch.zeros_like(raw_feat)
+
+        if self.inner_norm_mode == 'legacy':
+            if len(self.price_indices) > 0:
+                p_idx = self.price_indices
+                last_val = raw_feat[:, -1, p_idx].unsqueeze(1)
+                norm_state[:, :, p_idx] = raw_feat[:, :, p_idx] / (last_val + 1e-8)
+            if len(self.other_indices) > 0:
+                norm_state[:, :, self.other_indices] = raw_feat[:, :, self.other_indices]
+            return norm_state, self.h_tensor[:, start:end, :]
 
         if len(self.ohlc_indices) > 0:
             p_idx = self.ohlc_indices

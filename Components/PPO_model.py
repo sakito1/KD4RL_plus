@@ -54,39 +54,6 @@ class CausalConv1dBlock(nn.Module):
         return y
 
 
-class FeatureSEGate(nn.Module):
-    """Lightweight feature recalibration for short-horizon inner decisions."""
-
-    def __init__(self, in_features, hidden_dim=None, min_scale=0.5, max_scale=2.0):
-        super().__init__()
-        self.in_features = int(in_features)
-        self.min_scale = float(min_scale)
-        self.max_scale = float(max_scale)
-        hidden_dim = int(hidden_dim or max(self.in_features * 2, 16))
-        self.net = nn.Sequential(
-            nn.Linear(self.in_features, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, self.in_features),
-        )
-        nn.init.zeros_(self.net[-1].weight)
-        init_prob = (1.0 - self.min_scale) / max(self.max_scale - self.min_scale, 1e-8)
-        init_prob = min(max(init_prob, 1e-4), 1.0 - 1e-4)
-        nn.init.constant_(self.net[-1].bias, torch.logit(torch.tensor(init_prob)).item())
-        self.last_gate = None
-
-    def forward(self, x):
-        # x: [B, N, T, F]
-        pooled = x.mean(dim=2)
-        gate = self.min_scale + (self.max_scale - self.min_scale) * torch.sigmoid(self.net(pooled))
-        self.last_gate = gate
-        return x * gate.unsqueeze(2), gate
-
-    def regularization(self):
-        if self.last_gate is None:
-            return None
-        return (self.last_gate - 1.0).pow(2).mean()
-
-
 # ==============================================================================
 # 1. 基础组件 (Attention & LSTM & CAAN)
 # ==============================================================================
@@ -305,7 +272,6 @@ class InnerAC(nn.Module):
         super().__init__()
         self.max_boundary = max_boundary
         self.hidden_dim = hidden_dim
-        self.feature_gate = FeatureSEGate(in_features)
 
         # ---- Causal TCN encoder (very small) ----
         # 两层因果卷积：dilation=1,2 覆盖 window=5 的有效感受野
@@ -349,19 +315,12 @@ class InnerAC(nn.Module):
     def _encode_tcn(self, inner_input: torch.Tensor) -> torch.Tensor:
         """TCN 编码：将每资产窗口序列编码为 [B, N, H]（取最后一个时间步）。"""
         B, N, T, M = inner_input.shape
-        inner_input, _ = self.feature_gate(inner_input)
         # [B, N, T, M] -> [B*N, M, T]
         x = inner_input.reshape(B * N, T, M).permute(0, 2, 1)
         x = self.tcn1(x)
         x = self.tcn2(x)  # [B*N, H, T]
         feat = x[:, :, -1].reshape(B, N, self.hidden_dim)
         return feat
-
-    def gate_regularization(self):
-        reg = self.feature_gate.regularization()
-        if reg is None:
-            return torch.tensor(0.0, device=next(self.parameters()).device)
-        return reg
 
     def encode(self, inner_input, base_used_t, weight_drift):
         # 1) per-asset short-window encoding

@@ -39,10 +39,10 @@ MARKET_CONFIGS = {
 
 TRAINING_STAGES = ("warmup_outer", "warmup_inner", "warmup_monitor", "joint")
 DEFAULT_PHASE_ROLLOUT_SEGMENTS = {
-    "warmup_outer": 15,
-    "warmup_inner": 5,
-    "warmup_monitor": 15,
-    "joint": 15,
+    "warmup_outer": 10,
+    "warmup_inner": 10,
+    "warmup_monitor": 10,
+    "joint": 10,
 }
 
 
@@ -84,32 +84,46 @@ def parse_args():
     parser.add_argument(
         "--warmup_outer_epochs",
         type=int,
-        default=3,
+        default=5,
         help="Outer warmup train epochs. One epoch runs all fixed train episodes once.",
     )
     parser.add_argument(
         "--warmup_inner_epochs",
         type=int,
-        default=1,
+        default=3,
         help="Inner warmup train epochs. One epoch runs all fixed train episodes once.",
     )
     parser.add_argument(
         "--warmup_monitor_epochs",
         type=int,
-        default=1,
-        help="Controller warmup train epochs. Default: 1.",
+        default=5,
+        help="Controller counterfactual-PG train epochs. Default: 5.",
     )
+    parser.add_argument("--controller_epochs", type=int, default=None, help="Alias for --warmup_monitor_epochs.")
     parser.add_argument(
         "--joint_epochs",
         type=int,
-        default=2,
-        help="Joint finetune train epochs. Default: 2.",
+        default=1,
+        help="Outer+Inner joint finetune train epochs. Default: 1.",
     )
+    parser.add_argument("--joint_outer_inner_epochs", type=int, default=None, help="Alias for --joint_epochs.")
     parser.add_argument("--warmup_outer_episodes", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--warmup_inner_episodes", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--warmup_monitor_episodes", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--joint_episodes", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--val_interval", type=int, default=9)
+    parser.add_argument(
+        "--model_selection_metric",
+        choices=["sharpe", "return", "mdd"],
+        default="sharpe",
+        help="Checkpoint selection metric for outer/inner/joint phases. Default: sharpe.",
+    )
+    parser.add_argument(
+        "--controller_selection_metric",
+        choices=["risk_return", "return", "mdd", "sharpe"],
+        default="risk_return",
+        help="Checkpoint selection metric for controller PG. Default: risk_return.",
+    )
     parser.add_argument(
         "--fixed_cycle",
         type=int,
@@ -119,8 +133,8 @@ def parse_args():
     parser.add_argument(
         "--min_hold",
         type=int,
-        default=20,
-        help="Minimum holding days before controller may switch. Default: 20.",
+        default=10,
+        help="Minimum holding days before controller may switch. Default: 10.",
     )
     parser.add_argument(
         "--max_hold",
@@ -158,6 +172,18 @@ def parse_args():
         help="Learning-rate multiplier applied to all PPO optimizers during joint fine-tuning. Default: 0.1.",
     )
     parser.add_argument("--ppo_epochs", type=int, default=2)
+    parser.add_argument(
+        "--inner_ppo_epochs",
+        type=int,
+        default=3,
+        help="PPO epochs used only during the inner warmup stage. Default: 3.",
+    )
+    parser.add_argument(
+        "--inner_rollout_update_steps",
+        type=int,
+        default=160,
+        help="Daily rollout steps accumulated before each inner warmup PPO update. Default: 160.",
+    )
     parser.add_argument("--inner_batch_size", type=int, default=1200)
     parser.add_argument(
         "--outer_update_batch_size",
@@ -168,13 +194,65 @@ def parse_args():
     parser.add_argument("--trade_num", type=int, default=10)
     parser.add_argument("--ssm_dim", type=int, default=16)
     parser.add_argument("--outer_pred_coef", type=float, default=0.1)
-    parser.add_argument("--inner_pred_coef", type=float, default=0.05)
-    parser.add_argument("--inner_gate_reg_coef", type=float, default=1e-4)
-    parser.add_argument("--controller_sup_coef", type=float, default=0.05)
+    parser.add_argument("--inner_pred_coef", type=float, default=0.0)
+    parser.add_argument(
+        "--inner_gate_reg_coef",
+        type=float,
+        default=0.0,
+        help="Deprecated compatibility arg. Inner actor now follows KD4RL and has no feature gate.",
+    )
+    parser.add_argument(
+        "--inner_use_topk",
+        action="store_true",
+        help="Use the newer topK-cropped inner action space. Default off keeps the original KD4RL full-universe inner actor.",
+    )
+    parser.add_argument(
+        "--inner_feature_gate",
+        action="store_true",
+        help="Deprecated compatibility flag. Ignored; inner actor follows KD4RL without feature gate.",
+    )
+    parser.add_argument(
+        "--inner_norm_mode",
+        choices=["legacy", "log_zscore"],
+        default="legacy",
+        help="Inner feature normalization. legacy matches /home/tongwenxuan/KD4RL; log_zscore uses the newer normalization.",
+    )
+    parser.add_argument(
+        "--inner_train_fixed_episodes",
+        dest="inner_train_fixed_episodes",
+        action="store_true",
+        help="Use fixed-length local train episodes for inner warmup. Default on.",
+    )
+    parser.add_argument(
+        "--no_inner_train_fixed_episodes",
+        dest="inner_train_fixed_episodes",
+        action="store_false",
+        help="Use the global train episode schedule for inner warmup.",
+    )
+    parser.set_defaults(inner_train_fixed_episodes=True)
+    parser.add_argument(
+        "--inner_episode_len",
+        type=int,
+        default=400,
+        help="Fixed inner warmup episode length in trading days. Default: 400.",
+    )
+    parser.add_argument(
+        "--inner_train_episodes_per_epoch",
+        type=int,
+        default=30,
+        help="Fixed inner warmup episodes per epoch. Default: 30.",
+    )
+    parser.add_argument(
+        "--inner_start_stride_days",
+        type=int,
+        default=120,
+        help="Stride between fixed inner warmup episode starts. Default: 120.",
+    )
+    parser.add_argument("--controller_sup_coef", type=float, default=0.0)
     parser.add_argument(
         "--controller_check_stride_days",
         type=int,
-        default=5,
+        default=1,
         help=(
             "Only run the trainable controller every N days inside the free holding window. "
             "Days between checks are forced-hold and locked. Use 1 for daily controller checks."
@@ -188,6 +266,21 @@ def parse_args():
     parser.add_argument("--reward_scale_outer", type=float, default=100.0)
     parser.add_argument("--reward_scale_inner", type=float, default=2000.0)
     parser.add_argument("--reward_scale_controller", type=float, default=100.0)
+    parser.add_argument("--controller_algorithm", choices=["pg"], default="pg")
+    parser.add_argument("--controller_rollout_len", type=int, default=400)
+    parser.add_argument("--controller_max_segments", type=int, default=25)
+    parser.add_argument("--controller_pg_batch_windows", type=int, default=4)
+    parser.add_argument("--controller_windows_per_epoch", type=int, default=5)
+    parser.add_argument("--controller_start_stride_days", type=int, default=40)
+    parser.add_argument("--controller_entropy_coef", type=float, default=0.01)
+    parser.add_argument("--controller_mdd_coef", type=float, default=2.0)
+    parser.add_argument("--controller_return_coef", type=float, default=0.5)
+    parser.add_argument("--controller_count_min", type=int, default=15)
+    parser.add_argument("--controller_count_max", type=int, default=25)
+    parser.add_argument("--controller_count_penalty_coef", type=float, default=0.5)
+    parser.add_argument("--controller_switch_coef", type=float, default=0.0)
+    parser.add_argument("--controller_turnover_coef", type=float, default=0.0)
+    parser.add_argument("--controller_val_interval_epochs", type=int, default=None)
     parser.add_argument(
         "--outer_pred_coefs",
         nargs="+",
@@ -230,8 +323,8 @@ def parse_args():
     parser.add_argument(
         "--train_episodes_per_epoch",
         type=int,
-        default=3,
-        help="Number of fixed train starts per epoch. Default: 3.",
+        default=5,
+        help="Number of fixed train starts per epoch. Default: 5.",
     )
     parser.add_argument(
         "--train_start_stride_days",
@@ -340,7 +433,7 @@ def resolve_seeds(args, config_module):
     if args.seed is not None:
         return [args.seed]
     base_seed = int(getattr(config_module, "seed", 42))
-    return [base_seed, base_seed + 1, base_seed + 2]
+    return [base_seed + i for i in range(5)]
 
 
 def _coef_tag(value):
@@ -360,6 +453,10 @@ def supervised_coef_grid(args):
 
 
 def normalize_training_schedule(args):
+    if getattr(args, "controller_epochs", None) is not None:
+        args.warmup_monitor_epochs = int(args.controller_epochs)
+    if getattr(args, "joint_outer_inner_epochs", None) is not None:
+        args.joint_epochs = int(args.joint_outer_inner_epochs)
     if getattr(args, "train_episode_count", None) is not None:
         args.train_episodes_per_epoch = args.train_episode_count
     if getattr(args, "train_episode_start_stride", None) is not None:
@@ -392,6 +489,31 @@ def normalize_training_schedule(args):
         stage: int(args.max_hold) * segments
         for stage, segments in args.rollout_segments_by_stage.items()
     }
+    args.inner_train_fixed_episodes = bool(args.inner_train_fixed_episodes)
+    args.inner_feature_gate = False
+    args.inner_gate_reg_coef = 0.0
+    args.inner_episode_len = max(1, int(args.inner_episode_len))
+    args.inner_train_episodes_per_epoch = max(1, int(args.inner_train_episodes_per_epoch))
+    args.inner_start_stride_days = max(1, int(args.inner_start_stride_days))
+    args.inner_rollout_update_steps = max(0, int(args.inner_rollout_update_steps))
+    args.inner_ppo_epochs = max(1, int(args.inner_ppo_epochs))
+    if args.inner_train_fixed_episodes and args.inner_rollout_update_steps > 0:
+        args.rollout_update_steps_by_stage["warmup_inner"] = int(args.inner_rollout_update_steps)
+    args.controller_algorithm = "pg"
+    args.controller_rollout_len = max(1, int(args.controller_rollout_len))
+    args.controller_max_segments = max(1, int(args.controller_max_segments))
+    args.controller_count_min = max(1, int(args.controller_count_min))
+    args.controller_count_max = max(1, int(args.controller_count_max))
+    if args.controller_count_max < args.controller_count_min:
+        args.controller_count_min, args.controller_count_max = args.controller_count_max, args.controller_count_min
+    args.controller_count_penalty_coef = max(0.0, float(args.controller_count_penalty_coef))
+    args.controller_pg_batch_windows = max(1, int(args.controller_pg_batch_windows))
+    args.controller_windows_per_epoch = max(1, int(args.controller_windows_per_epoch))
+    args.controller_start_stride_days = max(1, int(args.controller_start_stride_days))
+    args.controller_val_interval_epochs = (
+        None if args.controller_val_interval_epochs is None
+        else max(1, int(args.controller_val_interval_epochs))
+    )
 
     raw_stride = getattr(args, "train_start_stride_days", None)
     args.train_start_stride_auto = raw_stride is None or int(raw_stride) <= 0
@@ -415,12 +537,17 @@ def normalize_training_schedule(args):
             legacy_episode_total = int(legacy_episode_total)
             if legacy_episode_total < 0:
                 raise ValueError(f"{legacy_episode_attr} must be non-negative.")
-            if legacy_episode_total % args.train_episodes_per_epoch != 0:
+            stage_episodes_per_epoch = (
+                args.inner_train_episodes_per_epoch
+                if stage == "warmup_inner" and args.inner_train_fixed_episodes
+                else args.train_episodes_per_epoch
+            )
+            if legacy_episode_total % stage_episodes_per_epoch != 0:
                 raise ValueError(
                     f"{legacy_episode_attr}={legacy_episode_total} is not a complete number of train epochs. "
-                    f"Use a multiple of train_episodes_per_epoch={args.train_episodes_per_epoch}."
+                    f"Use a multiple of episodes_per_epoch={stage_episodes_per_epoch}."
                 )
-            setattr(args, epoch_attr, legacy_episode_total // args.train_episodes_per_epoch)
+            setattr(args, epoch_attr, legacy_episode_total // stage_episodes_per_epoch)
             setattr(args, total_episode_attr, legacy_episode_total)
             continue
 
@@ -428,7 +555,12 @@ def normalize_training_schedule(args):
         if epoch_total < 0:
             raise ValueError(f"{epoch_attr} must be non-negative.")
         setattr(args, epoch_attr, epoch_total)
-        setattr(args, total_episode_attr, epoch_total * args.train_episodes_per_epoch)
+        stage_episodes_per_epoch = (
+            args.inner_train_episodes_per_epoch
+            if stage == "warmup_inner" and args.inner_train_fixed_episodes
+            else args.train_episodes_per_epoch
+        )
+        setattr(args, total_episode_attr, epoch_total * stage_episodes_per_epoch)
 
 def stage_episode_total(args, stage):
     return int(getattr(args, f"{stage}_episode_total"))
@@ -461,7 +593,22 @@ def apply_smoke_overrides(args):
     args.outer_rollout_segments = 1
     for stage in TRAINING_STAGES:
         setattr(args, f"{stage}_rollout_segments", 1)
+    args.controller_rollout_len = 8
+    args.controller_max_segments = 4
+    args.controller_count_min = 1
+    args.controller_count_max = 4
+    args.controller_count_penalty_coef = 0.1
+    args.controller_pg_batch_windows = 1
+    args.controller_windows_per_epoch = 1
+    args.controller_start_stride_days = 4
+    args.controller_val_interval_epochs = 999
     args.ppo_epochs = 1
+    args.inner_ppo_epochs = 1
+    args.inner_train_fixed_episodes = True
+    args.inner_episode_len = 8
+    args.inner_train_episodes_per_epoch = 1
+    args.inner_start_stride_days = 4
+    args.inner_rollout_update_steps = 4
     args.skip_test = True
 
 
@@ -515,6 +662,10 @@ def build_child_command(args, market, run_root, seed):
         str(args.joint_lr_mult),
         "--ppo_epochs",
         str(args.ppo_epochs),
+        "--inner_ppo_epochs",
+        str(args.inner_ppo_epochs),
+        "--inner_rollout_update_steps",
+        str(args.inner_rollout_update_steps),
         "--inner_batch_size",
         str(args.inner_batch_size),
         "--outer_update_batch_size",
@@ -529,6 +680,14 @@ def build_child_command(args, market, run_root, seed):
         str(args.inner_pred_coef),
         "--inner_gate_reg_coef",
         str(args.inner_gate_reg_coef),
+        "--inner_norm_mode",
+        str(args.inner_norm_mode),
+        "--inner_episode_len",
+        str(args.inner_episode_len),
+        "--inner_train_episodes_per_epoch",
+        str(args.inner_train_episodes_per_epoch),
+        "--inner_start_stride_days",
+        str(args.inner_start_stride_days),
         "--controller_sup_coef",
         str(args.controller_sup_coef),
         "--controller_check_stride_days",
@@ -539,6 +698,36 @@ def build_child_command(args, market, run_root, seed):
         str(args.reward_scale_inner),
         "--reward_scale_controller",
         str(args.reward_scale_controller),
+        "--controller_algorithm",
+        str(args.controller_algorithm),
+        "--controller_rollout_len",
+        str(args.controller_rollout_len),
+        "--controller_max_segments",
+        str(args.controller_max_segments),
+        "--controller_pg_batch_windows",
+        str(args.controller_pg_batch_windows),
+        "--controller_windows_per_epoch",
+        str(args.controller_windows_per_epoch),
+        "--controller_start_stride_days",
+        str(args.controller_start_stride_days),
+        "--controller_entropy_coef",
+        str(args.controller_entropy_coef),
+        "--controller_mdd_coef",
+        str(args.controller_mdd_coef),
+        "--controller_return_coef",
+        str(args.controller_return_coef),
+        "--controller_count_min",
+        str(args.controller_count_min),
+        "--controller_count_max",
+        str(args.controller_count_max),
+        "--controller_count_penalty_coef",
+        str(args.controller_count_penalty_coef),
+        "--controller_switch_coef",
+        str(args.controller_switch_coef),
+        "--model_selection_metric",
+        str(args.model_selection_metric),
+        "--controller_selection_metric",
+        str(args.controller_selection_metric),
         "--rule_switch_threshold",
         str(args.rule_switch_threshold),
         "--train_episodes_per_epoch",
@@ -560,10 +749,22 @@ def build_child_command(args, market, run_root, seed):
         cmd.extend(["--episode_len", str(args.episode_len)])
     if args.max_rule_consecutive_low is not None:
         cmd.extend(["--max_rule_consecutive_low", str(args.max_rule_consecutive_low)])
+    if args.controller_turnover_coef is not None:
+        cmd.extend(["--controller_turnover_coef", str(args.controller_turnover_coef)])
+    if args.controller_val_interval_epochs is not None:
+        cmd.extend(["--controller_val_interval_epochs", str(args.controller_val_interval_epochs)])
     if not args.train_episode_to_end:
         cmd.append("--no_train_episode_to_end")
+    if args.inner_train_fixed_episodes:
+        cmd.append("--inner_train_fixed_episodes")
+    else:
+        cmd.append("--no_inner_train_fixed_episodes")
     if args.train_monitor:
         cmd.append("--train_monitor")
+    if args.inner_use_topk:
+        cmd.append("--inner_use_topk")
+    if args.clear_cuda_cache_on_update:
+        cmd.append("--clear_cuda_cache_on_update")
     if args.cpu:
         cmd.append("--cpu")
     if args.skip_test:
@@ -582,13 +783,22 @@ def set_runtime_training_args(args, market_root, seed):
         runtime_config.dataset = dict(runtime_config.dataset)
         runtime_config.dataset["ssm_data_path"] = str(args.ssm_data_path)
     runtime_config.ppo_epochs = int(args.ppo_epochs)
+    runtime_config.inner_ppo_epochs = int(args.inner_ppo_epochs)
+    runtime_config.inner_rollout_update_steps = int(args.inner_rollout_update_steps)
     runtime_config.inner_batch_size = int(args.inner_batch_size)
     runtime_config.outer_update_batch_size = int(args.outer_update_batch_size)
     runtime_config.trade_num = int(args.trade_num)
     runtime_config.ssm_dim = int(args.ssm_dim)
     runtime_config.outer_pred_coef = float(args.outer_pred_coef)
     runtime_config.inner_pred_coef = float(args.inner_pred_coef)
-    runtime_config.inner_gate_reg_coef = float(args.inner_gate_reg_coef)
+    runtime_config.inner_gate_reg_coef = 0.0
+    runtime_config.inner_use_topk = bool(args.inner_use_topk)
+    runtime_config.inner_feature_gate = False
+    runtime_config.inner_norm_mode = str(args.inner_norm_mode)
+    runtime_config.inner_train_fixed_episodes = bool(args.inner_train_fixed_episodes)
+    runtime_config.inner_episode_len = int(args.inner_episode_len)
+    runtime_config.inner_train_episodes_per_epoch = int(args.inner_train_episodes_per_epoch)
+    runtime_config.inner_train_start_stride_days = int(args.inner_start_stride_days)
     runtime_config.controller_sup_coef = float(args.controller_sup_coef)
     runtime_config.controller_check_stride_days = max(1, int(args.controller_check_stride_days))
     runtime_config.clear_cuda_cache_on_update = bool(args.clear_cuda_cache_on_update)
@@ -596,6 +806,29 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.reward_scale_inner = float(args.reward_scale_inner)
     runtime_config.reward_scale_monitor = float(args.reward_scale_controller)
     runtime_config.reward_scale_controller = float(args.reward_scale_controller)
+    runtime_config.controller_algorithm = str(args.controller_algorithm)
+    runtime_config.controller_rollout_len = int(args.controller_rollout_len)
+    runtime_config.controller_max_segments = int(args.controller_max_segments)
+    runtime_config.controller_pg_batch_windows = int(args.controller_pg_batch_windows)
+    runtime_config.controller_windows_per_epoch = int(args.controller_windows_per_epoch)
+    runtime_config.controller_start_stride_days = int(args.controller_start_stride_days)
+    runtime_config.controller_entropy_coef = float(args.controller_entropy_coef)
+    runtime_config.controller_mdd_coef = float(args.controller_mdd_coef)
+    runtime_config.controller_return_coef = float(args.controller_return_coef)
+    runtime_config.controller_count_min = int(args.controller_count_min)
+    runtime_config.controller_count_max = int(args.controller_count_max)
+    runtime_config.controller_count_penalty_coef = float(args.controller_count_penalty_coef)
+    runtime_config.controller_switch_coef = float(args.controller_switch_coef)
+    runtime_config.model_selection_metric = str(args.model_selection_metric)
+    runtime_config.controller_selection_metric = str(args.controller_selection_metric)
+    if args.controller_turnover_coef is not None:
+        runtime_config.controller_turnover_coef = float(args.controller_turnover_coef)
+    elif hasattr(runtime_config, "controller_turnover_coef"):
+        delattr(runtime_config, "controller_turnover_coef")
+    if args.controller_val_interval_epochs is not None:
+        runtime_config.controller_val_interval_epochs = int(args.controller_val_interval_epochs)
+    elif hasattr(runtime_config, "controller_val_interval_epochs"):
+        delattr(runtime_config, "controller_val_interval_epochs")
     runtime_config.controller_sup_horizon = int(args.min_hold)
     runtime_config.train_monitor_enabled = bool(args.train_monitor)
     runtime_config.use_rule_switch_train = False
@@ -619,6 +852,8 @@ def set_runtime_training_args(args, market_root, seed):
         setattr(runtime_config, f"{stage}_rollout_segments", int(getattr(args, f"{stage}_rollout_segments")))
     runtime_config.rollout_segments_by_stage = dict(args.rollout_segments_by_stage)
     runtime_config.rollout_update_steps_by_stage = dict(args.rollout_update_steps_by_stage)
+    if runtime_config.inner_train_fixed_episodes and runtime_config.inner_rollout_update_steps > 0:
+        runtime_config.rollout_update_steps_by_stage["warmup_inner"] = runtime_config.inner_rollout_update_steps
     runtime_config.rollout_update_steps = int(args.rollout_update_steps_by_stage.get("warmup_outer", 0))
 
     device_name = "cpu" if args.cpu else args.device
@@ -645,6 +880,10 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "train_start_stride_matches_formula": getattr(args, "train_start_stride_matches_formula", None),
             "train_episode_to_end": runtime_config.train_episode_to_end,
             "episode_len": getattr(runtime_config, "episode_len", None),
+            "inner_train_fixed_episodes": getattr(runtime_config, "inner_train_fixed_episodes", None),
+            "inner_episode_len": getattr(runtime_config, "inner_episode_len", None),
+            "inner_train_episodes_per_epoch": getattr(runtime_config, "inner_train_episodes_per_epoch", None),
+            "inner_train_start_stride_days": getattr(runtime_config, "inner_train_start_stride_days", None),
             "outer_window": getattr(runtime_config, "outer_window", None),
             "min_hold": getattr(runtime_config, "min_hold", None),
             "max_hold": getattr(runtime_config, "max_hold", None),
@@ -668,6 +907,8 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "rollout_segments_by_stage": getattr(runtime_config, "rollout_segments_by_stage", None),
             "rollout_update_steps_by_stage": getattr(runtime_config, "rollout_update_steps_by_stage", None),
             "ppo_epochs": args.ppo_epochs,
+            "inner_ppo_epochs": getattr(runtime_config, "inner_ppo_epochs", None),
+            "inner_rollout_update_steps": getattr(runtime_config, "inner_rollout_update_steps", None),
             "joint_lr_mult": args.joint_lr_mult,
             "inner_batch_size": args.inner_batch_size,
             "outer_update_batch_size": args.outer_update_batch_size,
@@ -675,9 +916,29 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "ssm_dim": args.ssm_dim,
             "outer_pred_coef": args.outer_pred_coef,
             "inner_pred_coef": args.inner_pred_coef,
-            "inner_gate_reg_coef": args.inner_gate_reg_coef,
+            "inner_gate_reg_coef": 0.0,
+            "inner_use_topk": args.inner_use_topk,
+            "inner_feature_gate": False,
+            "inner_norm_mode": args.inner_norm_mode,
             "controller_sup_coef": args.controller_sup_coef,
             "controller_check_stride_days": getattr(runtime_config, "controller_check_stride_days", None),
+            "controller_algorithm": getattr(runtime_config, "controller_algorithm", None),
+            "controller_rollout_len": getattr(runtime_config, "controller_rollout_len", None),
+            "controller_max_segments": getattr(runtime_config, "controller_max_segments", None),
+            "controller_pg_batch_windows": getattr(runtime_config, "controller_pg_batch_windows", None),
+            "controller_windows_per_epoch": getattr(runtime_config, "controller_windows_per_epoch", None),
+            "controller_start_stride_days": getattr(runtime_config, "controller_start_stride_days", None),
+            "controller_entropy_coef": getattr(runtime_config, "controller_entropy_coef", None),
+            "controller_mdd_coef": getattr(runtime_config, "controller_mdd_coef", None),
+            "controller_return_coef": getattr(runtime_config, "controller_return_coef", None),
+            "controller_count_min": getattr(runtime_config, "controller_count_min", None),
+            "controller_count_max": getattr(runtime_config, "controller_count_max", None),
+            "controller_count_penalty_coef": getattr(runtime_config, "controller_count_penalty_coef", None),
+            "controller_switch_coef": getattr(runtime_config, "controller_switch_coef", None),
+            "controller_turnover_coef": getattr(runtime_config, "controller_turnover_coef", None),
+            "controller_val_interval_epochs": getattr(runtime_config, "controller_val_interval_epochs", None),
+            "model_selection_metric": getattr(runtime_config, "model_selection_metric", None),
+            "controller_selection_metric": getattr(runtime_config, "controller_selection_metric", None),
             "clear_cuda_cache_on_update": args.clear_cuda_cache_on_update,
             "reward_scale_outer": args.reward_scale_outer,
             "reward_scale_inner": args.reward_scale_inner,
@@ -718,6 +979,8 @@ def run_child(args):
         stage: fixed_cycle * segments
         for stage, segments in runtime_config.rollout_segments_by_stage.items()
     }
+    if getattr(runtime_config, "inner_train_fixed_episodes", False) and getattr(runtime_config, "inner_rollout_update_steps", 0) > 0:
+        runtime_config.rollout_update_steps_by_stage["warmup_inner"] = int(runtime_config.inner_rollout_update_steps)
     runtime_config.rollout_update_steps = runtime_config.rollout_update_steps_by_stage["warmup_outer"]
 
     logger = create_logger(str(market_root / "ppo" / "logs" / f"seed_{args.seed}"))
@@ -756,6 +1019,16 @@ def run_child(args):
         fixed_cycle,
     )
     logger.info(
+        "Inner warmup schedule: fixed=%s episodes_per_epoch=%s episode_len=%s start_stride_days=%s "
+        "update_steps=%s ppo_epochs=%s",
+        getattr(runtime_config, "inner_train_fixed_episodes", False),
+        getattr(runtime_config, "inner_train_episodes_per_epoch", None),
+        getattr(runtime_config, "inner_episode_len", None),
+        getattr(runtime_config, "inner_train_start_stride_days", None),
+        getattr(runtime_config, "inner_rollout_update_steps", None),
+        getattr(runtime_config, "inner_ppo_epochs", None),
+    )
+    logger.info(
         "Efficiency config: outer_window=%s min_hold=%s max_hold=%s rollout_segments_by_stage=%s rollout_update_steps_by_stage=%s",
         runtime_config.outer_window,
         runtime_config.min_hold,
@@ -764,16 +1037,36 @@ def run_child(args):
         runtime_config.rollout_update_steps_by_stage,
     )
     logger.info(
-        "Auxiliary prediction weights: outer_pred_coef=%s inner_pred_coef=%s inner_gate_reg_coef=%s",
+        "Auxiliary prediction weights: outer_pred_coef=%s inner_pred_coef=%s",
         runtime_config.outer_pred_coef,
         runtime_config.inner_pred_coef,
-        runtime_config.inner_gate_reg_coef,
+    )
+    logger.info(
+        "Checkpoint selection: fixed_hrl=%s controller=%s",
+        getattr(runtime_config, "model_selection_metric", "sharpe"),
+        getattr(runtime_config, "controller_selection_metric", "risk_return"),
     )
     logger.info(
         "Controller policy: %s, sup_coef=%s, check_stride_days=%s",
-        "train PPO controller actor" if runtime_config.train_monitor_enabled else "forced hold/switch constraints only",
+        "counterfactual PG controller" if runtime_config.train_monitor_enabled else "forced hold/switch constraints only",
         getattr(runtime_config, "controller_sup_coef", None),
         getattr(runtime_config, "controller_check_stride_days", None),
+    )
+    logger.info(
+        "Controller PG config: rollout_len=%s max_segments=%s batch_windows=%s windows_per_epoch=%s "
+        "reward=(mdd:%s, ret:%s, count_band:%s-%s, count_penalty:%s, switch:%s, turnover:%s) entropy=%s",
+        getattr(runtime_config, "controller_rollout_len", None),
+        getattr(runtime_config, "controller_max_segments", None),
+        getattr(runtime_config, "controller_pg_batch_windows", None),
+        getattr(runtime_config, "controller_windows_per_epoch", None),
+        getattr(runtime_config, "controller_mdd_coef", None),
+        getattr(runtime_config, "controller_return_coef", None),
+        getattr(runtime_config, "controller_count_min", None),
+        getattr(runtime_config, "controller_count_max", None),
+        getattr(runtime_config, "controller_count_penalty_coef", None),
+        getattr(runtime_config, "controller_switch_coef", None),
+        getattr(runtime_config, "controller_turnover_coef", None),
+        getattr(runtime_config, "controller_entropy_coef", None),
     )
     write_child_metadata(args, market_root, label, args.seed, fixed_cycle)
 

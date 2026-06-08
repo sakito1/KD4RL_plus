@@ -54,7 +54,7 @@ outer_window = 120
 inner_window = 10
 outer_horizon = 20
 max_hold = 40 # 最大持有期
-min_hold = 20
+min_hold = 10
 episode_len=720
 max_rule_consecutive_low = 3
 # 通过env的observation获取的数据为action dim，state shape为(num_stocks, window_size, num_features)
@@ -91,8 +91,36 @@ reward_scale_outer = 100.0
 reward_scale_inner = 2000.0
 reward_scale_monitor = 100.0
 reward_scale_controller = 100.0
-controller_sup_coef = 0.05
-controller_sup_horizon = 20
+controller_sup_coef = 0.0
+controller_sup_horizon = 10
+controller_algorithm = "pg"
+controller_rollout_len = 400
+controller_max_segments = 25
+controller_pg_batch_windows = 4
+controller_windows_per_epoch = 5
+controller_start_stride_days = 40
+controller_entropy_coef = 0.01
+controller_mdd_coef = 2.0
+controller_return_coef = 0.5
+controller_count_min = 15
+controller_count_max = 25
+controller_count_penalty_coef = 0.5
+controller_switch_coef = 0.0
+controller_turnover_coef = 0.0
+controller_check_stride_days = 1
+inner_pred_coef = 0.0
+outer_pred_coef = 0.1
+inner_gate_reg_coef = 0.0
+inner_use_topk = False
+inner_feature_gate = False
+inner_norm_mode = "legacy"
+inner_train_fixed_episodes = True
+inner_episode_len = 400
+inner_train_episodes_per_epoch = 30
+inner_train_start_stride_days = 120
+inner_rollout_update_steps = 160
+inner_ppo_epochs = 3
+debug_inner_update_stats = False
 
 
 # alphastock 参数
