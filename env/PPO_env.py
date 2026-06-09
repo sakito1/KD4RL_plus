@@ -465,7 +465,7 @@ class PPO_Env(gym.Env):
         base_return_val = torch.log(torch.sum(new_base_weight * r_future).clamp_min(1e-8))
         outer_return_log = portfolio_return
         outer_stock_return_target = self._future_stock_return_target(self.day, self.max_hold)
-        inner_stock_return_target = self._future_stock_return_target(self.day, self.min_hold)
+        inner_stock_return_target = self._future_stock_return_target(self.day, 1)
 
         if self.controller_sup_enabled:
             candidate_switch_weight = (

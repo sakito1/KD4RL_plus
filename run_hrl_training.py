@@ -193,8 +193,18 @@ def parse_args():
     )
     parser.add_argument("--trade_num", type=int, default=10)
     parser.add_argument("--ssm_dim", type=int, default=16)
-    parser.add_argument("--outer_pred_coef", type=float, default=0.1)
-    parser.add_argument("--inner_pred_coef", type=float, default=0.0)
+    parser.add_argument(
+        "--outer_pred_coef",
+        type=float,
+        default=0.1,
+        help="SmoothL1 supervision weight for the outer actor score against future max-hold stock returns.",
+    )
+    parser.add_argument(
+        "--inner_pred_coef",
+        type=float,
+        default=0.0,
+        help="SmoothL1 supervision weight for the inner actor score against next-day stock returns.",
+    )
     parser.add_argument(
         "--inner_gate_reg_coef",
         type=float,
@@ -1037,7 +1047,7 @@ def run_child(args):
         runtime_config.rollout_update_steps_by_stage,
     )
     logger.info(
-        "Auxiliary prediction weights: outer_pred_coef=%s inner_pred_coef=%s",
+        "Actor SmoothL1 supervision weights: outer_pred_coef=%s inner_pred_coef=%s",
         runtime_config.outer_pred_coef,
         runtime_config.inner_pred_coef,
     )

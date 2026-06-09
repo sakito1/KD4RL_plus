@@ -6,6 +6,15 @@ import numpy as np
 from torch.distributions import Categorical
 
 
+def actor_score_smooth_l1_loss(actor_mu, target, *, squash=False):
+    """Supervise actor trading scores directly, without using auxiliary pred heads."""
+    if hasattr(actor_mu, "rsample"):
+        actor_mu = actor_mu.rsample()
+    score = torch.tanh(actor_mu) if squash else actor_mu
+    target = target.to(device=score.device, dtype=score.dtype)
+    return F.smooth_l1_loss(score, target)
+
+
 class HRL_Buffer:
     """
     [Simplified] Hierarchical PPO Buffer for Single-Episode Updates
@@ -546,8 +555,11 @@ class HRL_PPO_Agent:
             loss_v = self.mse_loss(val.squeeze(-1), data['ret_inn'][idx])
 
             if use_pred_loss:
-                pred_next_return = self.net.inner.pred_head(feat).squeeze(-1)
-                loss_pred = F.smooth_l1_loss(pred_next_return, data[target_key][idx])
+                loss_pred = actor_score_smooth_l1_loss(
+                    dist,
+                    data[target_key][idx],
+                    squash=False,
+                )
             else:
                 loss_pred = feat.new_tensor(0.0)
 
@@ -619,7 +631,7 @@ class HRL_PPO_Agent:
 
             weights_drift = data['weights_drift'][idx]
 
-            # 同一批次只跑一次 LSTM/CAAN encoder，actor、critic、预测头复用 feat。
+            # 同一批次只跑一次 LSTM/CAAN encoder，actor、critic、监督项复用 feat。
             feat = self.net.outer.encode(state_subset, weights_drift)
             dist = self.net.outer.get_dist(feat)
             old_raw = data['act_out_raw'][idx]
@@ -639,8 +651,11 @@ class HRL_PPO_Agent:
             val = self.net.outer.v_head(torch.cat([market_rep, w_rep], dim=-1))
             loss_v = self.mse_loss(val.squeeze(-1), data['ret_out'][idx])
 
-            pred_stock_return = self.net.outer.pred_head(feat).squeeze(-1)
-            loss_pred = F.smooth_l1_loss(pred_stock_return, data['outer_stock_return_target'][idx])
+            loss_pred = actor_score_smooth_l1_loss(
+                dist,
+                data['outer_stock_return_target'][idx],
+                squash=True,
+            )
 
             loss_total = loss_pi + self.vf_coef * loss_v + pred_coef * loss_pred - self.ent_coef * entropy
             (loss_total * weight).backward()
