@@ -1,3 +1,0 @@
-CMCSA.O
-AMGN.O
-INTU.O

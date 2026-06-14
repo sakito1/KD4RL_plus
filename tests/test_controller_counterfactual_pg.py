@@ -12,8 +12,8 @@ from Train.controller_pg import (
     CounterfactualStats,
     controller_pg_loss,
     controller_reward,
-    segment_count_band_penalty,
     segment_budget_allows_switch,
+    max_switch_overflow_penalty,
 )
 
 
@@ -34,22 +34,22 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
             max_segments=20,
         ))
 
-    def test_segment_count_band_penalty_only_applies_outside_target_range(self):
-        self.assertEqual(segment_count_band_penalty(20, count_min=15, count_max=25), 0.0)
-        self.assertEqual(segment_count_band_penalty(12, count_min=15, count_max=25), 3.0)
-        self.assertEqual(segment_count_band_penalty(28, count_min=15, count_max=25), 3.0)
+    def test_max_switch_overflow_penalty_only_penalizes_too_many_switches(self):
+        self.assertEqual(max_switch_overflow_penalty(20, max_switch_count=25), 0.0)
+        self.assertEqual(max_switch_overflow_penalty(25, max_switch_count=25), 0.0)
+        self.assertEqual(max_switch_overflow_penalty(28, max_switch_count=25), 9.0)
 
-    def test_controller_reward_uses_counterfactual_uplift_without_count_penalty_inside_band(self):
+    def test_controller_reward_uses_return_uplift_without_mdd_reward(self):
         baseline = CounterfactualStats(
             log_return=0.10,
-            max_drawdown=0.25,
+            max_drawdown=0.10,
             turnover=0.40,
             free_switch_count=0,
             segment_count=10,
         )
         controlled = CounterfactualStats(
             log_return=0.08,
-            max_drawdown=0.15,
+            max_drawdown=0.01,
             turnover=0.55,
             free_switch_count=3,
             segment_count=20,
@@ -57,18 +57,14 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         reward = controller_reward(
             baseline,
             controlled,
-            mdd_coef=2.0,
-            return_coef=0.5,
-            count_min=15,
-            count_max=25,
-            count_penalty_coef=0.5,
-            switch_coef=0.0,
-            turnover_coef=0.001,
+            return_coef=1.0,
+            max_switch_count=25,
+            max_switch_penalty_coef=0.5,
         )
-        expected = 2.0 * (0.25 - 0.15) + 0.5 * (0.08 - 0.10) - 0.001 * (0.55 - 0.40)
+        expected = 0.08 - 0.10
         self.assertAlmostEqual(reward, expected)
 
-    def test_controller_reward_penalizes_segment_count_outside_band(self):
+    def test_controller_reward_penalizes_only_actual_switch_overflow(self):
         baseline = CounterfactualStats(
             log_return=0.10,
             max_drawdown=0.25,
@@ -77,8 +73,8 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
             segment_count=10,
         )
         controlled = CounterfactualStats(
-            log_return=0.08,
-            max_drawdown=0.15,
+            log_return=0.18,
+            max_drawdown=0.35,
             turnover=0.55,
             free_switch_count=3,
             segment_count=28,
@@ -86,20 +82,11 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         reward = controller_reward(
             baseline,
             controlled,
-            mdd_coef=2.0,
-            return_coef=0.5,
-            count_min=15,
-            count_max=25,
-            count_penalty_coef=0.5,
-            switch_coef=0.0,
-            turnover_coef=0.001,
+            return_coef=1.0,
+            max_switch_count=25,
+            max_switch_penalty_coef=0.5,
         )
-        expected = (
-            2.0 * (0.25 - 0.15)
-            + 0.5 * (0.08 - 0.10)
-            - 0.5 * (28 - 25)
-            - 0.001 * (0.55 - 0.40)
-        )
+        expected = (0.18 - 0.10) - 0.5 * (28 - 25) ** 2
         self.assertAlmostEqual(reward, expected)
 
     def test_controller_pg_loss_uses_batch_normalized_counterfactual_reward(self):

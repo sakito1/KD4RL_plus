@@ -18,9 +18,15 @@ from agent.PPO_agent import HRL_PPO_Agent, actor_score_smooth_l1_loss
 from env.PPO_env import PPO_Env
 
 
-class _ExplodingHead(nn.Module):
-    def forward(self, *args, **kwargs):
-        raise RuntimeError("raw pred_head should not be used for actor supervision")
+class _FixedPredHead(nn.Module):
+    def __init__(self, values):
+        super().__init__()
+        self.values = nn.Parameter(torch.tensor(values, dtype=torch.float32).view(1, -1, 1))
+        self.called = False
+
+    def forward(self, feat):
+        self.called = True
+        return self.values.expand(feat.shape[0], -1, -1)
 
 
 class _FakeOuter(nn.Module):
@@ -30,7 +36,7 @@ class _FakeOuter(nn.Module):
         self.market_query = nn.Parameter(torch.ones(1, 1))
         self.w_proj = nn.Linear(num_assets, 1)
         self.v_head = nn.Linear(2, 1)
-        self.pred_head = _ExplodingHead()
+        self.pred_head = _FixedPredHead([0.03, -0.01, 0.02])
 
     def encode(self, state_subset, weights_drift):
         batch = weights_drift.shape[0]
@@ -48,7 +54,7 @@ class _FakeInner(nn.Module):
         self.score_param = nn.Parameter(torch.tensor([[0.1], [0.2], [-0.1]], dtype=torch.float32))
         self.alpha_query = nn.Linear(1, 1)
         self.value_head = nn.Linear(2, 1)
-        self.pred_head = _ExplodingHead()
+        self.pred_head = _FixedPredHead([0.01, -0.03, 0.04])
 
     def encode(self, inner_state, base_used, weights_drift):
         batch = base_used.shape[0]
@@ -118,7 +124,7 @@ class ActorScoreSupervisionTests(unittest.TestCase):
         torch.testing.assert_close(loss, expected_loss)
         self.assertGreater(abs(loss.item() - mean_loss.item()), 1e-4)
 
-    def test_outer_update_uses_actor_score_supervision_without_raw_pred_head(self):
+    def test_outer_update_uses_return_pred_head_not_actor_score_for_supervision(self):
         outer = _FakeOuter()
         agent = _agent_with_module("outer", outer)
         data = {
@@ -133,9 +139,14 @@ class ActorScoreSupervisionTests(unittest.TestCase):
 
         losses = agent._update_outer(data, torch.tensor([True]))
 
-        self.assertGreater(losses["pred"], 0.0)
+        expected = F.smooth_l1_loss(
+            torch.tensor([[0.03, -0.01, 0.02]]),
+            data["outer_stock_return_target"],
+        )
+        self.assertTrue(outer.pred_head.called)
+        self.assertAlmostEqual(losses["pred"], expected.item(), places=6)
 
-    def test_inner_update_uses_actor_score_supervision_without_raw_pred_head(self):
+    def test_inner_update_uses_return_pred_head_not_actor_score_for_supervision(self):
         inner = _FakeInner()
         agent = _agent_with_module("inner", inner)
         data = {
@@ -153,7 +164,40 @@ class ActorScoreSupervisionTests(unittest.TestCase):
 
         losses = agent._update_inner(data)
 
-        self.assertGreater(losses["pred"], 0.0)
+        expected = F.smooth_l1_loss(
+            torch.tensor([[0.01, -0.03, 0.04]]),
+            data["inner_stock_return_target"],
+        )
+        self.assertTrue(inner.pred_head.called)
+        self.assertAlmostEqual(losses["pred"], expected.item(), places=6)
+
+    def test_inner_update_scales_supervision_target(self):
+        inner = _FakeInner()
+        agent = _agent_with_module("inner", inner)
+        agent.cfg.inner_pred_target_scale = 10.0
+        data = {
+            "adv_inn": torch.tensor([1.0]),
+            "ret_inn": torch.tensor([0.2]),
+            "inner_state": torch.zeros(1, 3, 2, 2),
+            "inner_base_used": torch.tensor([[0.4, 0.3, 0.3]]),
+            "inner_weights_drift": torch.tensor([[0.4, 0.3, 0.3]]),
+            "base_used": torch.tensor([[0.4, 0.3, 0.3]]),
+            "weights_drift": torch.tensor([[0.4, 0.3, 0.3]]),
+            "act_inn_raw": torch.tensor([[0.0, 0.1, -0.1]]),
+            "logp_inn": torch.tensor([0.0]),
+            "inner_stock_return_target": torch.tensor([[0.01, -0.02, 0.03]]),
+        }
+
+        torch.manual_seed(11)
+        losses = agent._update_inner(data)
+
+        torch.manual_seed(11)
+        expected = actor_score_smooth_l1_loss(
+            torch.tensor([[0.01, -0.03, 0.04]]),
+            data["inner_stock_return_target"] * 10.0,
+            squash=False,
+        )
+        self.assertAlmostEqual(losses["pred"], expected.item(), places=6)
 
     def test_env_inner_supervision_target_is_next_day_log_return(self):
         env = PPO_Env.__new__(PPO_Env)

@@ -42,6 +42,12 @@ def segment_count_band_penalty(segment_count: int, *, count_min: int = 15, count
     return 0.0
 
 
+def max_switch_overflow_penalty(actual_switch_count: int, *, max_switch_count: int) -> float:
+    """Squared distance above the allowed switch count; no penalty for too few switches."""
+    excess = max(0, int(actual_switch_count) - int(max_switch_count))
+    return float(excess * excess)
+
+
 def controller_reward(
         baseline: CounterfactualStats,
         controlled: CounterfactualStats,
@@ -51,24 +57,27 @@ def controller_reward(
         count_min: int = 15,
         count_max: int = 25,
         count_penalty_coef: float = 0.5,
+        max_switch_count: int = None,
+        max_switch_penalty_coef: float = None,
         switch_coef: float = 0.0,
         turnover_coef: float = 0.0,
 ) -> float:
-    """Counterfactual uplift reward for the controller PG episode."""
-    mdd_uplift = float(baseline.max_drawdown) - float(controlled.max_drawdown)
+    """Relative-return controller reward with a max-switch overflow penalty.
+
+    Legacy keyword arguments are accepted for compatibility, but the current
+    controller objective intentionally ignores MDD, turnover, and minimum-count
+    penalties. Forced max-hold switches already provide the lower switch bound.
+    """
     return_uplift = float(controlled.log_return) - float(baseline.log_return)
-    count_penalty = segment_count_band_penalty(
+    allowed = int(count_max if max_switch_count is None else max_switch_count)
+    penalty_coef = float(count_penalty_coef if max_switch_penalty_coef is None else max_switch_penalty_coef)
+    overflow_penalty = max_switch_overflow_penalty(
         controlled.segment_count,
-        count_min=count_min,
-        count_max=count_max,
+        max_switch_count=allowed,
     )
-    extra_turnover = max(0.0, float(controlled.turnover) - float(baseline.turnover))
     return (
-        float(mdd_coef) * mdd_uplift
-        + float(return_coef) * return_uplift
-        - float(count_penalty_coef) * count_penalty
-        - float(switch_coef) * int(controlled.free_switch_count)
-        - float(turnover_coef) * extra_turnover
+        float(return_coef) * return_uplift
+        - penalty_coef * overflow_penalty
     )
 
 

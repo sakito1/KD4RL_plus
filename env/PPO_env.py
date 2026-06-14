@@ -239,9 +239,12 @@ class PPO_Env(gym.Env):
                         self.train_indices_pool = [train_start]
                     self.train_episode_stop_idx = train_end
                 else:
-                    absolute_limit = self.total_days - 2
-                    valid_starts = [t for t in raw_indices if t + self.episode_len <= absolute_limit]
-                    self.train_indices_pool = valid_starts[::self.stride]
+                    self.train_indices_pool = self._build_fixed_train_pool(
+                        raw_indices,
+                        total_days=self.total_days,
+                        episode_len=self.episode_len,
+                        stride_days=self.train_start_stride_days,
+                    )
                     random.shuffle(self.train_indices_pool)
                     self.train_episode_stop_idx = None
                 self.train_ptr = 0
@@ -302,6 +305,15 @@ class PPO_Env(gym.Env):
         self.cumulative_risk = 0.0
 
         return self._get_observation()
+
+    @staticmethod
+    def _build_fixed_train_pool(raw_indices, total_days: int, episode_len: int, stride_days: int):
+        """Build fixed-length train episode starts with a configurable trading-day stride."""
+        absolute_limit = int(total_days) - 2
+        episode_len = max(1, int(episode_len))
+        stride_days = max(1, int(stride_days))
+        valid_starts = [int(t) for t in raw_indices if int(t) + episode_len <= absolute_limit]
+        return valid_starts[::stride_days]
 
     def reset_at(self, start_idx: int, stop_idx: int = None):
         """Reset to an explicit absolute day window without advancing train pointers."""

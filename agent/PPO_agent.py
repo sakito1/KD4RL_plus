@@ -6,12 +6,12 @@ import numpy as np
 from torch.distributions import Categorical
 
 
-def actor_score_smooth_l1_loss(actor_mu, target, *, squash=False):
+def actor_score_smooth_l1_loss(actor_mu, target, *, squash=False, target_scale=1.0):
     """Supervise actor trading scores directly, without using auxiliary pred heads."""
     if hasattr(actor_mu, "rsample"):
         actor_mu = actor_mu.rsample()
     score = torch.tanh(actor_mu) if squash else actor_mu
-    target = target.to(device=score.device, dtype=score.dtype)
+    target = target.to(device=score.device, dtype=score.dtype) * float(target_scale)
     return F.smooth_l1_loss(score, target)
 
 
@@ -555,11 +555,12 @@ class HRL_PPO_Agent:
             loss_v = self.mse_loss(val.squeeze(-1), data['ret_inn'][idx])
 
             if use_pred_loss:
-                loss_pred = actor_score_smooth_l1_loss(
-                    dist,
-                    data[target_key][idx],
-                    squash=False,
+                pred_return = self.net.inner.pred_head(feat).squeeze(-1)
+                target_return = (
+                    data[target_key][idx].to(device=pred_return.device, dtype=pred_return.dtype)
+                    * float(getattr(self.cfg, 'inner_pred_target_scale', 1.0))
                 )
+                loss_pred = F.smooth_l1_loss(pred_return, target_return)
             else:
                 loss_pred = feat.new_tensor(0.0)
 
@@ -651,11 +652,12 @@ class HRL_PPO_Agent:
             val = self.net.outer.v_head(torch.cat([market_rep, w_rep], dim=-1))
             loss_v = self.mse_loss(val.squeeze(-1), data['ret_out'][idx])
 
-            loss_pred = actor_score_smooth_l1_loss(
-                dist,
-                data['outer_stock_return_target'][idx],
-                squash=True,
+            pred_return = self.net.outer.pred_head(feat).squeeze(-1)
+            target_return = data['outer_stock_return_target'][idx].to(
+                device=pred_return.device,
+                dtype=pred_return.dtype,
             )
+            loss_pred = F.smooth_l1_loss(pred_return, target_return)
 
             loss_total = loss_pi + self.vf_coef * loss_v + pred_coef * loss_pred - self.ent_coef * entropy
             (loss_total * weight).backward()
@@ -685,18 +687,16 @@ class HRL_PPO_Agent:
         self.opt_mon.zero_grad()
 
         ssm = {k: v[mask] for k, v in data['ssm'].items()}
-
-        feat = self.net.mon.encode(
+        _, _, entropy, logits, v = self.net.mon(
             ssm['z'], ssm['h'], ssm['p'], ssm['q_bear'], ssm['q_bull'],
             data['weights_drift'][mask],
             data['port_state'][mask],
             switch_action=data['act_out'][mask],
+            deterministic=False,
         )
-        logits = self.net.mon.actor_head(feat)
         dist = Categorical(logits=logits)
 
         new_logp = dist.log_prob(data['act_mon'][mask])
-        entropy = dist.entropy().mean()
         ratio = torch.exp(torch.clamp(new_logp - data['logp_mon'][mask], min=self.min_clip, max=self.max_clip))
 
         adv = data['adv_mon'][mask]
@@ -707,7 +707,6 @@ class HRL_PPO_Agent:
         surr2 = torch.clamp(ratio, 1.0 - self.clip_range, 1.0 + self.clip_range) * adv
         loss_pi = -torch.min(surr1, surr2).mean()
 
-        v = self.net.mon.v_head(feat)
         loss_v = self.mse_loss(v.squeeze(-1), data['ret_mon'][mask])
 
         loss_sup = logits.new_tensor(0.0)

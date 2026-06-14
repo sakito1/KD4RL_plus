@@ -1,4 +1,5 @@
 import os
+import copy
 import torch
 import torch.nn as nn
 import numpy as np
@@ -8,6 +9,7 @@ import json
 import pandas as pd
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 # === 导入自定义模块 ===
@@ -88,6 +90,11 @@ class HRL_Networks(nn.Module):
                 action_dim=num_stocks,
                 min_hold=getattr(cfg, "min_hold", 20),
                 max_hold=getattr(cfg, "max_hold", 40),
+                tau_min=getattr(cfg, "controller_tau_min", 0.5),
+                tau_max=getattr(cfg, "controller_tau_max", 0.9),
+                policy_temperature=getattr(cfg, "controller_policy_temperature", 10.0),
+                ret_scale=getattr(cfg, "controller_state_return_scale", 0.05),
+                drawdown_scale=getattr(cfg, "controller_state_drawdown_scale", 0.10),
             ),
             outer_actor_args=dict(
                 lstm_dim=HIDDEN_DIM,
@@ -177,6 +184,8 @@ class HRL_Trainer:
     def _validation_score(metrics, cfg, phase: str = "joint") -> float:
         if phase == "controller":
             metric_name = str(getattr(cfg, "controller_selection_metric", "risk_return"))
+        elif phase == "warmup_inner":
+            metric_name = str(getattr(cfg, "inner_selection_metric", "return"))
         else:
             metric_name = str(getattr(cfg, "model_selection_metric", "sharpe"))
 
@@ -197,13 +206,17 @@ class HRL_Trainer:
     # ==============================================================================
     def run_episode(self, env, *, mode='train', phase='warmup_outer', fixed_cycle=None, disable_inner=False,
                     use_rule_switch=False, rollout_update_steps=None, auto_update_phase=None,
-                    train_monitor=None):
-        obs = env.reset()
+                    train_monitor=None, rollout_buffer=None, explicit_episode_window=None):
+        if explicit_episode_window is not None:
+            obs = env.reset_at(*explicit_episode_window)
+        else:
+            obs = env.reset()
+        active_buffer = rollout_buffer if rollout_buffer is not None else self.buffer
         is_train = (mode == 'train')
         if is_train:
             # 支持多 episode 累积更新：标记当前 episode 的起点
-            if hasattr(self.buffer, 'mark_episode_start'):
-                self.buffer.mark_episode_start()
+            if hasattr(active_buffer, 'mark_episode_start'):
+                active_buffer.mark_episode_start()
 
         spec = self._get_phase_spec(phase)
 
@@ -271,21 +284,21 @@ class HRL_Trainer:
             }
 
         def _finish_rollout(next_obs, done_flag):
-            if len(self.buffer.data.get('rew_mon', [])) <= 0:
+            if len(active_buffer.data.get('rew_mon', [])) <= 0:
                 return
-            self.buffer.finish_episode(_bootstrap_values(next_obs, done_flag))
+            active_buffer.finish_episode(_bootstrap_values(next_obs, done_flag))
             if auto_update_phase is None:
                 return
 
             loss_log = self.agent.update(
-                self.buffer.get_batch(),
+                active_buffer.get_batch(),
                 phase=auto_update_phase,
                 train_monitor=train_monitor,
             )
             _merge_loss(loss_log)
-            self.buffer.clear()
-            if hasattr(self.buffer, 'mark_episode_start'):
-                self.buffer.mark_episode_start()
+            active_buffer.clear()
+            if hasattr(active_buffer, 'mark_episode_start'):
+                active_buffer.mark_episode_start()
             if (
                     bool(getattr(self.cfg, "clear_cuda_cache_on_update", False))
                     and getattr(self.device, "type", str(self.device)) == "cuda"
@@ -490,7 +503,7 @@ class HRL_Trainer:
                     transition['controller_switch_label'] = info['controller_switch_label']
                     transition['controller_sup_weight'] = info['controller_sup_weight']
 
-                self.buffer.store_daily(transition)
+                active_buffer.store_daily(transition)
                 stored_since_update += 1
 
                 if (
@@ -746,7 +759,7 @@ class HRL_Trainer:
         rollout_len = max(1, int(stop_idx) - int(start_idx))
         min_hold = int(getattr(self.cfg, "min_hold", 10))
         max_hold = int(getattr(self.cfg, "max_hold", fixed_cycle))
-        max_segments = int(getattr(self.cfg, "controller_max_segments", 25))
+        max_segments = self._controller_max_allowed_switches(rollout_len, min_hold)
 
         turnover_sum = 0.0
         free_switch_count = 0
@@ -870,6 +883,13 @@ class HRL_Trainer:
             "forced_switch_count": forced_switch_count,
         }
 
+    def _controller_max_allowed_switches(self, rollout_len: int, min_hold: int) -> int:
+        theoretical_max = max(1, int(rollout_len) // max(1, int(min_hold)))
+        manual_max = int(getattr(self.cfg, "controller_max_switches", 0) or 0)
+        if manual_max > 0:
+            return max(1, min(manual_max, theoretical_max))
+        return theoretical_max
+
     def _controller_train_starts(self, windows_per_epoch: int, rollout_len: int, epoch: int):
         raw_indices = self.env.idx_map["train"]
         train_start = int(raw_indices[0])
@@ -948,6 +968,8 @@ class HRL_Trainer:
             epoch_return_uplifts = []
             epoch_segments = []
             epoch_free_switches = []
+            epoch_switch_overflows = []
+            epoch_max_switches = []
 
             for local_idx, start in enumerate(starts):
                 stop = min(int(start) + rollout_len, int(self.env.idx_map["train"][-1]))
@@ -957,16 +979,21 @@ class HRL_Trainer:
                 baseline_stats, _ = self._run_fixed_hrl_window(self.env, start, stop, fixed_cycle)
                 controlled = self._run_controller_pg_window(self.env, start, stop, fixed_cycle)
                 ctrl_stats = controlled["stats"]
+                window_len = max(1, int(stop) - int(start))
+                max_allowed_switches = self._controller_max_allowed_switches(
+                    window_len,
+                    int(getattr(self.cfg, "min_hold", 10)),
+                )
                 reward = controller_reward(
                     baseline_stats,
                     ctrl_stats,
-                    mdd_coef=float(getattr(self.cfg, "controller_mdd_coef", 2.0)),
-                    return_coef=float(getattr(self.cfg, "controller_return_coef", 0.5)),
-                    count_min=int(getattr(self.cfg, "controller_count_min", 15)),
-                    count_max=int(getattr(self.cfg, "controller_count_max", 25)),
-                    count_penalty_coef=float(getattr(self.cfg, "controller_count_penalty_coef", 0.5)),
-                    switch_coef=float(getattr(self.cfg, "controller_switch_coef", 0.0)),
-                    turnover_coef=float(getattr(self.cfg, "controller_turnover_coef", getattr(self.env, "transaction_cost_pct", 0.0))),
+                    return_coef=float(getattr(self.cfg, "controller_return_coef", 1.0)),
+                    max_switch_count=max_allowed_switches,
+                    max_switch_penalty_coef=float(getattr(
+                        self.cfg,
+                        "controller_max_switch_penalty_coef",
+                        getattr(self.cfg, "controller_count_penalty_coef", 0.5),
+                    )),
                 )
 
                 epoch_rewards.append(reward)
@@ -974,6 +1001,8 @@ class HRL_Trainer:
                 epoch_return_uplifts.append(ctrl_stats.log_return - baseline_stats.log_return)
                 epoch_segments.append(ctrl_stats.segment_count)
                 epoch_free_switches.append(ctrl_stats.free_switch_count)
+                epoch_switch_overflows.append(max(0, ctrl_stats.segment_count - max_allowed_switches))
+                epoch_max_switches.append(max_allowed_switches)
 
                 if controlled["episode_logprob"] is not None:
                     pending_logprobs.append(controlled["episode_logprob"])
@@ -1006,12 +1035,14 @@ class HRL_Trainer:
 
             self.logger.info(
                 "[CTRL-PG] epoch %s/%s | reward=%.4f mdd_uplift=%.4f ret_uplift=%.4f "
-                "segments=%.2f free_switch=%.2f updates=%s",
+                "switches=%.2f max_switch=%.2f overflow=%.2f free_switch=%.2f updates=%s",
                 epoch + 1, epochs,
                 float(np.mean(epoch_rewards)) if epoch_rewards else 0.0,
                 float(np.mean(epoch_mdd_uplifts)) if epoch_mdd_uplifts else 0.0,
                 float(np.mean(epoch_return_uplifts)) if epoch_return_uplifts else 0.0,
                 float(np.mean(epoch_segments)) if epoch_segments else 0.0,
+                float(np.mean(epoch_max_switches)) if epoch_max_switches else 0.0,
+                float(np.mean(epoch_switch_overflows)) if epoch_switch_overflows else 0.0,
                 float(np.mean(epoch_free_switches)) if epoch_free_switches else 0.0,
                 update_count,
             )
@@ -1113,6 +1144,166 @@ class HRL_Trainer:
         for key, value in previous.items():
             setattr(self.env, key, value)
         self._reset_train_episode_pool()
+
+    def _new_rollout_buffer(self):
+        return HRL_Buffer(
+            capacity=getattr(self.buffer, "capacity", 100000),
+            device=self.device,
+            gamma=getattr(self.buffer, "gamma", 0.99),
+            gae_lambda=getattr(self.buffer, "gae_lambda", 0.95),
+            outer_reward_scale=getattr(self.buffer, "outer_reward_scale", 1.0),
+        )
+
+    @staticmethod
+    def _merge_buffer_data(target_buffer, source_buffer):
+        for key, values in source_buffer.data.items():
+            if not values:
+                continue
+            target_buffer.data.setdefault(key, []).extend(values)
+
+    def _reserve_train_episode_windows(self, episode_count: int):
+        windows = []
+        episode_count = max(1, int(episode_count))
+        pool = getattr(self.env, "train_indices_pool", None)
+        if not pool:
+            raise RuntimeError("Cannot reserve parallel train episodes without train_indices_pool.")
+
+        for _ in range(episode_count):
+            if self.env.train_ptr >= len(self.env.train_indices_pool):
+                self.env.train_ptr = 0
+                self.env.completed_train_epoch_count = int(getattr(self.env, "completed_train_epoch_count", 0)) + 1
+                if not bool(getattr(self.env, "train_episode_to_end", True)):
+                    random.shuffle(self.env.train_indices_pool)
+                    if getattr(self.env, "logger", None):
+                        self.env.logger.info(
+                            f"Completed train epoch {self.env.completed_train_epoch_count}; reshuffled pool."
+                        )
+
+            start_idx = int(self.env.train_indices_pool[self.env.train_ptr])
+            self.env.train_ptr += 1
+            if bool(getattr(self.env, "train_episode_to_end", True)):
+                stop_idx = int(getattr(self.env, "train_episode_stop_idx"))
+            else:
+                stop_idx = start_idx + int(getattr(self.env, "episode_len", 1))
+            windows.append((start_idx, stop_idx))
+
+        return windows
+
+    def _run_inner_episode_worker(self, start_idx: int, stop_idx: int, fixed_cycle: int, train_monitor: bool):
+        local_env = copy.deepcopy(self.env)
+        local_env.logger = None
+        local_env.mode = "train"
+        local_buffer = self._new_rollout_buffer()
+        ret = self.run_episode(
+            local_env,
+            mode="train",
+            phase="warmup_inner",
+            fixed_cycle=fixed_cycle,
+            use_rule_switch=False,
+            rollout_update_steps=0,
+            auto_update_phase=None,
+            train_monitor=train_monitor,
+            rollout_buffer=local_buffer,
+            explicit_episode_window=(int(start_idx), int(stop_idx)),
+        )
+        ret["buffer"] = local_buffer
+        ret["episodes"] = 1
+        return ret
+
+    def _run_inner_episode_batch(self, episode_count: int, *, fixed_cycle: int, train_monitor: bool = False):
+        """Run several fixed-length Inner episodes, then update Inner once on the combined buffer."""
+        episode_count = max(1, int(episode_count))
+        histories = []
+        total_steps = 0
+        parallel_workers = min(
+            episode_count,
+            max(1, int(getattr(self.cfg, "inner_episode_parallel_workers", 1))),
+        )
+
+        if parallel_workers > 1:
+            windows = self._reserve_train_episode_windows(episode_count)
+            with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._run_inner_episode_worker,
+                        start_idx,
+                        stop_idx,
+                        fixed_cycle,
+                        train_monitor,
+                    )
+                    for start_idx, stop_idx in windows
+                ]
+                results = [future.result() for future in futures]
+
+            for ret in results:
+                histories.append(ret)
+                total_steps += int(ret.get("total_steps", 0))
+                source_buffer = ret.get("buffer")
+                if source_buffer is not None:
+                    self._merge_buffer_data(self.buffer, source_buffer)
+        else:
+            for _ in range(episode_count):
+                ret = self.run_episode(
+                    self.env,
+                    mode="train",
+                    phase="warmup_inner",
+                    fixed_cycle=fixed_cycle,
+                    use_rule_switch=False,
+                    rollout_update_steps=0,
+                    auto_update_phase=None,
+                    train_monitor=train_monitor,
+                )
+                histories.append(ret)
+                total_steps += int(ret.get("total_steps", 0))
+
+        loss_log = {}
+        update_count = 0
+        if len(self.buffer.data.get("rew_mon", [])) > 0:
+            loss_log = self.agent.update(
+                self.buffer.get_batch(),
+                phase="warmup_inner",
+                train_monitor=train_monitor,
+            )
+            update_count = 1
+            self.buffer.clear()
+            if hasattr(self.buffer, "mark_episode_start"):
+                self.buffer.mark_episode_start()
+            if (
+                    bool(getattr(self.cfg, "clear_cuda_cache_on_update", False))
+                    and getattr(self.device, "type", str(self.device)) == "cuda"
+            ):
+                torch.cuda.empty_cache()
+
+        return {
+            "episodes": episode_count,
+            "total_steps": total_steps,
+            "history": histories[-1].get("history", []) if histories else [],
+            "loss_log": loss_log,
+            "update_count": update_count,
+        }
+
+    def _run_joint_full_train_episode(self, *, fixed_cycle: int, rollout_update_steps: int,
+                                      train_monitor: bool = False):
+        """Run one Joint episode from the first train start to train_end, then restore schedule."""
+        previous = self._apply_train_episode_config(
+            train_episode_to_end=True,
+            train_episodes_per_epoch=1,
+            train_start_stride_days=1,
+            episode_len=getattr(self.env, "episode_len", max(1, int(fixed_cycle))),
+        )
+        try:
+            return self.run_episode(
+                self.env,
+                mode="train",
+                phase="joint",
+                fixed_cycle=fixed_cycle,
+                use_rule_switch=False,
+                rollout_update_steps=int(rollout_update_steps),
+                auto_update_phase="joint",
+                train_monitor=train_monitor,
+            )
+        finally:
+            self._restore_train_episode_config(previous)
 
     def load_frozen_hrl_checkpoint(self, path):
         """Load pretrained Outer/Inner parameters and leave EmbMonitor fresh."""
@@ -1440,6 +1631,12 @@ def train_warmup_then_joint_with_monitor(trainer,
         1,
         int(getattr(trainer.cfg, "inner_train_episodes_per_epoch", train_episodes_per_epoch)),
     )
+    inner_episode_batch_size = max(1, int(getattr(trainer.cfg, "inner_episode_batch_size", 1)))
+    configured_inner_epochs = max(0, int(getattr(
+        trainer.cfg,
+        "warmup_inner_epochs",
+        warmup_inner_episodes // max(1, inner_train_episodes_per_epoch),
+    )))
     train_monitor = (
         bool(getattr(trainer.cfg, "train_monitor_enabled"))
         if hasattr(trainer.cfg, "train_monitor_enabled")
@@ -1586,25 +1783,50 @@ def train_warmup_then_joint_with_monitor(trainer,
         trainer.agent.set_module_status("inner")
         phase_best_sharpe = -np.inf
 
-        for ep in range(warmup_inner_episodes):
-            ret = trainer.run_episode(
-                trainer.env,
-                mode="train",
-                phase="warmup_inner",
-                fixed_cycle=fixed_cycle,
-                use_rule_switch=False,
-                rollout_update_steps=_rollout_update_steps_for("warmup_inner"),
-                auto_update_phase="warmup_inner",
-                train_monitor=train_monitor,
-            )
-            loss_log = ret.get("loss_log", {})
-
+        if inner_train_fixed_episodes and inner_episode_batch_size > 1:
+            pool_size = len(getattr(trainer.env, "train_indices_pool", []))
+            if pool_size <= 0:
+                raise RuntimeError("Inner episode-batch training requires a non-empty fixed train episode pool.")
+            inner_epochs = max(1, configured_inner_epochs)
             trainer.logger.info(
-                f"[{save_prefix}] W-Inn {ep + 1}/{warmup_inner_episodes} ({_epoch_progress('warmup_inner', ep)}) | "
-                f"Updates:{ret.get('update_count', 0)} L_in:{loss_log.get('inn_pi', 0):.3f} "
-                f"L_in_pred:{loss_log.get('inn_pred', 0):.3f}")
+                "   [Inner Batch] fixed episode pool=%s, episode_batch_size=%s, parallel_workers=%s, epochs=%s",
+                pool_size,
+                inner_episode_batch_size,
+                max(1, int(getattr(trainer.cfg, "inner_episode_parallel_workers", 1))),
+                inner_epochs,
+            )
+            for epoch in range(inner_epochs):
+                if epoch > 0:
+                    trainer.env.train_ptr = 0
+                    np.random.shuffle(trainer.env.train_indices_pool)
 
-            if (ep + 1) > MIN_WARMUP_STEPS and (ep + 1) % val_interval == 0:
+                batch_id = 0
+                epoch_loss = {}
+                epoch_updates = 0
+                epoch_episodes = 0
+                for start in range(0, pool_size, inner_episode_batch_size):
+                    episode_count = min(inner_episode_batch_size, pool_size - start)
+                    ret = trainer._run_inner_episode_batch(
+                        episode_count=episode_count,
+                        fixed_cycle=fixed_cycle,
+                        train_monitor=train_monitor,
+                    )
+                    batch_id += 1
+                    epoch_updates += int(ret.get("update_count", 0))
+                    epoch_episodes += int(ret.get("episodes", 0))
+                    for k, v in ret.get("loss_log", {}).items():
+                        epoch_loss.setdefault(k, []).append(float(v))
+                    loss_log = {
+                        k: float(np.mean(v)) if len(v) > 0 else 0.0
+                        for k, v in epoch_loss.items()
+                    }
+                    trainer.logger.info(
+                        f"[{save_prefix}] W-Inn epoch {epoch + 1}/{inner_epochs} "
+                        f"batch {batch_id}/{int(np.ceil(pool_size / inner_episode_batch_size))} | "
+                        f"episodes:{epoch_episodes}/{pool_size} updates:{epoch_updates} "
+                        f"L_in:{loss_log.get('inn_pi', 0):.3f} "
+                        f"L_in_pred:{loss_log.get('inn_pred', 0):.3f}")
+
                 m = _do_validate("warmup_inner")
                 score = trainer._validation_score(m, trainer.cfg, phase="warmup_inner")
                 if score > phase_best_sharpe:
@@ -1612,9 +1834,39 @@ def train_warmup_then_joint_with_monitor(trainer,
                     trainer.save_model(warmup_inn_best_ckpt)
                     trainer.logger.info(
                         "       (New Warmup-Inner Best by %s: %.4f)",
-                        getattr(trainer.cfg, "model_selection_metric", "sharpe"),
+                        getattr(trainer.cfg, "inner_selection_metric", "return"),
                         phase_best_sharpe,
                     )
+        else:
+            for ep in range(warmup_inner_episodes):
+                ret = trainer.run_episode(
+                    trainer.env,
+                    mode="train",
+                    phase="warmup_inner",
+                    fixed_cycle=fixed_cycle,
+                    use_rule_switch=False,
+                    rollout_update_steps=_rollout_update_steps_for("warmup_inner"),
+                    auto_update_phase="warmup_inner",
+                    train_monitor=train_monitor,
+                )
+                loss_log = ret.get("loss_log", {})
+
+                trainer.logger.info(
+                    f"[{save_prefix}] W-Inn {ep + 1}/{warmup_inner_episodes} ({_epoch_progress('warmup_inner', ep)}) | "
+                    f"Updates:{ret.get('update_count', 0)} L_in:{loss_log.get('inn_pi', 0):.3f} "
+                    f"L_in_pred:{loss_log.get('inn_pred', 0):.3f}")
+
+                if (ep + 1) > MIN_WARMUP_STEPS and (ep + 1) % val_interval == 0:
+                    m = _do_validate("warmup_inner")
+                    score = trainer._validation_score(m, trainer.cfg, phase="warmup_inner")
+                    if score > phase_best_sharpe:
+                        phase_best_sharpe = score
+                        trainer.save_model(warmup_inn_best_ckpt)
+                        trainer.logger.info(
+                            "       (New Warmup-Inner Best by %s: %.4f)",
+                            getattr(trainer.cfg, "inner_selection_metric", "return"),
+                            phase_best_sharpe,
+                        )
 
         # 回滚至该阶段最优，进入 Monitor 预热
         if os.path.exists(os.path.join(trainer.model_dir, warmup_inn_best_ckpt)):
@@ -1643,28 +1895,47 @@ def train_warmup_then_joint_with_monitor(trainer,
             joint_lrs.get("inner", 0.0),
         )
     global_best_sharpe = -np.inf
-
-    for ep in range(joint_episodes):
-        ret = trainer.run_episode(
-            trainer.env,
-            mode="train",
-            phase="joint",
-            fixed_cycle=fixed_cycle,
-            use_rule_switch=False,
-            rollout_update_steps=_rollout_update_steps_for("joint"),
-            auto_update_phase="joint",
-            train_monitor=False,
+    joint_single_full_episode = bool(getattr(trainer.cfg, "joint_single_full_episode", False))
+    joint_loop_count = (
+        max(1, int(getattr(trainer.cfg, "joint_epochs", joint_episodes // train_episodes_per_epoch)))
+        if joint_single_full_episode
+        else joint_episodes
+    )
+    if joint_single_full_episode:
+        trainer.logger.info(
+            "   [Joint Schedule] single full train-to-end episode per joint epoch, epochs=%s",
+            joint_loop_count,
         )
+
+    for ep in range(joint_loop_count):
+        if joint_single_full_episode:
+            ret = trainer._run_joint_full_train_episode(
+                fixed_cycle=fixed_cycle,
+                rollout_update_steps=_rollout_update_steps_for("joint"),
+                train_monitor=False,
+            )
+        else:
+            ret = trainer.run_episode(
+                trainer.env,
+                mode="train",
+                phase="joint",
+                fixed_cycle=fixed_cycle,
+                use_rule_switch=False,
+                rollout_update_steps=_rollout_update_steps_for("joint"),
+                auto_update_phase="joint",
+                train_monitor=False,
+            )
         loss = ret.get("loss_log", {})
 
         trainer.logger.info(
-            f"[{save_prefix}] OI-Joint {ep + 1}/{joint_episodes} ({_epoch_progress('joint', ep)}) | "
+            f"[{save_prefix}] OI-Joint {ep + 1}/{joint_loop_count} "
+            f"({'full-train' if joint_single_full_episode else _epoch_progress('joint', ep)}) | "
             f"Updates:{ret.get('update_count', 0)} "
             f"L_out:{loss.get('out_pi', 0):.3f} L_in:{loss.get('inn_pi', 0):.3f} "
             f"L_out_pred:{loss.get('out_pred', 0):.3f} "
             f"L_in_pred:{loss.get('inn_pred', 0):.3f}")
         # 联合训练默认按 val_interval 验证，避免每个长 episode 都完整跑验证集。
-        if (ep + 1) % val_interval == 0 or (ep + 1) == joint_episodes:
+        if (ep + 1) % val_interval == 0 or (ep + 1) == joint_loop_count:
             m = _do_validate("outer_inner_joint", use_controller=False)
             score = trainer._validation_score(m, trainer.cfg, phase="joint")
             if score > global_best_sharpe:

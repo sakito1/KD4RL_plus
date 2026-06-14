@@ -8,7 +8,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-results/hrl_controller_pg}"
 RUN_NAME="${RUN_NAME:-min10_max40_pg_countband}"
 GPU_ID="${GPU_ID:-0}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-300}"
-JOINT_LR_MULT="${JOINT_LR_MULT:-0.01}"
+JOINT_LR_MULT="${JOINT_LR_MULT:-0.001}"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mpl-kd4rl}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -30,7 +30,7 @@ echo "Run name: $RUN_NAME"
 echo "Output root: $OUTPUT_ROOT"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo "Python: $PYTHON_BIN"
-echo "Joint LR multiplier: $JOINT_LR_MULT (base lr 1e-3 -> joint lr 1e-5)"
+echo "Joint LR multiplier: $JOINT_LR_MULT (base lr 1e-3 -> joint lr 1e-6)"
 
 "$PYTHON_BIN" -u run_hrl_training.py \
   --markets nas \

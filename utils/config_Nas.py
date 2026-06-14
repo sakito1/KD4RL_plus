@@ -108,6 +108,7 @@ controller_switch_coef = 0.0
 controller_turnover_coef = 0.0
 controller_check_stride_days = 1
 inner_pred_coef = 0.0
+inner_pred_target_scale = 1.0
 outer_pred_coef = 0.1
 inner_gate_reg_coef = 0.0
 inner_use_topk = False
