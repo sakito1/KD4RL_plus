@@ -326,6 +326,10 @@ def parse_args():
     parser.add_argument("--controller_windows_per_epoch", type=int, default=5)
     parser.add_argument("--controller_start_stride_days", type=int, default=40)
     parser.add_argument("--controller_entropy_coef", type=float, default=0.01)
+    parser.add_argument("--controller_aux_return_coef", type=float, default=0.0)
+    parser.add_argument("--controller_aux_mdd_coef", type=float, default=0.0)
+    parser.add_argument("--controller_aux_return_target_scale", type=float, default=1.0)
+    parser.add_argument("--controller_aux_mdd_target_scale", type=float, default=1.0)
     parser.add_argument("--controller_mdd_coef", type=float, default=0.0)
     parser.add_argument("--controller_return_coef", type=float, default=1.0)
     parser.add_argument("--controller_count_min", type=int, default=0)
@@ -800,6 +804,14 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_start_stride_days),
         "--controller_entropy_coef",
         str(args.controller_entropy_coef),
+        "--controller_aux_return_coef",
+        str(args.controller_aux_return_coef),
+        "--controller_aux_mdd_coef",
+        str(args.controller_aux_mdd_coef),
+        "--controller_aux_return_target_scale",
+        str(args.controller_aux_return_target_scale),
+        "--controller_aux_mdd_target_scale",
+        str(args.controller_aux_mdd_target_scale),
         "--controller_mdd_coef",
         str(args.controller_mdd_coef),
         "--controller_return_coef",
@@ -925,6 +937,10 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.controller_windows_per_epoch = int(args.controller_windows_per_epoch)
     runtime_config.controller_start_stride_days = int(args.controller_start_stride_days)
     runtime_config.controller_entropy_coef = float(args.controller_entropy_coef)
+    runtime_config.controller_aux_return_coef = float(args.controller_aux_return_coef)
+    runtime_config.controller_aux_mdd_coef = float(args.controller_aux_mdd_coef)
+    runtime_config.controller_aux_return_target_scale = float(args.controller_aux_return_target_scale)
+    runtime_config.controller_aux_mdd_target_scale = float(args.controller_aux_mdd_target_scale)
     runtime_config.controller_mdd_coef = float(args.controller_mdd_coef)
     runtime_config.controller_return_coef = float(args.controller_return_coef)
     runtime_config.controller_count_min = int(args.controller_count_min)
@@ -1054,6 +1070,10 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "controller_windows_per_epoch": getattr(runtime_config, "controller_windows_per_epoch", None),
             "controller_start_stride_days": getattr(runtime_config, "controller_start_stride_days", None),
             "controller_entropy_coef": getattr(runtime_config, "controller_entropy_coef", None),
+            "controller_aux_return_coef": getattr(runtime_config, "controller_aux_return_coef", None),
+            "controller_aux_mdd_coef": getattr(runtime_config, "controller_aux_mdd_coef", None),
+            "controller_aux_return_target_scale": getattr(runtime_config, "controller_aux_return_target_scale", None),
+            "controller_aux_mdd_target_scale": getattr(runtime_config, "controller_aux_mdd_target_scale", None),
             "controller_mdd_coef": getattr(runtime_config, "controller_mdd_coef", None),
             "controller_return_coef": getattr(runtime_config, "controller_return_coef", None),
             "controller_count_min": getattr(runtime_config, "controller_count_min", None),
@@ -1190,6 +1210,14 @@ def run_child(args):
         "counterfactual PG controller" if runtime_config.train_monitor_enabled else "forced hold/switch constraints only",
         getattr(runtime_config, "controller_sup_coef", None),
         getattr(runtime_config, "controller_check_stride_days", None),
+    )
+    logger.info(
+        "Controller auxiliary heads: remaining_hold_return_coef=%s remaining_hold_mdd_coef=%s "
+        "target_scale=(return:%s, mdd:%s)",
+        getattr(runtime_config, "controller_aux_return_coef", None),
+        getattr(runtime_config, "controller_aux_mdd_coef", None),
+        getattr(runtime_config, "controller_aux_return_target_scale", None),
+        getattr(runtime_config, "controller_aux_mdd_target_scale", None),
     )
     logger.info(
         "Controller PG config: rollout_len=%s max_switches=%s batch_windows=%s windows_per_epoch=%s "

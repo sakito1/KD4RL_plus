@@ -50,6 +50,8 @@ class HRL_Buffer:
             'outer_stock_return_target': [],
             'inner_stock_return_target': [],
             'inner_next_return_target': [],
+            'controller_hold_return_target': [],
+            'controller_hold_mdd_target': [],
             'controller_switch_label': [],
             'controller_sup_weight': [],
             # GAE results will be stored here
@@ -319,6 +321,24 @@ class HRL_PPO_Agent:
         full = selected_weights.new_zeros((selected_weights.shape[0], num_assets))
         return full.scatter(1, indices, selected_weights)
 
+    def _select_outer_state_batch(self, outer_state, idx_or_mask=None):
+        if outer_state is None:
+            return None
+        if idx_or_mask is None:
+            state = outer_state
+        elif isinstance(outer_state, list):
+            if isinstance(idx_or_mask, torch.Tensor) and idx_or_mask.dtype == torch.bool:
+                indices = torch.where(idx_or_mask)[0]
+            else:
+                indices = idx_or_mask
+            subset = [outer_state[int(i)] for i in indices.detach().cpu().tolist()]
+            state = torch.stack(subset)
+        else:
+            state = outer_state[idx_or_mask]
+        if state.dim() == 5 and state.shape[1] == 1:
+            state = state.squeeze(1)
+        return state.to(self.device)
+
     def get_action(self, obs, mode='train', force_switch=None, force_inner_zero=False, force_locked=False):
         is_train = (mode == 'train')
 
@@ -360,7 +380,8 @@ class HRL_PPO_Agent:
                 obs['ssm']['z'], obs['ssm']['h'], obs['ssm']['p'],
                 obs['ssm']['q_bear'], obs['ssm']['q_bull'],
                 weight_drift, obs['port_state'], switch_action=act_out,
-                deterministic=(not is_train)
+                deterministic=(not is_train),
+                asset_state=obs.get('outer_state'),
             )
             act_mon = act_mon_samp
             logp_mon = logp_mon_samp
@@ -687,14 +708,19 @@ class HRL_PPO_Agent:
         self.opt_mon.zero_grad()
 
         ssm = {k: v[mask] for k, v in data['ssm'].items()}
-        _, _, entropy, logits, v = self.net.mon(
+        asset_state = self._select_outer_state_batch(data.get('outer_state'), mask)
+        stats = self.net.mon.decision_stats(
             ssm['z'], ssm['h'], ssm['p'], ssm['q_bear'], ssm['q_bull'],
             data['weights_drift'][mask],
             data['port_state'][mask],
             switch_action=data['act_out'][mask],
-            deterministic=False,
+            asset_state=asset_state,
         )
+        zeros = torch.zeros_like(stats["policy_logit"])
+        logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
         dist = Categorical(logits=logits)
+        entropy = dist.entropy().mean()
+        v = stats["value"]
 
         new_logp = dist.log_prob(data['act_mon'][mask])
         ratio = torch.exp(torch.clamp(new_logp - data['logp_mon'][mask], min=self.min_clip, max=self.max_clip))
@@ -724,11 +750,46 @@ class HRL_PPO_Agent:
                 )
                 loss_sup = (raw_sup * weights[valid_sup]).mean()
 
-        loss_total = loss_pi + self.vf_coef * loss_v + sup_coef * loss_sup - self.ent_coef * entropy
+        loss_aux_return = logits.new_tensor(0.0)
+        loss_aux_mdd = logits.new_tensor(0.0)
+        aux_return_coef = float(getattr(self.cfg, 'controller_aux_return_coef', 0.0))
+        aux_mdd_coef = float(getattr(self.cfg, 'controller_aux_mdd_coef', 0.0))
+        if aux_return_coef > 0.0 and 'controller_hold_return_target' in data:
+            target_return = data['controller_hold_return_target'][mask].to(
+                device=logits.device,
+                dtype=logits.dtype,
+            ).view(-1)
+            target_return = target_return * float(getattr(self.cfg, 'controller_aux_return_target_scale', 1.0))
+            pred_return = stats["hold_return_pred"].view(-1)
+            loss_aux_return = F.smooth_l1_loss(pred_return, target_return)
+        if aux_mdd_coef > 0.0 and 'controller_hold_mdd_target' in data:
+            target_mdd = data['controller_hold_mdd_target'][mask].to(
+                device=logits.device,
+                dtype=logits.dtype,
+            ).view(-1)
+            target_mdd = target_mdd * float(getattr(self.cfg, 'controller_aux_mdd_target_scale', 1.0))
+            pred_mdd = stats["hold_risk_pred"].view(-1)
+            loss_aux_mdd = F.smooth_l1_loss(pred_mdd, target_mdd)
+
+        loss_total = (
+            loss_pi
+            + self.vf_coef * loss_v
+            + sup_coef * loss_sup
+            + aux_return_coef * loss_aux_return
+            + aux_mdd_coef * loss_aux_mdd
+            - self.ent_coef * entropy
+        )
         loss_total.backward()
 
         if self.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(list(self.net.mon.parameters()), self.max_grad_norm)
 
         self.opt_mon.step()
-        return {'pi': loss_pi.item(), 'v': loss_v.item(), 'sup': loss_sup.item(), 'ent': entropy.item()}
+        return {
+            'pi': loss_pi.item(),
+            'v': loss_v.item(),
+            'sup': loss_sup.item(),
+            'aux_return': loss_aux_return.item(),
+            'aux_mdd': loss_aux_mdd.item(),
+            'ent': entropy.item(),
+        }

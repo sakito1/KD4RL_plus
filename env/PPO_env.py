@@ -419,6 +419,24 @@ class PPO_Env(gym.Env):
         growth = torch.prod(self.ratio[:, start_day:start_day + max_h], dim=1)
         return torch.log(growth.clamp_min(1e-8))
 
+    def _future_portfolio_return_and_max_drawdown(self, weights, start_day: int, horizon: int):
+        if horizon <= 0:
+            zero = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+            return zero, zero
+
+        max_h = min(horizon, self._episode_ratio_limit() - start_day)
+        if max_h <= 0:
+            zero = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+            return zero, zero
+
+        w = self._normalize(weights)
+        growth_path = torch.cumprod(self.ratio[:, start_day:start_day + max_h], dim=1)
+        portfolio_path = torch.sum(w.unsqueeze(1) * growth_path, dim=0).clamp_min(1e-8)
+        values = torch.cat([portfolio_path.new_ones(1), portfolio_path])
+        running_peak = torch.cummax(values, dim=0).values.clamp_min(1e-8)
+        drawdown = (running_peak - values) / running_peak
+        return torch.log(values[-1].clamp_min(1e-8)), drawdown.max()
+
     # =====================================================================
     # =====================================================================
     def step(self, real_weight, base_weight=None, outer_action=None, is_switch: bool = False):
@@ -440,6 +458,12 @@ class PPO_Env(gym.Env):
         # =====================================================================
 
         current_holdings_drift = self._normalize(self.prev_base_weight * r_past)
+        remaining_hold_horizon = max(1, int(self.max_hold) - int(self.t_held))
+        controller_hold_return_target, controller_hold_mdd_target = self._future_portfolio_return_and_max_drawdown(
+            current_holdings_drift.detach(),
+            self.day,
+            remaining_hold_horizon,
+        )
 
         # =====================================================================
         # =====================================================================
@@ -538,6 +562,8 @@ class PPO_Env(gym.Env):
             'outer_stock_return_target': outer_stock_return_target.detach(),
             'inner_stock_return_target': inner_stock_return_target.detach(),
             'inner_next_return_target': inner_stock_return_target.detach(),
+            'controller_hold_return_target': controller_hold_return_target.detach(),
+            'controller_hold_mdd_target': controller_hold_mdd_target.detach(),
             'controller_switch_label': controller_switch_label.detach(),
             'controller_sup_weight': controller_sup_weight.detach(),
             'controller_switch_adv_20': switch_adv_20.detach(),

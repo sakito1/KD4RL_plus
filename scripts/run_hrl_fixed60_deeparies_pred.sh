@@ -20,7 +20,7 @@ OUTER_PPO_EPOCHS="${OUTER_PPO_EPOCHS:-1}"
 INNER_SEGMENTS_PER_EPISODE="${INNER_SEGMENTS_PER_EPISODE:-10}"
 INNER_EPISODE_LEN="${INNER_EPISODE_LEN:-$((MAX_HOLD * INNER_SEGMENTS_PER_EPISODE))}"
 INNER_START_STRIDE_DAYS="${INNER_START_STRIDE_DAYS:-30}"
-INNER_EPISODE_BATCH_SIZE="${INNER_EPISODE_BATCH_SIZE:-4}"
+INNER_EPISODE_BATCH_SIZE="${INNER_EPISODE_BATCH_SIZE:-12}"
 INNER_EPISODE_PARALLEL_WORKERS="${INNER_EPISODE_PARALLEL_WORKERS:-12}"
 INNER_UPDATE_HOLD_PERIODS="${INNER_UPDATE_HOLD_PERIODS:-10}"
 INNER_ROLLOUT_UPDATE_STEPS="${INNER_ROLLOUT_UPDATE_STEPS:-0}"
@@ -33,7 +33,8 @@ INNER_PRED_COEF="${INNER_PRED_COEF:-0.05}"
 INNER_PRED_TARGET_SCALE="${INNER_PRED_TARGET_SCALE:-10}"
 
 NAS_SEEDS="${NAS_SEEDS:-42 43 44 45 46}"
-SH_SEEDS="${SH_SEEDS:-42 43 44 45 46 47 48 49 50 51 52}"
+# SH_SEEDS="${SH_SEEDS:-42 43 44 45 46 47 48 49 50 51 52}"
+SH_SEEDS="${SH_SEEDS:-45 46 47 48 49 50 51 52 53 54 55}"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mpl-kd4rl}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -65,36 +66,36 @@ echo "DeepAries-style pred heads: outer=$OUTER_PRED_COEF inner=$INNER_PRED_COEF 
 echo "NAS seeds: $NAS_SEEDS"
 echo "SH seeds: $SH_SEEDS"
 
-"$PYTHON_BIN" -u run_hrl_training.py \
-  --markets nas \
-  --seeds $NAS_SEEDS \
-  --output_root "$OUTPUT_ROOT" \
-  --run_name "$RUN_NAME" \
-  --device cuda \
-  --outer_window "$OUTER_WINDOW" \
-  --min_hold "$MIN_HOLD" \
-  --max_hold "$MAX_HOLD" \
-  --outer_pred_coef "$OUTER_PRED_COEF" \
-  --inner_pred_coef "$INNER_PRED_COEF" \
-  --inner_pred_target_scale "$INNER_PRED_TARGET_SCALE" \
-  --joint_lr_mult "$JOINT_LR_MULT" \
-  --ppo_epochs "$OUTER_PPO_EPOCHS" \
-  --joint_single_full_episode \
-  --warmup_outer_epochs "$WARMUP_OUTER_EPOCHS" \
-  --warmup_inner_epochs "$WARMUP_INNER_EPOCHS" \
-  --inner_train_fixed_episodes \
-  --inner_episode_len "$INNER_EPISODE_LEN" \
-  --inner_start_stride_days "$INNER_START_STRIDE_DAYS" \
-  --inner_episode_batch_size "$INNER_EPISODE_BATCH_SIZE" \
-  --inner_episode_parallel_workers "$INNER_EPISODE_PARALLEL_WORKERS" \
-  --inner_rollout_update_steps "$INNER_ROLLOUT_UPDATE_STEPS" \
-  --inner_ppo_epochs "$INNER_PPO_EPOCHS" \
-  --model_selection_metric sharpe \
-  --inner_selection_metric return \
-  --no_train_controller \
-  --heartbeat_seconds "$HEARTBEAT_SECONDS" \
-  --continue_on_error \
-  2>&1 | tee "$OUTPUT_ROOT/logs/${RUN_NAME}_nas.log"
+# "$PYTHON_BIN" -u run_hrl_training.py \
+#   --markets nas \
+#   --seeds $NAS_SEEDS \
+#   --output_root "$OUTPUT_ROOT" \
+#   --run_name "$RUN_NAME" \
+#   --device cuda \
+#   --outer_window "$OUTER_WINDOW" \
+#   --min_hold "$MIN_HOLD" \
+#   --max_hold "$MAX_HOLD" \
+#   --outer_pred_coef "$OUTER_PRED_COEF" \
+#   --inner_pred_coef "$INNER_PRED_COEF" \
+#   --inner_pred_target_scale "$INNER_PRED_TARGET_SCALE" \
+#   --joint_lr_mult "$JOINT_LR_MULT" \
+#   --ppo_epochs "$OUTER_PPO_EPOCHS" \
+#   --joint_single_full_episode \
+#   --warmup_outer_epochs "$WARMUP_OUTER_EPOCHS" \
+#   --warmup_inner_epochs "$WARMUP_INNER_EPOCHS" \
+#   --inner_train_fixed_episodes \
+#   --inner_episode_len "$INNER_EPISODE_LEN" \
+#   --inner_start_stride_days "$INNER_START_STRIDE_DAYS" \
+#   --inner_episode_batch_size "$INNER_EPISODE_BATCH_SIZE" \
+#   --inner_episode_parallel_workers "$INNER_EPISODE_PARALLEL_WORKERS" \
+#   --inner_rollout_update_steps "$INNER_ROLLOUT_UPDATE_STEPS" \
+#   --inner_ppo_epochs "$INNER_PPO_EPOCHS" \
+#   --model_selection_metric sharpe \
+#   --inner_selection_metric return \
+#   --no_train_controller \
+#   --heartbeat_seconds "$HEARTBEAT_SECONDS" \
+#   --continue_on_error \
+#   2>&1 | tee "$OUTPUT_ROOT/logs/${RUN_NAME}_nas.log"
 
 "$PYTHON_BIN" -u run_hrl_training.py \
   --markets sh \

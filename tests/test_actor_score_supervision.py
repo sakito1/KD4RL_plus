@@ -66,6 +66,27 @@ class _FakeInner(nn.Module):
         return Normal(mu, std)
 
 
+class _FakeMonitor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.logit = nn.Parameter(torch.tensor([0.2], dtype=torch.float32))
+        self.value = nn.Parameter(torch.tensor([0.1], dtype=torch.float32))
+        self.return_pred = nn.Parameter(torch.tensor([0.03], dtype=torch.float32))
+        self.mdd_pred = nn.Parameter(torch.tensor([0.04], dtype=torch.float32))
+        self.called = False
+
+    def decision_stats(self, z, h, p, q_bear, q_bull, weights_drift, port_state,
+                       switch_action=None, asset_state=None):
+        self.called = True
+        batch = weights_drift.shape[0]
+        return {
+            "policy_logit": self.logit.expand(batch),
+            "value": self.value.expand(batch, 1),
+            "hold_return_pred": self.return_pred.expand(batch),
+            "hold_risk_pred": self.mdd_pred.expand(batch),
+        }
+
+
 def _agent_with_module(module_name, module):
     agent = HRL_PPO_Agent.__new__(HRL_PPO_Agent)
     agent.device = torch.device("cpu")
@@ -74,6 +95,8 @@ def _agent_with_module(module_name, module):
         inner_batch_size=1,
         outer_pred_coef=1.0,
         inner_pred_coef=1.0,
+        controller_aux_return_coef=1.0,
+        controller_aux_mdd_coef=1.0,
         clear_cuda_cache_on_update=False,
     )
     agent.net = SimpleNamespace(**{module_name: module})
@@ -86,8 +109,10 @@ def _agent_with_module(module_name, module):
     agent.mse_loss = nn.MSELoss()
     if module_name == "outer":
         agent.opt_out = torch.optim.Adam(module.parameters(), lr=1e-3)
-    else:
+    elif module_name == "inner":
         agent.opt_inn = torch.optim.Adam(module.parameters(), lr=1e-3)
+    else:
+        agent.opt_mon = torch.optim.Adam(module.parameters(), lr=1e-3)
     return agent
 
 
@@ -242,6 +267,83 @@ class ActorScoreSupervisionTests(unittest.TestCase):
 
         expected = torch.log(env.ratio[:, 1].clamp_min(1e-8))
         torch.testing.assert_close(info["inner_stock_return_target"], expected)
+
+    def test_env_controller_aux_targets_cover_remaining_holding_period(self):
+        env = PPO_Env.__new__(PPO_Env)
+        env.device = torch.device("cpu")
+        env.day = 1
+        env.stop_step = 5
+        env.total_days = 6
+        env.num_stocks = 3
+        env.max_hold = 4
+        env.min_hold = 2
+        env.transaction_cost_pct = 0.0
+        env.risk_gamma = 5.0
+        env.reward_scale_portfolio = 1.0
+        env.reward_scale_base = 1.0
+        env.reward_scale_inner = 1.0
+        env.reward_scale_controller = 1.0
+        env.controller_sup_enabled = False
+        env.portfolio_value = torch.tensor(1.0)
+        env.prev_weights = torch.tensor([0.5, 0.5, 0.0], dtype=torch.float32)
+        env.prev_base_weight = env.prev_weights.clone()
+        env.t_held = 2
+        env.peak_value = 1.0
+        env.segment_init_value = 1.0
+        env.cumulative_alpha = 0.0
+        env.cumulative_risk = 0.0
+        env.all_dates = pd.date_range("2020-01-01", periods=8)
+        env.ratio = torch.tensor(
+            [
+                [1.00, 0.80, 1.25, 1.00, 1.00],
+                [1.00, 1.10, 0.90, 1.00, 1.00],
+                [1.00, 1.00, 1.00, 1.00, 1.00],
+            ],
+            dtype=torch.float32,
+        )
+        env._get_observation = lambda: {}
+
+        _, _, _, info = env.step(
+            torch.tensor([0.5, 0.5, 0.0], dtype=torch.float32),
+            torch.tensor([0.5, 0.5, 0.0], dtype=torch.float32),
+            is_switch=False,
+        )
+
+        expected_return = torch.log(torch.tensor(0.995, dtype=torch.float32))
+        expected_mdd = torch.tensor(0.05, dtype=torch.float32)
+        torch.testing.assert_close(info["controller_hold_return_target"], expected_return)
+        torch.testing.assert_close(info["controller_hold_mdd_target"], expected_mdd)
+
+    def test_monitor_update_trains_remaining_hold_return_and_mdd_heads(self):
+        monitor = _FakeMonitor()
+        agent = _agent_with_module("mon", monitor)
+        data = {
+            "ssm": {
+                "z": torch.zeros(1, 3, 4),
+                "h": torch.zeros(1, 3, 4),
+                "p": torch.zeros(1, 3),
+                "q_bear": torch.zeros(1, 3),
+                "q_bull": torch.zeros(1, 3),
+            },
+            "outer_state": [torch.zeros(3, 15, 7)],
+            "weights_drift": torch.tensor([[0.5, 0.5, 0.0]]),
+            "port_state": torch.zeros(1, 6),
+            "act_out": torch.tensor([[0.4, 0.4, 0.2]]),
+            "act_mon": torch.tensor([1]),
+            "logp_mon": torch.tensor([0.0]),
+            "adv_mon": torch.tensor([1.0]),
+            "ret_mon": torch.tensor([0.2]),
+            "controller_hold_return_target": torch.tensor([-0.02]),
+            "controller_hold_mdd_target": torch.tensor([0.10]),
+        }
+
+        losses = agent._update_monitor(data, torch.tensor([True]))
+
+        expected_aux_return = F.smooth_l1_loss(torch.tensor([0.03]), data["controller_hold_return_target"])
+        expected_aux_mdd = F.smooth_l1_loss(torch.tensor([0.04]), data["controller_hold_mdd_target"])
+        self.assertTrue(monitor.called)
+        self.assertAlmostEqual(losses["aux_return"], expected_aux_return.item(), places=6)
+        self.assertAlmostEqual(losses["aux_mdd"], expected_aux_mdd.item(), places=6)
 
 
 if __name__ == "__main__":

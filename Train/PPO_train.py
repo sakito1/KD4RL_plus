@@ -95,6 +95,9 @@ class HRL_Networks(nn.Module):
                 policy_temperature=getattr(cfg, "controller_policy_temperature", 10.0),
                 ret_scale=getattr(cfg, "controller_state_return_scale", 0.05),
                 drawdown_scale=getattr(cfg, "controller_state_drawdown_scale", 0.10),
+                asset_in_dim=raw_feature_dim,
+                controller_window=getattr(cfg, "controller_window", 15),
+                weight_floor=getattr(cfg, "controller_weight_floor", 1e-6),
             ),
             outer_actor_args=dict(
                 lstm_dim=HIDDEN_DIM,
@@ -484,6 +487,8 @@ class HRL_Trainer:
                     'rew_alpha': info['rewards']['inner_reward'],
                     'rew_outer_raw': info['rewards']['outer_step_reward'],
                     'outer_stock_return_target': info['outer_stock_return_target'],
+                    'controller_hold_return_target': info['controller_hold_return_target'],
+                    'controller_hold_mdd_target': info['controller_hold_mdd_target'],
                 }
                 if float(getattr(self.cfg, 'inner_pred_coef', 0.0)) > 0.0:
                     inner_indices = out.get('inner_indices')
@@ -821,6 +826,7 @@ class HRL_Trainer:
                     obs["ssm"]["q_bear"], obs["ssm"]["q_bull"],
                     weights_drift, obs["port_state"], switch_action=act_out,
                     deterministic=False,
+                    asset_state=obs.get("outer_state"),
                 )
                 is_switch = bool(act_mon.item() == 1)
                 base_used = torch.where(act_mon.view(-1, 1).bool(), act_out.detach(), obs["base_drift"])

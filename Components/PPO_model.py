@@ -410,11 +410,12 @@ class InnerAC(nn.Module):
 
 class MonitorAC(nn.Module):
     """
-    Distributional alpha-state controller for hold/switch decisions.
+    Hold-exit controller.
 
-    The public call signature stays compatible with the previous controller,
-    but the policy only uses alpha-state z embeddings, current/candidate
-    portfolio weights, and a normalized local holding-state vector.
+    It keeps the old public signature so existing training code can call it,
+    but the preferred input is asset_state=[B,N,T,F] from outer_state. The
+    controller only uses the last controller_window days of that z-scored raw
+    feature window for the hold-quality decision.
     """
 
     def __init__(
@@ -431,156 +432,209 @@ class MonitorAC(nn.Module):
             policy_temperature=10.0,
             ret_scale=0.05,
             drawdown_scale=0.10,
+            asset_in_dim=None,
+            controller_window=15,
+            weight_floor=1e-6,
     ):
         super().__init__()
         self.z_dim = int(z_dim)
+        self.h_dim = int(h_dim)
         self.hidden_dim = int(hidden_dim)
         self.min_hold = int(min_hold)
         self.max_hold = int(max_hold)
-        self.tau_min = float(tau_min)
-        self.tau_max = float(tau_max)
-        self.policy_temperature = float(policy_temperature)
         self.ret_scale = max(float(ret_scale), 1e-6)
         self.drawdown_scale = max(float(drawdown_scale), 1e-6)
+        self.asset_in_dim = int(asset_in_dim) if asset_in_dim is not None else None
+        self.controller_window = max(1, int(controller_window))
+        self.weight_floor = max(float(weight_floor), 0.0)
 
-        self.emb_norm = nn.LayerNorm(self.z_dim)
-        self.asset_projection = nn.Sequential(
+        input_dim = self.asset_in_dim if self.asset_in_dim is not None else self.z_dim
+        self.asset_lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            batch_first=True,
+        )
+        self.fallback_projection = nn.Sequential(
+            nn.LayerNorm(self.z_dim),
             nn.Linear(self.z_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.state_dim = 5
+        self.query_mlp = nn.Sequential(
+            nn.Linear(hidden_dim + self.state_dim, hidden_dim),
+            nn.GELU(),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
         )
+        self.attn1_q = nn.Linear(hidden_dim, hidden_dim)
+        self.attn1_k = nn.Linear(hidden_dim, hidden_dim)
+        self.attn1_v = nn.Linear(hidden_dim, hidden_dim)
+        self.query2_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim),
+        )
+        self.attn2_q = nn.Linear(hidden_dim, hidden_dim)
+        self.attn2_k = nn.Linear(hidden_dim, hidden_dim)
+        self.attn2_v = nn.Linear(hidden_dim, hidden_dim)
 
-        state_dim = 3
-        head_in = hidden_dim + state_dim
-        self.hold_mlp = nn.Sequential(
+        head_in = hidden_dim * 2 + self.state_dim
+        self.head_mlp = nn.Sequential(
             nn.Linear(head_in, hidden_dim),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, max(1, hidden_dim // 2)),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(max(1, hidden_dim // 2), 2),
-        )
-        self.switch_mlp = nn.Sequential(
-            nn.Linear(head_in, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, max(1, hidden_dim // 2)),
-            nn.GELU(),
-            nn.Linear(max(1, hidden_dim // 2), 2),
         )
         self.value_mlp = nn.Sequential(
-            nn.Linear(hidden_dim * 2 + state_dim, hidden_dim),
+            nn.Linear(head_in, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
-
-        self.threshold_bias = nn.Parameter(torch.zeros(()))
-        self.threshold_time_raw = nn.Parameter(torch.zeros(()))
-        self.threshold_return_raw = nn.Parameter(torch.zeros(()))
-        self.threshold_drawdown_raw = nn.Parameter(torch.zeros(()))
-
-    @staticmethod
-    def _normal_cdf(x):
-        return 0.5 * (1.0 + torch.erf(x / 1.4142135623730951))
+        self.exit_head = nn.Linear(hidden_dim, 1)
+        self.return_head = nn.Linear(hidden_dim, 1)
+        self.risk_head = nn.Linear(hidden_dim, 1)
 
     @staticmethod
     def _normalize_weights(weights):
         return weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
 
-    def _state_features(self, port_state):
+    def _soft_hold_weights(self, weights):
+        w = weights.clamp_min(0.0) + self.weight_floor
+        return self._normalize_weights(w)
+
+    def _state_features(self, port_state, hold_weights):
         time_norm = port_state[:, :1].clamp(0.0, 1.0)
+        remaining_norm = (1.0 - time_norm).clamp(0.0, 1.0)
         drawdown_norm = torch.tanh(port_state[:, 1:2].clamp_min(0.0) / self.drawdown_scale)
         seg_return_norm = torch.tanh(port_state[:, 2:3] / self.ret_scale)
-        return torch.cat([time_norm, seg_return_norm, drawdown_norm], dim=-1)
+        concentration = torch.sum(hold_weights.pow(2), dim=1, keepdim=True)
+        return torch.cat([time_norm, remaining_norm, seg_return_norm, drawdown_norm, concentration], dim=-1)
 
-    def _dynamic_threshold(self, state3):
-        time_norm = state3[:, :1]
-        seg_return_norm = state3[:, 1:2]
-        drawdown_norm = state3[:, 2:3]
-        raw = (
-            self.threshold_bias
-            + F.softplus(self.threshold_time_raw) * (1.0 - time_norm)
-            + F.softplus(self.threshold_return_raw) * seg_return_norm
-            - F.softplus(self.threshold_drawdown_raw) * drawdown_norm
+    def _encode_asset_sequence(self, asset_state, z, h):
+        if asset_state is None:
+            token = z if z is not None else h
+            return self.fallback_projection(token).unsqueeze(2)
+
+        x = asset_state
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        if x.dim() == 5 and x.shape[1] == 1:
+            x = x.squeeze(1)
+        if x.shape[2] > self.controller_window:
+            x = x[:, :, -self.controller_window:, :]
+        if self.asset_in_dim is not None and x.shape[-1] != self.asset_in_dim:
+            raise ValueError(
+                f"asset_state feature dim={x.shape[-1]} does not match asset_in_dim={self.asset_in_dim}"
+            )
+        bsz, num_assets, seq_len, feat_dim = x.shape
+        seq, _ = self.asset_lstm(x.reshape(bsz * num_assets, seq_len, feat_dim))
+        return seq.reshape(bsz, num_assets, seq_len, self.hidden_dim)
+
+    def _temporal_attention_global(self, query, seq, q_proj, k_proj, v_proj):
+        q = q_proj(query).unsqueeze(1).unsqueeze(2)
+        k = k_proj(seq)
+        v = v_proj(seq)
+        logits = torch.sum(q * k, dim=-1) / (self.hidden_dim ** 0.5)
+        weights = F.softmax(logits, dim=-1).unsqueeze(-1)
+        return torch.sum(weights * v, dim=2)
+
+    def _temporal_attention_per_asset(self, query, seq, q_proj, k_proj, v_proj):
+        q = q_proj(query).unsqueeze(2)
+        k = k_proj(seq)
+        v = v_proj(seq)
+        logits = torch.sum(q * k, dim=-1) / (self.hidden_dim ** 0.5)
+        weights = F.softmax(logits, dim=-1).unsqueeze(-1)
+        return torch.sum(weights * v, dim=2)
+
+    def decision_stats(
+            self,
+            z,
+            h,
+            p,
+            q_bear,
+            q_bull,
+            weights_drift,
+            port_state,
+            switch_action=None,
+            asset_state=None,
+    ):
+        asset_seq = self._encode_asset_sequence(asset_state, z, h)
+        hold_weights = self._soft_hold_weights(weights_drift)
+
+        last_emb = asset_seq[:, :, -1, :]
+        portfolio_last = torch.sum(last_emb * hold_weights.unsqueeze(-1), dim=1)
+        state5 = self._state_features(port_state, hold_weights)
+
+        query = self.query_mlp(torch.cat([portfolio_last, state5], dim=-1))
+        asset_ctx1 = self._temporal_attention_global(
+            query, asset_seq, self.attn1_q, self.attn1_k, self.attn1_v
         )
-        return self.tau_min + (self.tau_max - self.tau_min) * torch.sigmoid(raw)
+        query2 = self.query2_mlp(torch.cat([
+            asset_ctx1,
+            query.unsqueeze(1).expand(-1, asset_ctx1.shape[1], -1),
+        ], dim=-1))
+        asset_ctx2 = self._temporal_attention_per_asset(
+            query2, asset_seq, self.attn2_q, self.attn2_k, self.attn2_v
+        )
+        portfolio_ctx = torch.sum(asset_ctx2 * hold_weights.unsqueeze(-1), dim=1)
 
-    def decision_stats(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None):
-        asset_emb = self.asset_projection(self.emb_norm(z))
-        hold_weights = self._normalize_weights(weights_drift)
-        if switch_action is None:
-            switch_weights = hold_weights
-        else:
-            switch_weights = self._normalize_weights(switch_action)
-
-        hold_emb = torch.sum(asset_emb * hold_weights.unsqueeze(-1), dim=1)
-        switch_emb = torch.sum(asset_emb * switch_weights.unsqueeze(-1), dim=1)
-        state3 = self._state_features(port_state)
-
-        hold_params = self.hold_mlp(torch.cat([hold_emb, state3], dim=-1))
-        switch_params = self.switch_mlp(torch.cat([switch_emb, state3], dim=-1))
-        mu_hold = hold_params[:, 0]
-        raw_sigma_hold = hold_params[:, 1]
-        mu_switch = switch_params[:, 0]
-        raw_sigma_switch = switch_params[:, 1]
-        sigma_hold = F.softplus(raw_sigma_hold) + 1e-4
-        sigma_switch = F.softplus(raw_sigma_switch) + 1e-4
-
-        z_score = (mu_switch - mu_hold) / sigma_switch.clamp_min(1e-6)
-        p_adv = self._normal_cdf(z_score).clamp(1e-6, 1.0 - 1e-6)
-        tau = self._dynamic_threshold(state3).squeeze(-1)
-        policy_logit = self.policy_temperature * (p_adv - tau)
-        pi_switch = torch.sigmoid(policy_logit)
-
-        value_feat = torch.cat([hold_emb, switch_emb, state3], dim=-1)
+        value_feat = torch.cat([portfolio_last, portfolio_ctx, state5], dim=-1)
+        head = self.head_mlp(value_feat)
+        exit_logit = self.exit_head(head).squeeze(-1)
+        exit_prob = torch.sigmoid(exit_logit).clamp(1e-6, 1.0 - 1e-6)
         value = self.value_mlp(value_feat)
         return {
-            "mu_hold": mu_hold,
-            "sigma_hold": sigma_hold,
-            "mu_switch": mu_switch,
-            "sigma_switch": sigma_switch,
-            "p_adv": p_adv,
-            "tau": tau,
-            "policy_logit": policy_logit,
-            "pi_switch": pi_switch,
+            "exit_logit": exit_logit,
+            "exit_prob": exit_prob,
+            "policy_logit": exit_logit,
+            "pi_switch": exit_prob,
+            "p_adv": exit_prob,
+            "tau": torch.full_like(exit_prob, 0.5),
+            "hold_return_pred": self.return_head(head).squeeze(-1),
+            "hold_risk_pred": self.risk_head(head).squeeze(-1),
             "value": value,
             "value_feat": value_feat,
         }
 
-    def encode(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None):
+    def encode(self, z, h, p, q_bear, q_bull, weights_drift, port_state,
+               switch_action=None, asset_state=None):
         return self.decision_stats(
-            z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=switch_action
+            z, h, p, q_bear, q_bull, weights_drift, port_state,
+            switch_action=switch_action, asset_state=asset_state
         )["value_feat"]
 
     def pi(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None,
-           deterministic=False):
+           deterministic=False, asset_state=None):
         stats = self.decision_stats(
-            z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=switch_action
+            z, h, p, q_bear, q_bull, weights_drift, port_state,
+            switch_action=switch_action, asset_state=asset_state
         )
         zeros = torch.zeros_like(stats["policy_logit"])
         logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
         dist = Categorical(logits=logits)
-        action = (stats["p_adv"] > stats["tau"]).long() if deterministic else dist.sample()
+        action = (stats["exit_prob"] > 0.5).long() if deterministic else dist.sample()
         log_prob = dist.log_prob(action)
         entropy = dist.entropy().mean()
         return action, log_prob, entropy, logits
 
-    def value(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None):
+    def value(self, z, h, p, q_bear, q_bull, weights_drift, port_state,
+              switch_action=None, asset_state=None):
         return self.decision_stats(
-            z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=switch_action
+            z, h, p, q_bear, q_bull, weights_drift, port_state,
+            switch_action=switch_action, asset_state=asset_state
         )["value"]
 
     def forward(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None,
-                deterministic=False):
+                deterministic=False, asset_state=None):
         stats = self.decision_stats(
-            z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=switch_action
+            z, h, p, q_bear, q_bull, weights_drift, port_state,
+            switch_action=switch_action, asset_state=asset_state
         )
         zeros = torch.zeros_like(stats["policy_logit"])
         logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
         dist = Categorical(logits=logits)
-        action = (stats["p_adv"] > stats["tau"]).long() if deterministic else dist.sample()
+        action = (stats["exit_prob"] > 0.5).long() if deterministic else dist.sample()
         log_prob = dist.log_prob(action)
         entropy = dist.entropy().mean()
         v = stats["value"]
