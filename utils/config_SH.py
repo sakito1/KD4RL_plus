@@ -48,7 +48,7 @@ gamma2=0.5
 tau=0.01 # 软更新参数
 target_entropy= -5
 num_nodes = 53 #股票池大小
-inner_max_boundary = 0.8 # 内层每次交易的最大比例
+inner_max_boundary = 0.6 # 内层每次交易的最大比例
 # TODO:分层强化学习参数, 先固定窗口大小
 outer_window = 120
 inner_window = 10

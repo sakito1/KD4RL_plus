@@ -1789,7 +1789,7 @@ def train_warmup_then_joint_with_monitor(trainer,
         trainer.agent.set_module_status("inner")
         phase_best_sharpe = -np.inf
 
-        if inner_train_fixed_episodes and inner_episode_batch_size > 1:
+        if inner_train_fixed_episodes:
             pool_size = len(getattr(trainer.env, "train_indices_pool", []))
             if pool_size <= 0:
                 raise RuntimeError("Inner episode-batch training requires a non-empty fixed train episode pool.")

@@ -261,10 +261,11 @@ class InnerAC(nn.Module):
     Inner 层：共享 encoder + actor/critic heads。
 
     [更新]
-    - 使用轻量因果 TCN（两层 dilation=1,2）编码每个资产的短窗 window=5。
-    - 去掉跨资产 attention（该部分在股票数较多时非常耗时）。
+    - 使用两层 LSTM 编码每个资产的短窗序列。
+    - 使用两层 query attention：每层都用最后一个时间步表征作为 query，
+      从整段序列里提取关键时序信息，生成每只股票最终 embedding。
 
-    输入：inner_input: [B, N, T(=5), F]
+    输入：inner_input: [B, N, T, F]
     """
 
     def __init__(self, in_features, hidden_dim, max_boundary, dropout=0.2,
@@ -273,20 +274,29 @@ class InnerAC(nn.Module):
         self.max_boundary = max_boundary
         self.hidden_dim = hidden_dim
 
-        # ---- Causal TCN encoder (very small) ----
-        # 两层因果卷积：dilation=1,2 覆盖 window=5 的有效感受野
-        self.tcn1 = CausalConv1dBlock(
-            in_channels=in_features,
-            out_channels=hidden_dim,
-            kernel_size=tcn_kernel_size,
-            dilation=1,
+        self.inner_lstm = nn.LSTM(
+            input_size=in_features,
+            hidden_size=hidden_dim,
+            num_layers=2,
+            batch_first=True,
+            dropout=dropout,
         )
-        self.tcn2 = CausalConv1dBlock(
-            in_channels=hidden_dim,
-            out_channels=hidden_dim,
-            kernel_size=tcn_kernel_size,
-            dilation=2,
+        self.temporal_attn1 = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=1,
+            dropout=dropout,
+            batch_first=True,
         )
+        self.temporal_attn2 = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=1,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.temporal_norm1 = nn.LayerNorm(hidden_dim)
+        self.temporal_norm2 = nn.LayerNorm(hidden_dim)
+        self.last_temporal_attn1 = None
+        self.last_temporal_attn2 = None
 
         # shared fusion: (self H) + base(1) + drift(1)
         fusion_dim = hidden_dim + 2
@@ -312,21 +322,39 @@ class InnerAC(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def _encode_tcn(self, inner_input: torch.Tensor) -> torch.Tensor:
-        """TCN 编码：将每资产窗口序列编码为 [B, N, H]（取最后一个时间步）。"""
+    def _encode_lstm_attn(self, inner_input: torch.Tensor) -> torch.Tensor:
+        """LSTM + 两层时序注意力：将每资产窗口序列编码为 [B, N, H]。"""
         B, N, T, M = inner_input.shape
-        # [B, N, T, M] -> [B*N, M, T]
-        x = inner_input.reshape(B * N, T, M).permute(0, 2, 1)
-        x = self.tcn1(x)
-        x = self.tcn2(x)  # [B*N, H, T]
-        feat = x[:, :, -1].reshape(B, N, self.hidden_dim)
-        return feat
+        x = inner_input.reshape(B * N, T, M)
+        seq, _ = self.inner_lstm(x)                               # [B*N, T, H]
+
+        query1 = seq[:, -1:, :]                                    # [B*N, 1, H]
+        attn1, weights1 = self.temporal_attn1(
+            query=query1,
+            key=seq,
+            value=seq,
+            need_weights=True,
+            average_attn_weights=True,
+        )
+        query2 = self.temporal_norm1(query1 + attn1)
+        attn2, weights2 = self.temporal_attn2(
+            query=query2,
+            key=seq,
+            value=seq,
+            need_weights=True,
+            average_attn_weights=True,
+        )
+        feat = self.temporal_norm2(query2 + attn2).squeeze(1)      # [B*N, H]
+
+        self.last_temporal_attn1 = weights1.detach().reshape(B, N, T)
+        self.last_temporal_attn2 = weights2.detach().reshape(B, N, T)
+        return feat.reshape(B, N, self.hidden_dim)
 
     def encode(self, inner_input, base_used_t, weight_drift):
         # 1) per-asset short-window encoding
-        node_feat = self._encode_tcn(inner_input)                 # [B, N, H]
+        node_feat = self._encode_lstm_attn(inner_input)            # [B, N, H]
 
-        # 2) fuse (no cross-asset attention)
+        # 2) fuse with current portfolio state
         combined = torch.cat(
             [node_feat, base_used_t.unsqueeze(-1), weight_drift.unsqueeze(-1)],
             dim=-1,

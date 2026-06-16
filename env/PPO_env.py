@@ -244,6 +244,7 @@ class PPO_Env(gym.Env):
                         total_days=self.total_days,
                         episode_len=self.episode_len,
                         stride_days=self.train_start_stride_days,
+                        start_offsets=self.train_episodes_per_epoch,
                     )
                     random.shuffle(self.train_indices_pool)
                     self.train_episode_stop_idx = None
@@ -307,13 +308,35 @@ class PPO_Env(gym.Env):
         return self._get_observation()
 
     @staticmethod
-    def _build_fixed_train_pool(raw_indices, total_days: int, episode_len: int, stride_days: int):
-        """Build fixed-length train episode starts with a configurable trading-day stride."""
-        absolute_limit = int(total_days) - 2
+    def _build_fixed_train_pool(
+            raw_indices,
+            total_days: int,
+            episode_len: int,
+            stride_days: int,
+            start_offsets: int = None):
+        """Build starts by taking several dense offsets, then cutting each long sequence into episodes."""
         episode_len = max(1, int(episode_len))
         stride_days = max(1, int(stride_days))
-        valid_starts = [int(t) for t in raw_indices if int(t) + episode_len <= absolute_limit]
-        return valid_starts[::stride_days]
+        raw = [int(t) for t in raw_indices]
+        if not raw:
+            return []
+        absolute_limit = min(int(total_days) - 2, raw[-1] + 1)
+
+        if start_offsets is None:
+            start_offsets = len(raw)
+        start_offsets = max(1, int(start_offsets))
+        offset_count = min(start_offsets, len(raw))
+
+        starts = []
+        for offset_idx in range(offset_count):
+            base_pos = offset_idx * stride_days
+            if base_pos >= len(raw):
+                break
+            start = raw[base_pos]
+            while start + episode_len <= absolute_limit:
+                starts.append(start)
+                start += episode_len
+        return starts
 
     def reset_at(self, start_idx: int, stop_idx: int = None):
         """Reset to an explicit absolute day window without advancing train pointers."""

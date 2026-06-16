@@ -66,17 +66,18 @@ class InnerTrainingScheduleTests(unittest.TestCase):
         self.assertFalse(hasattr(trainer.env, "_train_pool_signature"))
         self.assertEqual(trainer.env.mode_calls[-1], ("train", True, 5, 10, 960, 200))
 
-    def test_fixed_train_pool_uses_requested_stride_and_episode_length(self):
+    def test_fixed_train_pool_uses_offsets_then_cuts_long_sequences_into_episodes(self):
         starts = PPO_Env._build_fixed_train_pool(
-            raw_indices=list(range(100, 501)),
-            total_days=700,
-            episode_len=300,
-            stride_days=10,
+            raw_indices=list(range(100, 3730)),
+            total_days=4300,
+            episode_len=600,
+            stride_days=1,
+            start_offsets=30,
         )
 
-        self.assertEqual(starts[:3], [100, 110, 120])
-        self.assertEqual(starts[-1], 390)
-        self.assertTrue(all(start + 300 <= 698 for start in starts))
+        self.assertEqual(starts[:8], [100, 700, 1300, 1900, 2500, 3100, 101, 701])
+        self.assertEqual(len(starts), 180)
+        self.assertTrue(all(start + 600 <= 3730 for start in starts))
 
 
 class DummyBatchBuffer:
@@ -111,6 +112,14 @@ class DummyFinishedBuffer:
 
 
 class InnerEpisodeBatchUpdateTests(unittest.TestCase):
+    def test_fixed_inner_pool_branch_accepts_single_episode_batches(self):
+        train_path = os.path.join(ROOT, "Train", "PPO_train.py")
+        with open(train_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+
+        self.assertIn("if inner_train_fixed_episodes:", source)
+        self.assertNotIn("if inner_train_fixed_episodes and inner_episode_batch_size > 1:", source)
+
     def test_inner_episode_batch_updates_once_after_all_batch_episodes(self):
         trainer = object.__new__(HRL_Trainer)
         trainer.buffer = DummyBatchBuffer()
