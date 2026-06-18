@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -15,6 +16,7 @@ from Train.controller_pg import (
     segment_budget_allows_switch,
     max_switch_overflow_penalty,
 )
+from Train.PPO_train import HRL_Trainer, PhaseSpec
 
 
 class ControllerCounterfactualPGTests(unittest.TestCase):
@@ -89,6 +91,36 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         expected = (0.18 - 0.10) - 0.5 * (28 - 25) ** 2
         self.assertAlmostEqual(reward, expected)
 
+    def test_no_hold_constraints_do_not_hard_cap_switches_at_penalty_threshold(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.cfg = SimpleNamespace(
+            controller_no_hold_constraints=True,
+            controller_max_switches=40,
+            min_hold=30,
+        )
+        spec = PhaseSpec(
+            use_schedule=False,
+            inner_always_zero=False,
+            monitor_always_forced=False,
+            mask_monitor_update=False,
+            use_hold_constraints=True,
+        )
+
+        force_switch, force_locked = trainer._compute_force_switch_locked(
+            spec=spec,
+            phase="joint",
+            step_idx=500,
+            duration=1,
+            is_train=True,
+            switch_schedule=None,
+            fixed_cycle=None,
+            current_segments=40,
+            rollout_len=600,
+        )
+
+        self.assertIsNone(force_switch)
+        self.assertFalse(force_locked)
+
     def test_controller_pg_loss_uses_batch_normalized_counterfactual_reward(self):
         log_probs = torch.tensor([0.0, 1.0], requires_grad=True)
         rewards = torch.tensor([0.0, 2.0])
@@ -100,6 +132,17 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics["reward_mean"], 1.0)
         self.assertGreater(log_probs.grad[0].item(), 0.0)
         self.assertLess(log_probs.grad[1].item(), 0.0)
+
+    def test_controller_pg_loss_reports_policy_and_entropy_loss_scales(self):
+        log_probs = torch.tensor([0.0, 1.0], requires_grad=True)
+        rewards = torch.tensor([0.0, 2.0])
+        entropy = torch.tensor([0.5, 0.5])
+
+        _, diagnostics = controller_pg_loss(log_probs, rewards, entropy, entropy_coef=0.01)
+
+        self.assertIn("policy_loss", diagnostics)
+        self.assertIn("entropy_loss", diagnostics)
+        self.assertAlmostEqual(diagnostics["entropy_loss"], -0.005)
 
 
 if __name__ == "__main__":

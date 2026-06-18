@@ -29,7 +29,8 @@ OUTER_PRED_COEF="${OUTER_PRED_COEF:-0.1}"
 INNER_PRED_COEF="${INNER_PRED_COEF:-0.05}"
 INNER_PRED_TARGET_SCALE="${INNER_PRED_TARGET_SCALE:-10}"
 
-NAS_SEEDS="${NAS_SEEDS:-44 46}"
+# NAS_SEEDS="${NAS_SEEDS:-44 46}"
+NAS_SEEDS="${NAS_SEEDS:-47 48 49 50 51 52 53 54 55}"
 SH_SEEDS="${SH_SEEDS:-48 49 77 78 79 80 81 82 83 84 85 86 87 88 89 90}"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mpl-kd4rl}"
@@ -45,37 +46,37 @@ echo "Inner auxiliary head coef: $INNER_PRED_COEF"
 echo "NAS seeds: $NAS_SEEDS"
 echo "SH seeds: $SH_SEEDS"
 
-"$PYTHON_BIN" -u run_hrl_training.py \
-  --markets sh \
-  --seeds $SH_SEEDS \
-  --output_root "$OUTPUT_ROOT" \
-  --run_name "$RUN_NAME" \
-  --device cuda \
-  --outer_window "$OUTER_WINDOW" \
-  --min_hold "$MIN_HOLD" \
-  --max_hold "$MAX_HOLD" \
-  --outer_pred_coef "$OUTER_PRED_COEF" \
-  --inner_pred_coef "$INNER_PRED_COEF" \
-  --inner_pred_target_scale "$INNER_PRED_TARGET_SCALE" \
-  --joint_lr_mult "$JOINT_LR_MULT" \
-  --ppo_epochs "$OUTER_PPO_EPOCHS" \
-  --joint_single_full_episode \
-  --warmup_outer_epochs "$WARMUP_OUTER_EPOCHS" \
-  --warmup_inner_epochs "$WARMUP_INNER_EPOCHS" \
-  --inner_train_fixed_episodes \
-  --inner_episode_len "$INNER_EPISODE_LEN" \
-  --inner_train_episodes_per_epoch "$INNER_TRAIN_EPISODES_PER_EPOCH" \
-  --inner_start_stride_days "$INNER_START_STRIDE_DAYS" \
-  --inner_episode_batch_size "$INNER_EPISODE_BATCH_SIZE" \
-  --inner_episode_parallel_workers "$INNER_EPISODE_PARALLEL_WORKERS" \
-  --inner_rollout_update_steps "$INNER_ROLLOUT_UPDATE_STEPS" \
-  --inner_ppo_epochs "$INNER_PPO_EPOCHS" \
-  --model_selection_metric sharpe \
-  --inner_selection_metric return \
-  --no_train_controller \
-  --heartbeat_seconds "$HEARTBEAT_SECONDS" \
-  --continue_on_error \
-  2>&1 | tee "$OUTPUT_ROOT/logs/${RUN_NAME}_sh.log"
+# "$PYTHON_BIN" -u run_hrl_training.py \
+#   --markets sh \
+#   --seeds $SH_SEEDS \
+#   --output_root "$OUTPUT_ROOT" \
+#   --run_name "$RUN_NAME" \
+#   --device cuda \
+#   --outer_window "$OUTER_WINDOW" \
+#   --min_hold "$MIN_HOLD" \
+#   --max_hold "$MAX_HOLD" \
+#   --outer_pred_coef "$OUTER_PRED_COEF" \
+#   --inner_pred_coef "$INNER_PRED_COEF" \
+#   --inner_pred_target_scale "$INNER_PRED_TARGET_SCALE" \
+#   --joint_lr_mult "$JOINT_LR_MULT" \
+#   --ppo_epochs "$OUTER_PPO_EPOCHS" \
+#   --joint_single_full_episode \
+#   --warmup_outer_epochs "$WARMUP_OUTER_EPOCHS" \
+#   --warmup_inner_epochs "$WARMUP_INNER_EPOCHS" \
+#   --inner_train_fixed_episodes \
+#   --inner_episode_len "$INNER_EPISODE_LEN" \
+#   --inner_train_episodes_per_epoch "$INNER_TRAIN_EPISODES_PER_EPOCH" \
+#   --inner_start_stride_days "$INNER_START_STRIDE_DAYS" \
+#   --inner_episode_batch_size "$INNER_EPISODE_BATCH_SIZE" \
+#   --inner_episode_parallel_workers "$INNER_EPISODE_PARALLEL_WORKERS" \
+#   --inner_rollout_update_steps "$INNER_ROLLOUT_UPDATE_STEPS" \
+#   --inner_ppo_epochs "$INNER_PPO_EPOCHS" \
+#   --model_selection_metric sharpe \
+#   --inner_selection_metric return \
+#   --no_train_controller \
+#   --heartbeat_seconds "$HEARTBEAT_SECONDS" \
+#   --continue_on_error \
+#   2>&1 | tee "$OUTPUT_ROOT/logs/${RUN_NAME}_sh.log"
 
 "$PYTHON_BIN" -u run_hrl_training.py \
   --markets nas \

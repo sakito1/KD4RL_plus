@@ -24,6 +24,7 @@ from Train.PPO_train import (
     HRL_Networks,
     HRL_Trainer,
     set_seed,
+    train_controller_then_joint_finetune,
     train_warmup_then_joint_with_monitor,
 )
 from agent import HRL_Buffer, HRL_PPO_Agent
@@ -120,6 +121,22 @@ def parse_args():
     )
     parser.set_defaults(joint_single_full_episode=False)
     parser.add_argument("--joint_outer_inner_epochs", type=int, default=None, help="Alias for --joint_epochs.")
+    parser.add_argument(
+        "--frozen_hrl_checkpoint",
+        default=None,
+        help=(
+            "Optional pretrained HRL checkpoint. When set, load outer/inner from this checkpoint "
+            "before training the controller."
+        ),
+    )
+    parser.add_argument(
+        "--controller_first_joint_finetune",
+        action="store_true",
+        help=(
+            "Run the controller-first schedule: load frozen outer/inner, train controller, "
+            "then jointly finetune controller/outer/inner."
+        ),
+    )
     parser.add_argument("--warmup_outer_episodes", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--warmup_inner_episodes", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--warmup_monitor_episodes", type=int, default=None, help=argparse.SUPPRESS)
@@ -320,11 +337,23 @@ def parse_args():
     parser.add_argument("--reward_scale_inner", type=float, default=2000.0)
     parser.add_argument("--reward_scale_controller", type=float, default=100.0)
     parser.add_argument("--controller_algorithm", choices=["pg"], default="pg")
+    parser.add_argument(
+        "--controller_no_hold_constraints",
+        action="store_true",
+        help=(
+            "Disable min-hold/max-hold timing constraints for trainable controller decisions, "
+            "while still respecting controller_max_switches. The first step still switches."
+        ),
+    )
     parser.add_argument("--controller_rollout_len", type=int, default=400)
     parser.add_argument("--controller_max_segments", type=int, default=25)
     parser.add_argument("--controller_pg_batch_windows", type=int, default=4)
     parser.add_argument("--controller_windows_per_epoch", type=int, default=5)
+    parser.add_argument("--controller_train_fixed_episodes", action="store_true")
+    parser.add_argument("--controller_episode_batch_size", type=int, default=4)
+    parser.add_argument("--controller_episode_parallel_workers", type=int, default=1)
     parser.add_argument("--controller_start_stride_days", type=int, default=40)
+    parser.add_argument("--controller_window", type=int, default=15)
     parser.add_argument("--controller_entropy_coef", type=float, default=0.01)
     parser.add_argument("--controller_aux_return_coef", type=float, default=0.0)
     parser.add_argument("--controller_aux_mdd_coef", type=float, default=0.0)
@@ -592,7 +621,11 @@ def normalize_training_schedule(args):
     args.controller_state_drawdown_scale = max(1e-6, float(args.controller_state_drawdown_scale))
     args.controller_pg_batch_windows = max(1, int(args.controller_pg_batch_windows))
     args.controller_windows_per_epoch = max(1, int(args.controller_windows_per_epoch))
+    args.controller_train_fixed_episodes = bool(args.controller_train_fixed_episodes)
+    args.controller_episode_batch_size = max(1, int(args.controller_episode_batch_size))
+    args.controller_episode_parallel_workers = max(1, int(args.controller_episode_parallel_workers))
     args.controller_start_stride_days = max(1, int(args.controller_start_stride_days))
+    args.controller_window = max(1, int(args.controller_window))
     args.controller_val_interval_epochs = (
         None if args.controller_val_interval_epochs is None
         else max(1, int(args.controller_val_interval_epochs))
@@ -685,7 +718,11 @@ def apply_smoke_overrides(args):
     args.controller_count_penalty_coef = 0.1
     args.controller_pg_batch_windows = 1
     args.controller_windows_per_epoch = 1
+    args.controller_train_fixed_episodes = True
+    args.controller_episode_batch_size = 1
+    args.controller_episode_parallel_workers = 1
     args.controller_start_stride_days = 4
+    args.controller_window = 2
     args.controller_val_interval_epochs = 999
     args.ppo_epochs = 1
     args.inner_ppo_epochs = 1
@@ -800,8 +837,14 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_pg_batch_windows),
         "--controller_windows_per_epoch",
         str(args.controller_windows_per_epoch),
+        "--controller_episode_batch_size",
+        str(args.controller_episode_batch_size),
+        "--controller_episode_parallel_workers",
+        str(args.controller_episode_parallel_workers),
         "--controller_start_stride_days",
         str(args.controller_start_stride_days),
+        "--controller_window",
+        str(args.controller_window),
         "--controller_entropy_coef",
         str(args.controller_entropy_coef),
         "--controller_aux_return_coef",
@@ -869,6 +912,14 @@ def build_child_command(args, market, run_root, seed):
         cmd.extend(["--controller_turnover_coef", str(args.controller_turnover_coef)])
     if args.controller_val_interval_epochs is not None:
         cmd.extend(["--controller_val_interval_epochs", str(args.controller_val_interval_epochs)])
+    if args.controller_no_hold_constraints:
+        cmd.append("--controller_no_hold_constraints")
+    if args.controller_train_fixed_episodes:
+        cmd.append("--controller_train_fixed_episodes")
+    if args.frozen_hrl_checkpoint:
+        cmd.extend(["--frozen_hrl_checkpoint", str(args.frozen_hrl_checkpoint)])
+    if args.controller_first_joint_finetune:
+        cmd.append("--controller_first_joint_finetune")
     if not args.train_episode_to_end:
         cmd.append("--no_train_episode_to_end")
     if args.inner_train_fixed_episodes:
@@ -925,6 +976,7 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.inner_train_start_stride_days = int(args.inner_start_stride_days)
     runtime_config.controller_sup_coef = float(args.controller_sup_coef)
     runtime_config.controller_check_stride_days = max(1, int(args.controller_check_stride_days))
+    runtime_config.controller_no_hold_constraints = bool(args.controller_no_hold_constraints)
     runtime_config.clear_cuda_cache_on_update = bool(args.clear_cuda_cache_on_update)
     runtime_config.reward_scale_outer = float(args.reward_scale_outer)
     runtime_config.reward_scale_inner = float(args.reward_scale_inner)
@@ -935,7 +987,11 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.controller_max_segments = int(args.controller_max_segments)
     runtime_config.controller_pg_batch_windows = int(args.controller_pg_batch_windows)
     runtime_config.controller_windows_per_epoch = int(args.controller_windows_per_epoch)
+    runtime_config.controller_train_fixed_episodes = bool(args.controller_train_fixed_episodes)
+    runtime_config.controller_episode_batch_size = int(args.controller_episode_batch_size)
+    runtime_config.controller_episode_parallel_workers = int(args.controller_episode_parallel_workers)
     runtime_config.controller_start_stride_days = int(args.controller_start_stride_days)
+    runtime_config.controller_window = int(args.controller_window)
     runtime_config.controller_entropy_coef = float(args.controller_entropy_coef)
     runtime_config.controller_aux_return_coef = float(args.controller_aux_return_coef)
     runtime_config.controller_aux_mdd_coef = float(args.controller_aux_mdd_coef)
@@ -1050,6 +1106,8 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "inner_episode_batch_size": getattr(runtime_config, "inner_episode_batch_size", None),
             "inner_episode_parallel_workers": getattr(runtime_config, "inner_episode_parallel_workers", None),
             "joint_lr_mult": args.joint_lr_mult,
+            "frozen_hrl_checkpoint": args.frozen_hrl_checkpoint,
+            "controller_first_joint_finetune": args.controller_first_joint_finetune,
             "inner_batch_size": args.inner_batch_size,
             "outer_update_batch_size": args.outer_update_batch_size,
             "trade_num": args.trade_num,
@@ -1063,12 +1121,17 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "inner_norm_mode": args.inner_norm_mode,
             "controller_sup_coef": args.controller_sup_coef,
             "controller_check_stride_days": getattr(runtime_config, "controller_check_stride_days", None),
+            "controller_no_hold_constraints": getattr(runtime_config, "controller_no_hold_constraints", None),
             "controller_algorithm": getattr(runtime_config, "controller_algorithm", None),
             "controller_rollout_len": getattr(runtime_config, "controller_rollout_len", None),
             "controller_max_segments": getattr(runtime_config, "controller_max_segments", None),
             "controller_pg_batch_windows": getattr(runtime_config, "controller_pg_batch_windows", None),
             "controller_windows_per_epoch": getattr(runtime_config, "controller_windows_per_epoch", None),
+            "controller_train_fixed_episodes": getattr(runtime_config, "controller_train_fixed_episodes", None),
+            "controller_episode_batch_size": getattr(runtime_config, "controller_episode_batch_size", None),
+            "controller_episode_parallel_workers": getattr(runtime_config, "controller_episode_parallel_workers", None),
             "controller_start_stride_days": getattr(runtime_config, "controller_start_stride_days", None),
+            "controller_window": getattr(runtime_config, "controller_window", None),
             "controller_entropy_coef": getattr(runtime_config, "controller_entropy_coef", None),
             "controller_aux_return_coef": getattr(runtime_config, "controller_aux_return_coef", None),
             "controller_aux_mdd_coef": getattr(runtime_config, "controller_aux_mdd_coef", None),
@@ -1261,21 +1324,46 @@ def run_child(args):
             f"{len(env.train_indices_pool)} != {args.train_episodes_per_epoch}"
         )
 
-    result = train_warmup_then_joint_with_monitor(
-        trainer,
-        warmup_outer_episodes=stage_episode_total(args, "warmup_outer"),
-        warmup_inner_episodes=stage_episode_total(args, "warmup_inner"),
-        warmup_monitor_episodes=stage_episode_total(args, "warmup_monitor"),
-        joint_episodes=stage_episode_total(args, "joint"),
-        fixed_cycle=fixed_cycle,
-        val_interval=args.val_interval,
-        train_monitor=runtime_config.train_monitor_enabled,
-        use_rule_switch_train=runtime_config.use_rule_switch_train,
-        save_prefix=(
-            f"hrl_{args.market}_seed{args.seed}_"
-            f"op{_coef_tag(args.outer_pred_coef)}_ip{_coef_tag(args.inner_pred_coef)}"
-        ),
-    )
+    if args.controller_first_joint_finetune:
+        if not args.frozen_hrl_checkpoint:
+            raise ValueError("--controller_first_joint_finetune requires --frozen_hrl_checkpoint.")
+        checkpoint_path = Path(args.frozen_hrl_checkpoint).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Frozen HRL checkpoint not found: {checkpoint_path}")
+        trainer.load_frozen_hrl_checkpoint(str(checkpoint_path))
+        result = train_controller_then_joint_finetune(
+            trainer,
+            controller_episodes=stage_episode_total(args, "warmup_monitor"),
+            joint_episodes=stage_episode_total(args, "joint"),
+            fixed_cycle=fixed_cycle,
+            val_interval=args.val_interval,
+            train_monitor=runtime_config.train_monitor_enabled,
+            save_prefix=(
+                f"ctrl_first_{args.market}_seed{args.seed}_"
+                f"op{_coef_tag(args.outer_pred_coef)}_ip{_coef_tag(args.inner_pred_coef)}"
+            ),
+        )
+    else:
+        if args.frozen_hrl_checkpoint:
+            checkpoint_path = Path(args.frozen_hrl_checkpoint).expanduser().resolve()
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"Frozen HRL checkpoint not found: {checkpoint_path}")
+            trainer.load_frozen_hrl_checkpoint(str(checkpoint_path))
+        result = train_warmup_then_joint_with_monitor(
+            trainer,
+            warmup_outer_episodes=stage_episode_total(args, "warmup_outer"),
+            warmup_inner_episodes=stage_episode_total(args, "warmup_inner"),
+            warmup_monitor_episodes=stage_episode_total(args, "warmup_monitor"),
+            joint_episodes=stage_episode_total(args, "joint"),
+            fixed_cycle=fixed_cycle,
+            val_interval=args.val_interval,
+            train_monitor=runtime_config.train_monitor_enabled,
+            use_rule_switch_train=runtime_config.use_rule_switch_train,
+            save_prefix=(
+                f"hrl_{args.market}_seed{args.seed}_"
+                f"op{_coef_tag(args.outer_pred_coef)}_ip{_coef_tag(args.inner_pred_coef)}"
+            ),
+        )
     with (market_root / f"seed_{args.seed}_train_result.json").open("w", encoding="utf-8") as fh:
         json.dump(result, fh, ensure_ascii=False, indent=2)
 

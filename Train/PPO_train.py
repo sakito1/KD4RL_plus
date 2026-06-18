@@ -2,6 +2,7 @@ import os
 import copy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import argparse
 import random
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+from torch.distributions import Categorical
 
 # === 导入自定义模块 ===
 from env import PPO_Env
@@ -320,6 +322,8 @@ class HRL_Trainer:
                 is_train=is_train,
                 switch_schedule=switch_schedule,
                 fixed_cycle=fixed_cycle,
+                current_segments=switch_count,
+                rollout_len=T,
             )
 
             # 2. [规则接管逻辑]
@@ -603,6 +607,8 @@ class HRL_Trainer:
             is_train: bool,
             switch_schedule: Optional[list],
             fixed_cycle: Optional[int],
+            current_segments: int = 0,
+            rollout_len: Optional[int] = None,
     ):
         """Return (force_switch, force_locked) for this step."""
         force_switch = None
@@ -617,6 +623,9 @@ class HRL_Trainer:
             if duration < fixed_cycle:
                 return 0, True
             return 1, True
+
+        if spec.use_hold_constraints and bool(getattr(self.cfg, "controller_no_hold_constraints", False)):
+            return None, False
 
         # Priority 3: warmup schedule
         if spec.use_schedule:
@@ -755,8 +764,24 @@ class HRL_Trainer:
 
     def _finish_pg_segment(self, segment_logps, episode_segment_logps):
         if len(segment_logps) > 0:
-            episode_segment_logps.append(torch.stack(segment_logps).mean())
+            if isinstance(segment_logps[0], dict):
+                episode_segment_logps.append(list(segment_logps))
+            else:
+                episode_segment_logps.append(torch.stack(segment_logps).mean())
             segment_logps.clear()
+
+    @staticmethod
+    def _detach_controller_record(obs, act_out, act_mon, target_return=None, target_mdd=None):
+        return {
+            "ssm": {k: v.detach() for k, v in obs["ssm"].items()},
+            "weights_drift": obs["weights_drift"].detach(),
+            "port_state": obs["port_state"].detach(),
+            "asset_state": obs.get("outer_state").detach() if isinstance(obs.get("outer_state"), torch.Tensor) else obs.get("outer_state"),
+            "switch_action": act_out.detach(),
+            "action": act_mon.detach().view(-1),
+            "target_return": target_return.detach().view(-1) if isinstance(target_return, torch.Tensor) else None,
+            "target_mdd": target_mdd.detach().view(-1) if isinstance(target_mdd, torch.Tensor) else None,
+        }
 
     def _run_controller_pg_window(self, env, start_idx: int, stop_idx: int, fixed_cycle: int):
         obs = env.reset_at(start_idx, stop_idx)
@@ -788,6 +813,9 @@ class HRL_Trainer:
             if step_idx == 0:
                 force_switch = 1
                 forced = True
+            elif bool(getattr(self.cfg, "controller_no_hold_constraints", False)):
+                force_switch = None
+                free_decision = True
             elif duration < min_hold:
                 force_switch = 0
                 forced = True
@@ -814,6 +842,7 @@ class HRL_Trainer:
                 free_decision = True
 
             weights_drift = obs["weights_drift"]
+            pending_record = None
             if free_decision:
                 with torch.no_grad():
                     act_out, _, _, _, _ = self.agent.net.outer.pi(
@@ -821,17 +850,22 @@ class HRL_Trainer:
                         weights_drift,
                         deterministic=True,
                     )
-                act_mon, logp_mon, entropy, _, _ = self.agent.net.mon(
-                    obs["ssm"]["z"], obs["ssm"]["h"], obs["ssm"]["p"],
-                    obs["ssm"]["q_bear"], obs["ssm"]["q_bull"],
-                    weights_drift, obs["port_state"], switch_action=act_out,
-                    deterministic=False,
-                    asset_state=obs.get("outer_state"),
-                )
+                    stats = self.agent.net.mon.decision_stats(
+                        obs["ssm"]["z"], obs["ssm"]["h"], obs["ssm"]["p"],
+                        obs["ssm"]["q_bear"], obs["ssm"]["q_bull"],
+                        weights_drift, obs["port_state"],
+                        switch_action=act_out,
+                        asset_state=obs.get("outer_state"),
+                    )
+                    zeros = torch.zeros_like(stats["policy_logit"])
+                    logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
+                    dist = Categorical(logits=logits)
+                    act_mon = dist.sample()
+                    entropy = dist.entropy().mean()
                 is_switch = bool(act_mon.item() == 1)
                 base_used = torch.where(act_mon.view(-1, 1).bool(), act_out.detach(), obs["base_drift"])
-                current_segment_logps.append(logp_mon.view(-1).mean())
                 entropies.append(entropy.reshape(()))
+                pending_record = (obs, act_out, act_mon)
                 if is_switch:
                     free_switch_count += 1
             else:
@@ -852,8 +886,6 @@ class HRL_Trainer:
                 weights_exec = self._deterministic_inner_exec(obs, base_used.detach(), weights_drift)
 
             if is_switch:
-                if step_idx != 0:
-                    self._finish_pg_segment(current_segment_logps, episode_segment_logps)
                 segment_count += 1
                 last_switch_step = step_idx
                 if forced and step_idx != 0:
@@ -866,6 +898,17 @@ class HRL_Trainer:
                 outer_action=act_out.detach(),
                 is_switch=is_switch,
             )
+            if free_decision and pending_record is not None:
+                rec_obs, rec_act_out, rec_act_mon = pending_record
+                current_segment_logps.append(self._detach_controller_record(
+                    rec_obs,
+                    rec_act_out,
+                    rec_act_mon,
+                    target_return=info.get("controller_hold_return_target"),
+                    target_mdd=info.get("controller_hold_mdd_target"),
+                ))
+            if is_switch and step_idx != 0:
+                self._finish_pg_segment(current_segment_logps, episode_segment_logps)
             history.append(info["portfolio_value"])
             if done:
                 self._finish_pg_segment(current_segment_logps, episode_segment_logps)
@@ -879,19 +922,25 @@ class HRL_Trainer:
             free_switch_count=free_switch_count,
             segment_count=segment_count,
         )
-        episode_logprob = torch.stack(episode_segment_logps).mean() if episode_segment_logps else None
+        if episode_segment_logps and not isinstance(episode_segment_logps[0], list):
+            episode_logprob = torch.stack(episode_segment_logps).mean()
+        else:
+            episode_logprob = None
         entropy_mean = torch.stack(entropies).mean() if entropies else None
         return {
             "stats": stats,
             "history": history,
             "episode_logprob": episode_logprob,
             "entropy": entropy_mean,
+            "episode_segments": episode_segment_logps,
             "forced_switch_count": forced_switch_count,
         }
 
     def _controller_max_allowed_switches(self, rollout_len: int, min_hold: int) -> int:
         theoretical_max = max(1, int(rollout_len) // max(1, int(min_hold)))
         manual_max = int(getattr(self.cfg, "controller_max_switches", 0) or 0)
+        if bool(getattr(self.cfg, "controller_no_hold_constraints", False)):
+            return max(1, manual_max) if manual_max > 0 else theoretical_max
         if manual_max > 0:
             return max(1, min(manual_max, theoretical_max))
         return theoretical_max
@@ -911,7 +960,116 @@ class HRL_Trainer:
             out.append(starts[(epoch * max(1, int(windows_per_epoch)) + i) % len(starts)])
         return out
 
-    def _update_controller_pg_batch(self, episode_logprobs, rewards, entropies):
+    def _controller_train_start_pool(self, rollout_len: int):
+        raw_indices = self.env.idx_map["train"]
+        starts = self.env._build_fixed_train_pool(
+            raw_indices,
+            total_days=self.env.total_days,
+            episode_len=int(rollout_len),
+            stride_days=int(getattr(self.cfg, "controller_start_stride_days", self.cfg.max_hold)),
+            start_offsets=int(getattr(self.cfg, "controller_windows_per_epoch", self.cfg.train_episodes_per_epoch)),
+        )
+        if not starts:
+            train_start = int(raw_indices[0])
+            train_end = int(raw_indices[-1])
+            latest_start = max(train_start, train_end - int(rollout_len))
+            starts = [min(train_start, latest_start)]
+        return [int(s) for s in starts]
+
+    def _run_controller_pg_pair_worker(self, start_idx: int, stop_idx: int, fixed_cycle: int):
+        baseline_env = copy.deepcopy(self.env)
+        controlled_env = copy.deepcopy(self.env)
+        baseline_env.logger = None
+        controlled_env.logger = None
+        baseline_env.mode = "train"
+        controlled_env.mode = "train"
+        baseline_stats, _ = self._run_fixed_hrl_window(baseline_env, start_idx, stop_idx, fixed_cycle)
+        controlled = self._run_controller_pg_window(controlled_env, start_idx, stop_idx, fixed_cycle)
+        return baseline_stats, controlled
+
+    def _run_controller_pg_pairs(self, windows, fixed_cycle: int):
+        workers = max(1, int(getattr(self.cfg, "controller_episode_parallel_workers", 1)))
+        workers = min(workers, max(1, len(windows)))
+        if workers <= 1:
+            return [
+                self._run_controller_pg_pair_worker(start, stop, fixed_cycle)
+                for start, stop in windows
+            ]
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(self._run_controller_pg_pair_worker, start, stop, fixed_cycle)
+                for start, stop in windows
+            ]
+            return [future.result() for future in futures]
+
+    def _controller_episode_terms(self, episode_segments):
+        segment_logps = []
+        entropies = []
+        aux_return_losses = []
+        aux_mdd_losses = []
+        aux_return_coef = float(getattr(self.cfg, "controller_aux_return_coef", 0.0))
+        aux_mdd_coef = float(getattr(self.cfg, "controller_aux_mdd_coef", 0.0))
+        for segment in episode_segments:
+            record_logps = []
+            for record in segment:
+                ssm = {
+                    k: v.to(self.device)
+                    for k, v in record["ssm"].items()
+                }
+                asset_state = record.get("asset_state")
+                if isinstance(asset_state, torch.Tensor):
+                    asset_state = asset_state.to(self.device)
+                stats = self.agent.net.mon.decision_stats(
+                    ssm["z"], ssm["h"], ssm["p"], ssm["q_bear"], ssm["q_bull"],
+                    record["weights_drift"].to(self.device),
+                    record["port_state"].to(self.device),
+                    switch_action=record["switch_action"].to(self.device),
+                    asset_state=asset_state,
+                )
+                zeros = torch.zeros_like(stats["policy_logit"])
+                logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
+                dist = Categorical(logits=logits)
+                action = record["action"].to(self.device).long().view(-1)
+                record_logps.append(dist.log_prob(action).view(-1).mean())
+                entropies.append(dist.entropy().mean())
+                if aux_return_coef > 0.0 and record.get("target_return") is not None:
+                    target_return = record["target_return"].to(
+                        device=self.device,
+                        dtype=stats["hold_return_pred"].dtype,
+                    )
+                    target_return = target_return * float(getattr(
+                        self.cfg,
+                        "controller_aux_return_target_scale",
+                        1.0,
+                    ))
+                    aux_return_losses.append(
+                        F.smooth_l1_loss(stats["hold_return_pred"].view(-1), target_return.view(-1))
+                    )
+                if aux_mdd_coef > 0.0 and record.get("target_mdd") is not None:
+                    target_mdd = record["target_mdd"].to(
+                        device=self.device,
+                        dtype=stats["hold_risk_pred"].dtype,
+                    )
+                    target_mdd = target_mdd * float(getattr(
+                        self.cfg,
+                        "controller_aux_mdd_target_scale",
+                        1.0,
+                    ))
+                    aux_mdd_losses.append(
+                        F.smooth_l1_loss(stats["hold_risk_pred"].view(-1), target_mdd.view(-1))
+                    )
+            if record_logps:
+                segment_logps.append(torch.stack(record_logps).mean())
+        if not segment_logps:
+            return None, None, None, None
+        episode_logprob = torch.stack(segment_logps).mean()
+        entropy = torch.stack(entropies).mean() if entropies else episode_logprob.new_tensor(0.0)
+        aux_return_loss = torch.stack(aux_return_losses).mean() if aux_return_losses else None
+        aux_mdd_loss = torch.stack(aux_mdd_losses).mean() if aux_mdd_losses else None
+        return episode_logprob, entropy, aux_return_loss, aux_mdd_loss
+
+    def _update_controller_pg_batch(self, episode_logprobs, rewards, entropies,
+                                    aux_return_losses=None, aux_mdd_losses=None):
         if len(episode_logprobs) == 0:
             return {}
         self.agent.opt_mon.zero_grad(set_to_none=True)
@@ -924,6 +1082,21 @@ class HRL_Trainer:
             entropy_tensor,
             entropy_coef=float(getattr(self.cfg, "controller_entropy_coef", 0.01)),
         )
+        aux_return_coef = float(getattr(self.cfg, "controller_aux_return_coef", 0.0))
+        aux_mdd_coef = float(getattr(self.cfg, "controller_aux_mdd_coef", 0.0))
+        aux_return_loss = logprob_tensor.new_tensor(0.0)
+        aux_mdd_loss = logprob_tensor.new_tensor(0.0)
+        if aux_return_coef > 0.0 and aux_return_losses:
+            aux_return_loss = torch.stack(aux_return_losses).mean()
+            loss = loss + aux_return_coef * aux_return_loss
+        if aux_mdd_coef > 0.0 and aux_mdd_losses:
+            aux_mdd_loss = torch.stack(aux_mdd_losses).mean()
+            loss = loss + aux_mdd_coef * aux_mdd_loss
+        diagnostics["loss"] = float(loss.detach().cpu().item())
+        diagnostics["aux_return_loss"] = float(aux_return_loss.detach().cpu().item())
+        diagnostics["aux_mdd_loss"] = float(aux_mdd_loss.detach().cpu().item())
+        diagnostics["aux_return_weighted_loss"] = float((aux_return_coef * aux_return_loss).detach().cpu().item())
+        diagnostics["aux_mdd_weighted_loss"] = float((aux_mdd_coef * aux_mdd_loss).detach().cpu().item())
         loss.backward()
         if self.agent.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(list(self.agent.net.mon.parameters()), self.agent.max_grad_norm)
@@ -946,6 +1119,8 @@ class HRL_Trainer:
         pending_logprobs = []
         pending_rewards = []
         pending_entropies = []
+        pending_aux_return_losses = []
+        pending_aux_mdd_losses = []
 
         def _validate_controller(epoch_idx: int):
             self.env.set_mode("val")
@@ -967,8 +1142,73 @@ class HRL_Trainer:
             )
             return score, metrics
 
+        fixed_episode_pool = bool(getattr(self.cfg, "controller_train_fixed_episodes", False))
+        controller_start_pool = self._controller_train_start_pool(rollout_len) if fixed_episode_pool else None
+        controller_episode_batch_size = max(
+            1,
+            int(getattr(self.cfg, "controller_episode_batch_size", batch_windows)),
+        )
+        if fixed_episode_pool:
+            self.logger.info(
+                "   [Controller Batch] fixed episode pool=%s, episode_batch_size=%s, parallel_workers=%s, "
+                "episode_len=%s, start_stride_days=%s",
+                len(controller_start_pool),
+                controller_episode_batch_size,
+                max(1, int(getattr(self.cfg, "controller_episode_parallel_workers", 1))),
+                rollout_len,
+                int(getattr(self.cfg, "controller_start_stride_days", self.cfg.max_hold)),
+            )
+
+        def _record_controlled_result(baseline_stats, controlled, start, stop):
+            ctrl_stats = controlled["stats"]
+            window_len = max(1, int(stop) - int(start))
+            max_allowed_switches = self._controller_max_allowed_switches(
+                window_len,
+                int(getattr(self.cfg, "min_hold", 10)),
+            )
+            reward = controller_reward(
+                baseline_stats,
+                ctrl_stats,
+                return_coef=float(getattr(self.cfg, "controller_return_coef", 1.0)),
+                max_switch_count=max_allowed_switches,
+                max_switch_penalty_coef=float(getattr(
+                    self.cfg,
+                    "controller_max_switch_penalty_coef",
+                    getattr(self.cfg, "controller_count_penalty_coef", 0.5),
+                )),
+            )
+            if controlled["episode_logprob"] is not None:
+                pending_logprobs.append(controlled["episode_logprob"])
+                pending_rewards.append(float(reward))
+                pending_entropies.append(
+                    controlled["entropy"]
+                    if controlled["entropy"] is not None
+                    else controlled["episode_logprob"].new_tensor(0.0)
+                )
+                if controlled.get("aux_return_loss") is not None:
+                    pending_aux_return_losses.append(controlled["aux_return_loss"])
+                if controlled.get("aux_mdd_loss") is not None:
+                    pending_aux_mdd_losses.append(controlled["aux_mdd_loss"])
+            elif controlled.get("episode_segments"):
+                terms = self._controller_episode_terms(controlled["episode_segments"])
+                episode_logprob, entropy, aux_return_loss, aux_mdd_loss = terms
+                if episode_logprob is not None:
+                    pending_logprobs.append(episode_logprob)
+                    pending_rewards.append(float(reward))
+                    pending_entropies.append(entropy)
+                    if aux_return_loss is not None:
+                        pending_aux_return_losses.append(aux_return_loss)
+                    if aux_mdd_loss is not None:
+                        pending_aux_mdd_losses.append(aux_mdd_loss)
+            return reward, ctrl_stats, max_allowed_switches
+
         for epoch in range(max(0, int(epochs))):
-            starts = self._controller_train_starts(windows_per_epoch, rollout_len, epoch)
+            if fixed_episode_pool:
+                starts = list(controller_start_pool)
+                if epoch > 0:
+                    random.shuffle(starts)
+            else:
+                starts = self._controller_train_starts(windows_per_epoch, rollout_len, epoch)
             epoch_rewards = []
             epoch_mdd_uplifts = []
             epoch_return_uplifts = []
@@ -977,67 +1217,94 @@ class HRL_Trainer:
             epoch_switch_overflows = []
             epoch_max_switches = []
 
-            for local_idx, start in enumerate(starts):
-                stop = min(int(start) + rollout_len, int(self.env.idx_map["train"][-1]))
-                if stop - int(start) < max(2, fixed_cycle):
+            for batch_start in range(0, len(starts), controller_episode_batch_size if fixed_episode_pool else 1):
+                batch_starts = starts[batch_start:batch_start + (controller_episode_batch_size if fixed_episode_pool else 1)]
+                windows = []
+                for start in batch_starts:
+                    stop = min(int(start) + rollout_len, int(self.env.idx_map["train"][-1]))
+                    if stop - int(start) >= max(2, fixed_cycle):
+                        windows.append((int(start), int(stop)))
+                if not windows:
                     continue
 
-                baseline_stats, _ = self._run_fixed_hrl_window(self.env, start, stop, fixed_cycle)
-                controlled = self._run_controller_pg_window(self.env, start, stop, fixed_cycle)
-                ctrl_stats = controlled["stats"]
-                window_len = max(1, int(stop) - int(start))
-                max_allowed_switches = self._controller_max_allowed_switches(
-                    window_len,
-                    int(getattr(self.cfg, "min_hold", 10)),
-                )
-                reward = controller_reward(
-                    baseline_stats,
-                    ctrl_stats,
-                    return_coef=float(getattr(self.cfg, "controller_return_coef", 1.0)),
-                    max_switch_count=max_allowed_switches,
-                    max_switch_penalty_coef=float(getattr(
-                        self.cfg,
-                        "controller_max_switch_penalty_coef",
-                        getattr(self.cfg, "controller_count_penalty_coef", 0.5),
-                    )),
+                pair_results = (
+                    self._run_controller_pg_pairs(windows, fixed_cycle)
+                    if fixed_episode_pool
+                    else [
+                        (
+                            self._run_fixed_hrl_window(self.env, windows[0][0], windows[0][1], fixed_cycle)[0],
+                            self._run_controller_pg_window(self.env, windows[0][0], windows[0][1], fixed_cycle),
+                        )
+                    ]
                 )
 
-                epoch_rewards.append(reward)
-                epoch_mdd_uplifts.append(baseline_stats.max_drawdown - ctrl_stats.max_drawdown)
-                epoch_return_uplifts.append(ctrl_stats.log_return - baseline_stats.log_return)
-                epoch_segments.append(ctrl_stats.segment_count)
-                epoch_free_switches.append(ctrl_stats.free_switch_count)
-                epoch_switch_overflows.append(max(0, ctrl_stats.segment_count - max_allowed_switches))
-                epoch_max_switches.append(max_allowed_switches)
-
-                if controlled["episode_logprob"] is not None:
-                    pending_logprobs.append(controlled["episode_logprob"])
-                    pending_rewards.append(float(reward))
-                    pending_entropies.append(
-                        controlled["entropy"]
-                        if controlled["entropy"] is not None
-                        else controlled["episode_logprob"].new_tensor(0.0)
+                for (start, stop), (baseline_stats, controlled) in zip(windows, pair_results):
+                    reward, ctrl_stats, max_allowed_switches = _record_controlled_result(
+                        baseline_stats,
+                        controlled,
+                        start,
+                        stop,
                     )
+                    epoch_rewards.append(reward)
+                    epoch_mdd_uplifts.append(baseline_stats.max_drawdown - ctrl_stats.max_drawdown)
+                    epoch_return_uplifts.append(ctrl_stats.log_return - baseline_stats.log_return)
+                    epoch_segments.append(ctrl_stats.segment_count)
+                    epoch_free_switches.append(ctrl_stats.free_switch_count)
+                    epoch_switch_overflows.append(max(0, ctrl_stats.segment_count - max_allowed_switches))
+                    epoch_max_switches.append(max_allowed_switches)
 
-                if len(pending_logprobs) >= batch_windows:
-                    diag = self._update_controller_pg_batch(pending_logprobs, pending_rewards, pending_entropies)
+                should_update = (
+                    len(pending_logprobs) >= controller_episode_batch_size
+                    if fixed_episode_pool
+                    else len(pending_logprobs) >= batch_windows
+                )
+                if should_update:
+                    diag = self._update_controller_pg_batch(
+                        pending_logprobs,
+                        pending_rewards,
+                        pending_entropies,
+                        pending_aux_return_losses,
+                        pending_aux_mdd_losses,
+                    )
                     update_count += 1
                     self.logger.info(
-                        "[CTRL-PG] update=%s epoch=%s window=%s/%s loss=%.4f reward=%.4f entropy=%.4f",
-                        update_count, epoch + 1, local_idx + 1, len(starts),
-                        diag.get("loss", 0.0), diag.get("reward_mean", 0.0), diag.get("entropy", 0.0),
+                        "[CTRL-PG] update=%s epoch=%s windows=%s/%s loss=%.4f policy=%.4f "
+                        "ent_loss=%.4f aux_ret_w=%.4f aux_mdd_w=%.4f reward=%.4f entropy=%.4f "
+                        "aux_ret=%.4f aux_mdd=%.4f",
+                        update_count, epoch + 1, min(batch_start + len(batch_starts), len(starts)), len(starts),
+                        diag.get("loss", 0.0), diag.get("policy_loss", 0.0),
+                        diag.get("entropy_loss", 0.0),
+                        diag.get("aux_return_weighted_loss", 0.0),
+                        diag.get("aux_mdd_weighted_loss", 0.0),
+                        diag.get("reward_mean", 0.0), diag.get("entropy", 0.0),
+                        diag.get("aux_return_loss", 0.0), diag.get("aux_mdd_loss", 0.0),
                     )
                     pending_logprobs, pending_rewards, pending_entropies = [], [], []
+                    pending_aux_return_losses, pending_aux_mdd_losses = [], []
 
             if pending_logprobs:
-                diag = self._update_controller_pg_batch(pending_logprobs, pending_rewards, pending_entropies)
+                diag = self._update_controller_pg_batch(
+                    pending_logprobs,
+                    pending_rewards,
+                    pending_entropies,
+                    pending_aux_return_losses,
+                    pending_aux_mdd_losses,
+                )
                 update_count += 1
                 self.logger.info(
-                    "[CTRL-PG] update=%s epoch=%s final-batch loss=%.4f reward=%.4f entropy=%.4f",
+                    "[CTRL-PG] update=%s epoch=%s final-batch loss=%.4f policy=%.4f "
+                    "ent_loss=%.4f aux_ret_w=%.4f aux_mdd_w=%.4f reward=%.4f entropy=%.4f "
+                    "aux_ret=%.4f aux_mdd=%.4f",
                     update_count, epoch + 1,
-                    diag.get("loss", 0.0), diag.get("reward_mean", 0.0), diag.get("entropy", 0.0),
+                    diag.get("loss", 0.0), diag.get("policy_loss", 0.0),
+                    diag.get("entropy_loss", 0.0),
+                    diag.get("aux_return_weighted_loss", 0.0),
+                    diag.get("aux_mdd_weighted_loss", 0.0),
+                    diag.get("reward_mean", 0.0), diag.get("entropy", 0.0),
+                    diag.get("aux_return_loss", 0.0), diag.get("aux_mdd_loss", 0.0),
                 )
                 pending_logprobs, pending_rewards, pending_entropies = [], [], []
+                pending_aux_return_losses, pending_aux_mdd_losses = [], []
 
             self.logger.info(
                 "[CTRL-PG] epoch %s/%s | reward=%.4f mdd_uplift=%.4f ret_uplift=%.4f "
@@ -1971,7 +2238,7 @@ def train_warmup_then_joint_with_monitor(trainer,
             f"### [4/4] CONTROLLER Counterfactual PG: {controller_epochs} epochs, "
             f"rollout_len={getattr(trainer.cfg, 'controller_rollout_len', fixed_cycle * 10)}, "
             f"batch_windows={getattr(trainer.cfg, 'controller_pg_batch_windows', 4)}, "
-            f"max_segments={getattr(trainer.cfg, 'controller_max_segments', 25)} ###")
+            f"max_switches={trainer._controller_max_allowed_switches(int(getattr(trainer.cfg, 'controller_rollout_len', fixed_cycle * 10)), int(getattr(trainer.cfg, 'min_hold', 10)))} ###")
         controller_val_interval = int(getattr(trainer.cfg, "controller_val_interval_epochs", val_interval))
         controller_pg_result = trainer.train_controller_counterfactual_pg(
             epochs=controller_epochs,
@@ -1992,6 +2259,206 @@ def train_warmup_then_joint_with_monitor(trainer,
         "best_ckpt": final_best_ckpt,
         "hrl_fixed_ckpt": hrl_fixed_best_ckpt,
         "controller_pg": controller_pg_result,
+    }
+
+
+def train_controller_then_joint_finetune(trainer,
+                                         controller_episodes: int,
+                                         joint_episodes: int,
+                                         fixed_cycle: int,
+                                         val_interval: int = None,
+                                         train_monitor: bool = True,
+                                         save_prefix: str = "controller_first"):
+    """Train controller on frozen Outer/Inner, then jointly finetune all modules.
+
+    This schedule is intended for runs that call load_frozen_hrl_checkpoint()
+    before entry. Joint finetune keeps fixed_cycle=None so controller decisions
+    are active during the final phase.
+    """
+    import numpy as np
+    import os
+
+    if val_interval is None:
+        val_interval = int(getattr(trainer.cfg, "val_interval", 10))
+    train_episodes_per_epoch = max(
+        1,
+        int(getattr(trainer.cfg, "train_episodes_per_epoch", getattr(trainer.cfg, "train_episode_count", 1))),
+    )
+    controller_epochs = int(controller_episodes) // train_episodes_per_epoch
+    if int(controller_episodes) % train_episodes_per_epoch != 0:
+        raise ValueError(
+            "controller_episodes must be a complete number of train epochs with "
+            f"episodes_per_epoch={train_episodes_per_epoch}."
+        )
+
+    final_best_ckpt = "best_model.pth"
+    final_last_ckpt = "last_model.pth"
+    hrl_fixed_best_ckpt = "hrl_fixed_best.pth"
+    controller_best_ckpt = "controller_best.pth"
+
+    trainer.save_model(hrl_fixed_best_ckpt)
+    trainer.logger.info("### [1/2] CONTROLLER-FIRST: saved loaded fixed HRL as %s ###", hrl_fixed_best_ckpt)
+
+    controller_pg_result = {"best_score": 0.0, "updates": 0}
+    if train_monitor and controller_epochs > 0:
+        controller_rollout_len = int(getattr(trainer.cfg, "controller_rollout_len", fixed_cycle * 10))
+        trainer.logger.info(
+            "### [1/2] CONTROLLER-FIRST Counterfactual PG: %s epochs, rollout_len=%s, "
+            "batch_windows=%s, max_switches=%s ###",
+            controller_epochs,
+            controller_rollout_len,
+            getattr(trainer.cfg, "controller_pg_batch_windows", 4),
+            trainer._controller_max_allowed_switches(
+                controller_rollout_len,
+                int(getattr(trainer.cfg, "min_hold", 10)),
+            ),
+        )
+        controller_val_interval = int(getattr(trainer.cfg, "controller_val_interval_epochs", val_interval))
+        controller_pg_result = trainer.train_controller_counterfactual_pg(
+            epochs=controller_epochs,
+            fixed_cycle=fixed_cycle,
+            val_interval=max(1, controller_val_interval),
+            save_name=controller_best_ckpt,
+        )
+        if os.path.exists(os.path.join(trainer.model_dir, controller_best_ckpt)):
+            trainer._load_model(controller_best_ckpt)
+            trainer.logger.info("   ↺ Loaded best controller before joint finetune.")
+    else:
+        trainer.logger.info("### [1/2] CONTROLLER-FIRST Counterfactual PG: skipped ###")
+
+    trainer.logger.info(
+        "### [2/2] CONTROLLER-FIRST JOINT FINETUNE: %s episodes, controller active, update_every=%s steps ###",
+        joint_episodes,
+        int(getattr(trainer.cfg, "rollout_update_steps_by_stage", {}).get(
+            "joint",
+            int(getattr(trainer.cfg, "rollout_update_steps", 0) or 0),
+        )),
+    )
+    trainer.agent.set_module_status("all")
+    joint_lr_mult = float(getattr(trainer.cfg, "joint_lr_mult", 1.0))
+    if hasattr(trainer.agent, "set_lr_multiplier"):
+        joint_lrs = trainer.agent.set_lr_multiplier(joint_lr_mult)
+        trainer.logger.info(
+            "Controller-first joint lr multiplier=%s -> monitor=%g outer=%g inner=%g",
+            joint_lr_mult,
+            joint_lrs.get("monitor", 0.0),
+            joint_lrs.get("outer", 0.0),
+            joint_lrs.get("inner", 0.0),
+        )
+
+    def _validate_joint(epoch_idx: int):
+        trainer.env.set_mode("val")
+        trainer.agent.net.eval()
+        ret_stats = trainer.run_episode(
+            trainer.env,
+            mode="eval",
+            phase="joint",
+            fixed_cycle=None,
+            use_rule_switch=False,
+        )
+        metrics = trainer._compute_metrics(ret_stats["history"])
+        score = trainer._validation_score(metrics, trainer.cfg, phase="controller")
+        trainer.env.set_mode("train")
+        trainer.agent.net.train()
+        trainer.logger.info(
+            "   >>> [VAL controller_first_joint ep=%s] select=%s score=%.4f Sharpe=%.4f Ret=%.2f%% MDD=%.2f%% switches=%s",
+            epoch_idx,
+            getattr(trainer.cfg, "controller_selection_metric", "risk_return"),
+            score,
+            metrics["sharpe"],
+            metrics["total_ret"] * 100.0,
+            metrics["max_dd"] * 100.0,
+            ret_stats.get("switch_count", 0),
+        )
+        return score, metrics
+
+    joint_single_full_episode = bool(getattr(trainer.cfg, "joint_single_full_episode", False))
+    joint_loop_count = (
+        max(1, int(getattr(trainer.cfg, "joint_epochs", max(1, joint_episodes // train_episodes_per_epoch))))
+        if joint_single_full_episode
+        else int(joint_episodes)
+    )
+    joint_update_steps = int(getattr(trainer.cfg, "rollout_update_steps_by_stage", {}).get(
+        "joint",
+        int(getattr(trainer.cfg, "rollout_update_steps", 0) or 0),
+    ))
+    best_score = -np.inf
+
+    for ep in range(max(0, joint_loop_count)):
+        if joint_single_full_episode:
+            previous = trainer._apply_train_episode_config(
+                train_episode_to_end=True,
+                train_episodes_per_epoch=1,
+                train_start_stride_days=1,
+                episode_len=getattr(trainer.env, "episode_len", max(1, int(fixed_cycle))),
+            )
+            try:
+                ret = trainer.run_episode(
+                    trainer.env,
+                    mode="train",
+                    phase="joint",
+                    fixed_cycle=None,
+                    use_rule_switch=False,
+                    rollout_update_steps=joint_update_steps,
+                    auto_update_phase="joint",
+                    train_monitor=train_monitor,
+                )
+            finally:
+                trainer._restore_train_episode_config(previous)
+        else:
+            ret = trainer.run_episode(
+                trainer.env,
+                mode="train",
+                phase="joint",
+                fixed_cycle=None,
+                use_rule_switch=False,
+                rollout_update_steps=joint_update_steps,
+                auto_update_phase="joint",
+                train_monitor=train_monitor,
+            )
+        loss = ret.get("loss_log", {})
+        trainer.logger.info(
+            "[%s] Controller-Joint %s/%s | Updates:%s L_mon:%0.3f L_out:%0.3f L_in:%0.3f",
+            save_prefix,
+            ep + 1,
+            joint_loop_count,
+            ret.get("update_count", 0),
+            loss.get("mon_pi", 0.0),
+            loss.get("out_pi", 0.0),
+            loss.get("inn_pi", 0.0),
+        )
+
+        if (ep + 1) % max(1, int(val_interval)) == 0 or (ep + 1) == joint_loop_count:
+            score, _ = _validate_joint(ep + 1)
+            if score > best_score:
+                best_score = score
+                trainer.save_model(final_best_ckpt)
+                trainer.logger.info("       (New Controller-First Joint Best: %.4f)", best_score)
+
+    if os.path.exists(os.path.join(trainer.model_dir, final_best_ckpt)):
+        trainer._load_model(final_best_ckpt)
+        trainer.logger.info("   ↺ Controller-first joint finished. Loaded best final model.")
+    else:
+        trainer.save_model(final_best_ckpt)
+    trainer.save_model(final_last_ckpt)
+    if hasattr(trainer.agent, "set_lr_multiplier"):
+        trainer.agent.set_lr_multiplier(1.0)
+
+    return {
+        "fixed_cycle": fixed_cycle,
+        "best_sharpe": float(best_score),
+        "best_selection_score": float(best_score),
+        "model_selection_metric": str(getattr(trainer.cfg, "controller_selection_metric", "risk_return")),
+        "best_ckpt": final_best_ckpt,
+        "hrl_fixed_ckpt": hrl_fixed_best_ckpt,
+        "controller_best_ckpt": controller_best_ckpt,
+        "controller_pg": controller_pg_result,
+        "joint_finetune": {
+            "best_score": float(best_score),
+            "episodes": int(joint_loop_count),
+            "controller_active": True,
+            "selection_metric": str(getattr(trainer.cfg, "controller_selection_metric", "risk_return")),
+        },
     }
 
 

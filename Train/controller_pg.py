@@ -110,11 +110,13 @@ def controller_pg_loss(
         entropy_term = episode_log_probs.new_tensor(0.0)
     else:
         entropy_term = entropies.to(device=episode_log_probs.device, dtype=episode_log_probs.dtype).view(-1).mean()
-    loss = policy_loss - float(entropy_coef) * entropy_term
+    entropy_loss = -float(entropy_coef) * entropy_term
+    loss = policy_loss + entropy_loss
     diagnostics = {
         "loss": float(loss.detach().cpu().item()),
         "policy_loss": float(policy_loss.detach().cpu().item()),
         "entropy": float(entropy_term.detach().cpu().item()),
+        "entropy_loss": float(entropy_loss.detach().cpu().item()),
         "reward_mean": float(reward_mean.detach().cpu().item()),
         "reward_std": float(reward_std.detach().cpu().item()),
     }
