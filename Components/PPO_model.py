@@ -463,6 +463,8 @@ class MonitorAC(nn.Module):
             asset_in_dim=None,
             controller_window=15,
             weight_floor=1e-6,
+            eval_switch_threshold=0.5,
+            init_exit_bias=None,
     ):
         super().__init__()
         self.z_dim = int(z_dim)
@@ -475,6 +477,7 @@ class MonitorAC(nn.Module):
         self.asset_in_dim = int(asset_in_dim) if asset_in_dim is not None else None
         self.controller_window = max(1, int(controller_window))
         self.weight_floor = max(float(weight_floor), 0.0)
+        self.eval_switch_threshold = min(1.0, max(0.0, float(eval_switch_threshold)))
 
         input_dim = self.asset_in_dim if self.asset_in_dim is not None else self.z_dim
         self.asset_lstm = nn.LSTM(
@@ -489,6 +492,7 @@ class MonitorAC(nn.Module):
             nn.GELU(),
         )
         self.state_dim = 5
+        self.action_state_dim = 3
         self.query_mlp = nn.Sequential(
             nn.Linear(hidden_dim + self.state_dim, hidden_dim),
             nn.GELU(),
@@ -506,7 +510,7 @@ class MonitorAC(nn.Module):
         self.attn2_k = nn.Linear(hidden_dim, hidden_dim)
         self.attn2_v = nn.Linear(hidden_dim, hidden_dim)
 
-        head_in = hidden_dim * 2 + self.state_dim
+        head_in = hidden_dim * 4 + self.state_dim + self.action_state_dim
         self.head_mlp = nn.Sequential(
             nn.Linear(head_in, hidden_dim),
             nn.GELU(),
@@ -522,6 +526,9 @@ class MonitorAC(nn.Module):
         self.exit_head = nn.Linear(hidden_dim, 1)
         self.return_head = nn.Linear(hidden_dim, 1)
         self.risk_head = nn.Linear(hidden_dim, 1)
+        self.switch_adv_head = nn.Linear(hidden_dim, 1)
+        if init_exit_bias is not None:
+            nn.init.constant_(self.exit_head.bias, float(init_exit_bias))
 
     @staticmethod
     def _normalize_weights(weights):
@@ -538,6 +545,12 @@ class MonitorAC(nn.Module):
         seg_return_norm = torch.tanh(port_state[:, 2:3] / self.ret_scale)
         concentration = torch.sum(hold_weights.pow(2), dim=1, keepdim=True)
         return torch.cat([time_norm, remaining_norm, seg_return_norm, drawdown_norm, concentration], dim=-1)
+
+    def _switch_action_features(self, hold_weights, switch_weights):
+        turnover = torch.sum(torch.abs(switch_weights - hold_weights), dim=1, keepdim=True)
+        switch_concentration = torch.sum(switch_weights.pow(2), dim=1, keepdim=True)
+        overlap = torch.sum(torch.minimum(hold_weights, switch_weights), dim=1, keepdim=True)
+        return torch.cat([turnover, switch_concentration, overlap], dim=-1)
 
     def _encode_asset_sequence(self, asset_state, z, h):
         if asset_state is None:
@@ -589,10 +602,13 @@ class MonitorAC(nn.Module):
     ):
         asset_seq = self._encode_asset_sequence(asset_state, z, h)
         hold_weights = self._soft_hold_weights(weights_drift)
+        switch_weights = self._soft_hold_weights(switch_action) if switch_action is not None else hold_weights
 
         last_emb = asset_seq[:, :, -1, :]
         portfolio_last = torch.sum(last_emb * hold_weights.unsqueeze(-1), dim=1)
+        switch_last = torch.sum(last_emb * switch_weights.unsqueeze(-1), dim=1)
         state5 = self._state_features(port_state, hold_weights)
+        action_state = self._switch_action_features(hold_weights, switch_weights)
 
         query = self.query_mlp(torch.cat([portfolio_last, state5], dim=-1))
         asset_ctx1 = self._temporal_attention_global(
@@ -606,8 +622,16 @@ class MonitorAC(nn.Module):
             query2, asset_seq, self.attn2_q, self.attn2_k, self.attn2_v
         )
         portfolio_ctx = torch.sum(asset_ctx2 * hold_weights.unsqueeze(-1), dim=1)
+        switch_ctx = torch.sum(asset_ctx2 * switch_weights.unsqueeze(-1), dim=1)
 
-        value_feat = torch.cat([portfolio_last, portfolio_ctx, state5], dim=-1)
+        value_feat = torch.cat([
+            portfolio_last,
+            portfolio_ctx,
+            switch_last - portfolio_last,
+            switch_ctx - portfolio_ctx,
+            state5,
+            action_state,
+        ], dim=-1)
         head = self.head_mlp(value_feat)
         exit_logit = self.exit_head(head).squeeze(-1)
         exit_prob = torch.sigmoid(exit_logit).clamp(1e-6, 1.0 - 1e-6)
@@ -621,6 +645,7 @@ class MonitorAC(nn.Module):
             "tau": torch.full_like(exit_prob, 0.5),
             "hold_return_pred": self.return_head(head).squeeze(-1),
             "hold_risk_pred": self.risk_head(head).squeeze(-1),
+            "switch_advantage_pred": self.switch_adv_head(head).squeeze(-1),
             "value": value,
             "value_feat": value_feat,
         }
@@ -641,7 +666,7 @@ class MonitorAC(nn.Module):
         zeros = torch.zeros_like(stats["policy_logit"])
         logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
         dist = Categorical(logits=logits)
-        action = (stats["exit_prob"] > 0.5).long() if deterministic else dist.sample()
+        action = (stats["exit_prob"] > self.eval_switch_threshold).long() if deterministic else dist.sample()
         log_prob = dist.log_prob(action)
         entropy = dist.entropy().mean()
         return action, log_prob, entropy, logits
@@ -662,7 +687,7 @@ class MonitorAC(nn.Module):
         zeros = torch.zeros_like(stats["policy_logit"])
         logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
         dist = Categorical(logits=logits)
-        action = (stats["exit_prob"] > 0.5).long() if deterministic else dist.sample()
+        action = (stats["exit_prob"] > self.eval_switch_threshold).long() if deterministic else dist.sample()
         log_prob = dist.log_prob(action)
         entropy = dist.entropy().mean()
         v = stats["value"]

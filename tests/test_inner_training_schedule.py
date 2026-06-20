@@ -79,6 +79,20 @@ class InnerTrainingScheduleTests(unittest.TestCase):
         self.assertEqual(len(starts), 180)
         self.assertTrue(all(start + 600 <= 3730 for start in starts))
 
+    def test_fixed_train_pool_stride_subsamples_within_offset_window(self):
+        starts = PPO_Env._build_fixed_train_pool(
+            raw_indices=list(range(100, 3730)),
+            total_days=4300,
+            episode_len=600,
+            stride_days=5,
+            start_offsets=30,
+        )
+
+        self.assertEqual(starts[:8], [100, 700, 1300, 1900, 2500, 3100, 105, 705])
+        self.assertEqual(len(starts), 36)
+        self.assertIn(125, starts)
+        self.assertNotIn(130, starts)
+
 
 class DummyBatchBuffer:
     def __init__(self):

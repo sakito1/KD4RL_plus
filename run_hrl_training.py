@@ -24,6 +24,7 @@ from Train.PPO_train import (
     HRL_Networks,
     HRL_Trainer,
     set_seed,
+    train_controller_only_from_frozen,
     train_controller_then_joint_finetune,
     train_warmup_then_joint_with_monitor,
 )
@@ -136,6 +137,11 @@ def parse_args():
             "Run the controller-first schedule: load frozen outer/inner, train controller, "
             "then jointly finetune controller/outer/inner."
         ),
+    )
+    parser.add_argument(
+        "--controller_only_finetune",
+        action="store_true",
+        help="Load frozen outer/inner and train only the controller; no outer/inner joint finetune.",
     )
     parser.add_argument("--warmup_outer_episodes", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--warmup_inner_episodes", type=int, default=None, help=argparse.SUPPRESS)
@@ -320,6 +326,18 @@ def parse_args():
     )
     parser.add_argument("--controller_sup_coef", type=float, default=0.0)
     parser.add_argument(
+        "--controller_use_switch_supervision",
+        action="store_true",
+        help=(
+            "Legacy option: train switch head with environment-provided switch labels. "
+            "Default off so switch decisions are learned end-to-end by controller PG."
+        ),
+    )
+    parser.add_argument("--controller_sup_pretrain_epochs", type=int, default=0)
+    parser.add_argument("--controller_sup_pretrain_rollout_len", type=int, default=0)
+    parser.add_argument("--controller_aux_pretrain_offpolicy", action="store_true")
+    parser.add_argument("--controller_aux_replay_epochs", type=int, default=1)
+    parser.add_argument(
         "--controller_check_stride_days",
         type=int,
         default=1,
@@ -337,28 +355,67 @@ def parse_args():
     parser.add_argument("--reward_scale_inner", type=float, default=2000.0)
     parser.add_argument("--reward_scale_controller", type=float, default=100.0)
     parser.add_argument("--controller_algorithm", choices=["pg"], default="pg")
+    parser.add_argument("--controller_decision_mode", choices=["daily", "fixed_window", "stride"], default="daily")
+    parser.add_argument("--controller_eval_decision_mode", choices=["daily", "fixed_window", "stride"], default=None)
+    parser.add_argument("--controller_decision_stride", type=int, default=1)
+    parser.add_argument("--controller_eval_decision_stride", type=int, default=0)
+    parser.add_argument("--controller_decision_stride_schedule", nargs="*", type=int, default=None)
+    parser.add_argument("--controller_fixed_decision_window", type=int, default=0)
     parser.add_argument(
         "--controller_no_hold_constraints",
         action="store_true",
         help=(
-            "Disable min-hold/max-hold timing constraints for trainable controller decisions, "
-            "while still respecting controller_max_switches. The first step still switches."
+            "Disable min-hold for trainable controller decisions. max_hold remains a hard forced-switch "
+            "boundary; controller_max_switches is used as a soft reward-penalty threshold."
         ),
     )
     parser.add_argument("--controller_rollout_len", type=int, default=400)
     parser.add_argument("--controller_max_segments", type=int, default=25)
     parser.add_argument("--controller_pg_batch_windows", type=int, default=4)
+    parser.add_argument(
+        "--controller_pg_logprob_reduction",
+        choices=["mean", "sum"],
+        default="mean",
+        help=(
+            "How to reduce controller action log-probs inside one episode. "
+            "'mean' preserves legacy behavior; 'sum' uses trajectory PG over all controller decisions."
+        ),
+    )
     parser.add_argument("--controller_windows_per_epoch", type=int, default=5)
+    parser.add_argument("--controller_fixed_pool_limit", type=int, default=0)
     parser.add_argument("--controller_train_fixed_episodes", action="store_true")
     parser.add_argument("--controller_episode_batch_size", type=int, default=4)
     parser.add_argument("--controller_episode_parallel_workers", type=int, default=1)
     parser.add_argument("--controller_start_stride_days", type=int, default=40)
     parser.add_argument("--controller_window", type=int, default=15)
+    parser.add_argument("--controller_hidden_dim", type=int, default=32)
+    parser.add_argument("--controller_init_exit_bias", type=float, default=None)
     parser.add_argument("--controller_entropy_coef", type=float, default=0.01)
     parser.add_argument("--controller_aux_return_coef", type=float, default=0.0)
     parser.add_argument("--controller_aux_mdd_coef", type=float, default=0.0)
+    parser.add_argument("--controller_aux_switch_adv_coef", type=float, default=0.0)
     parser.add_argument("--controller_aux_return_target_scale", type=float, default=1.0)
     parser.add_argument("--controller_aux_mdd_target_scale", type=float, default=1.0)
+    parser.add_argument("--controller_aux_switch_adv_target_scale", type=float, default=1.0)
+    parser.add_argument("--controller_local_adv_coef", type=float, default=0.0)
+    parser.add_argument("--controller_local_adv_scale", type=float, default=0.05)
+    parser.add_argument("--controller_local_adv_clip", type=float, default=10.0)
+    parser.add_argument("--controller_local_adv_margin", type=float, default=0.0)
+    parser.add_argument(
+        "--controller_local_adv_loss_type",
+        choices=["linear", "weighted_bce"],
+        default="linear",
+    )
+    parser.add_argument("--controller_local_adv_balance_classes", action="store_true")
+    parser.add_argument("--controller_expected_switch_penalty_coef", type=float, default=0.0)
+    parser.add_argument("--controller_value_coef", type=float, default=0.0)
+    parser.add_argument(
+        "--no_controller_value_normalize_advantage",
+        dest="controller_value_normalize_advantage",
+        action="store_false",
+        help="Use raw reward-value residuals for controller actor-critic instead of normalized residuals.",
+    )
+    parser.set_defaults(controller_value_normalize_advantage=True)
     parser.add_argument("--controller_mdd_coef", type=float, default=0.0)
     parser.add_argument("--controller_return_coef", type=float, default=1.0)
     parser.add_argument("--controller_count_min", type=int, default=0)
@@ -379,9 +436,15 @@ def parse_args():
     parser.add_argument("--controller_switch_coef", type=float, default=0.0)
     parser.add_argument("--controller_turnover_coef", type=float, default=0.0)
     parser.add_argument("--controller_val_interval_epochs", type=int, default=1)
+    parser.add_argument("--controller_skip_val", action="store_true")
     parser.add_argument("--controller_tau_min", type=float, default=0.5)
     parser.add_argument("--controller_tau_max", type=float, default=0.9)
     parser.add_argument("--controller_policy_temperature", type=float, default=10.0)
+    parser.add_argument("--controller_eval_switch_threshold", type=float, default=0.5)
+    parser.add_argument("--controller_eval_force_max_hold", action="store_true")
+    parser.add_argument("--controller_eval_diagnostics", action="store_true")
+    parser.add_argument("--controller_eval_diag_thresholds", nargs="*", type=float, default=None)
+    parser.add_argument("--controller_test_thresholds", nargs="*", type=float, default=None)
     parser.add_argument("--controller_state_return_scale", type=float, default=0.05)
     parser.add_argument("--controller_state_drawdown_scale", type=float, default=0.10)
     parser.add_argument(
@@ -463,6 +526,9 @@ def parse_args():
     parser.add_argument("--device", default="cuda", help="Device string for training. Default: cuda if available.")
     parser.add_argument("--cpu", action="store_true", help="Force CPU by hiding CUDA devices.")
     parser.add_argument("--skip_test", action="store_true", help="Train only; skip trainer.test after training.")
+    parser.add_argument("--test_only_checkpoint", default=None, help="Skip training and only run trainer.test on this checkpoint.")
+    parser.add_argument("--test_skip_fixed_scenarios", action="store_true")
+    parser.add_argument("--test_max_days", type=int, default=0, help="Optional cap on test episode length for fast diagnostics; 0 uses the full test range.")
     parser.add_argument(
         "--heartbeat_seconds",
         type=int,
@@ -626,6 +692,7 @@ def normalize_training_schedule(args):
     args.controller_episode_parallel_workers = max(1, int(args.controller_episode_parallel_workers))
     args.controller_start_stride_days = max(1, int(args.controller_start_stride_days))
     args.controller_window = max(1, int(args.controller_window))
+    args.controller_hidden_dim = max(1, int(args.controller_hidden_dim))
     args.controller_val_interval_epochs = (
         None if args.controller_val_interval_epochs is None
         else max(1, int(args.controller_val_interval_epochs))
@@ -819,6 +886,12 @@ def build_child_command(args, market, run_root, seed):
         str(args.inner_start_stride_days),
         "--controller_sup_coef",
         str(args.controller_sup_coef),
+        "--controller_sup_pretrain_epochs",
+        str(args.controller_sup_pretrain_epochs),
+        "--controller_sup_pretrain_rollout_len",
+        str(args.controller_sup_pretrain_rollout_len),
+        "--controller_aux_replay_epochs",
+        str(args.controller_aux_replay_epochs),
         "--controller_check_stride_days",
         str(args.controller_check_stride_days),
         "--reward_scale_outer",
@@ -829,14 +902,26 @@ def build_child_command(args, market, run_root, seed):
         str(args.reward_scale_controller),
         "--controller_algorithm",
         str(args.controller_algorithm),
+        "--controller_decision_mode",
+        str(args.controller_decision_mode),
+        "--controller_decision_stride",
+        str(args.controller_decision_stride),
+        "--controller_eval_decision_stride",
+        str(args.controller_eval_decision_stride),
+        "--controller_fixed_decision_window",
+        str(args.controller_fixed_decision_window),
         "--controller_rollout_len",
         str(args.controller_rollout_len),
         "--controller_max_segments",
         str(args.controller_max_segments),
         "--controller_pg_batch_windows",
         str(args.controller_pg_batch_windows),
+        "--controller_pg_logprob_reduction",
+        str(args.controller_pg_logprob_reduction),
         "--controller_windows_per_epoch",
         str(args.controller_windows_per_epoch),
+        "--controller_fixed_pool_limit",
+        str(args.controller_fixed_pool_limit),
         "--controller_episode_batch_size",
         str(args.controller_episode_batch_size),
         "--controller_episode_parallel_workers",
@@ -845,16 +930,36 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_start_stride_days),
         "--controller_window",
         str(args.controller_window),
+        "--controller_hidden_dim",
+        str(args.controller_hidden_dim),
         "--controller_entropy_coef",
         str(args.controller_entropy_coef),
         "--controller_aux_return_coef",
         str(args.controller_aux_return_coef),
         "--controller_aux_mdd_coef",
         str(args.controller_aux_mdd_coef),
+        "--controller_aux_switch_adv_coef",
+        str(args.controller_aux_switch_adv_coef),
         "--controller_aux_return_target_scale",
         str(args.controller_aux_return_target_scale),
         "--controller_aux_mdd_target_scale",
         str(args.controller_aux_mdd_target_scale),
+        "--controller_aux_switch_adv_target_scale",
+        str(args.controller_aux_switch_adv_target_scale),
+        "--controller_local_adv_coef",
+        str(args.controller_local_adv_coef),
+        "--controller_local_adv_scale",
+        str(args.controller_local_adv_scale),
+        "--controller_local_adv_clip",
+        str(args.controller_local_adv_clip),
+        "--controller_local_adv_margin",
+        str(args.controller_local_adv_margin),
+        "--controller_local_adv_loss_type",
+        str(args.controller_local_adv_loss_type),
+        "--controller_expected_switch_penalty_coef",
+        str(args.controller_expected_switch_penalty_coef),
+        "--controller_value_coef",
+        str(args.controller_value_coef),
         "--controller_mdd_coef",
         str(args.controller_mdd_coef),
         "--controller_return_coef",
@@ -877,6 +982,8 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_tau_max),
         "--controller_policy_temperature",
         str(args.controller_policy_temperature),
+        "--controller_eval_switch_threshold",
+        str(args.controller_eval_switch_threshold),
         "--controller_state_return_scale",
         str(args.controller_state_return_scale),
         "--controller_state_drawdown_scale",
@@ -895,6 +1002,8 @@ def build_child_command(args, market, run_root, seed):
         str(args.train_start_stride_days),
         "--device",
         str(args.device),
+        "--test_max_days",
+        str(args.test_max_days),
     ]
     ssm_data_path = args.ssm_data_path
     if ssm_data_path is None:
@@ -912,6 +1021,18 @@ def build_child_command(args, market, run_root, seed):
         cmd.extend(["--controller_turnover_coef", str(args.controller_turnover_coef)])
     if args.controller_val_interval_epochs is not None:
         cmd.extend(["--controller_val_interval_epochs", str(args.controller_val_interval_epochs)])
+    if args.controller_skip_val:
+        cmd.append("--controller_skip_val")
+    if args.controller_use_switch_supervision:
+        cmd.append("--controller_use_switch_supervision")
+    if args.controller_aux_pretrain_offpolicy:
+        cmd.append("--controller_aux_pretrain_offpolicy")
+    if args.controller_local_adv_balance_classes:
+        cmd.append("--controller_local_adv_balance_classes")
+    if not args.controller_value_normalize_advantage:
+        cmd.append("--no_controller_value_normalize_advantage")
+    if args.controller_init_exit_bias is not None:
+        cmd.extend(["--controller_init_exit_bias", str(args.controller_init_exit_bias)])
     if args.controller_no_hold_constraints:
         cmd.append("--controller_no_hold_constraints")
     if args.controller_train_fixed_episodes:
@@ -920,6 +1041,8 @@ def build_child_command(args, market, run_root, seed):
         cmd.extend(["--frozen_hrl_checkpoint", str(args.frozen_hrl_checkpoint)])
     if args.controller_first_joint_finetune:
         cmd.append("--controller_first_joint_finetune")
+    if args.controller_only_finetune:
+        cmd.append("--controller_only_finetune")
     if not args.train_episode_to_end:
         cmd.append("--no_train_episode_to_end")
     if args.inner_train_fixed_episodes:
@@ -938,6 +1061,25 @@ def build_child_command(args, market, run_root, seed):
         cmd.append("--cpu")
     if args.skip_test:
         cmd.append("--skip_test")
+    if args.test_only_checkpoint:
+        cmd.extend(["--test_only_checkpoint", str(args.test_only_checkpoint)])
+    if args.test_skip_fixed_scenarios:
+        cmd.append("--test_skip_fixed_scenarios")
+    if args.controller_test_thresholds:
+        cmd.append("--controller_test_thresholds")
+        cmd.extend(str(x) for x in args.controller_test_thresholds)
+    if args.controller_decision_stride_schedule:
+        cmd.append("--controller_decision_stride_schedule")
+        cmd.extend(str(x) for x in args.controller_decision_stride_schedule)
+    if args.controller_eval_decision_mode:
+        cmd.extend(["--controller_eval_decision_mode", str(args.controller_eval_decision_mode)])
+    if args.controller_eval_force_max_hold:
+        cmd.append("--controller_eval_force_max_hold")
+    if args.controller_eval_diagnostics:
+        cmd.append("--controller_eval_diagnostics")
+    if args.controller_eval_diag_thresholds:
+        cmd.append("--controller_eval_diag_thresholds")
+        cmd.extend(str(x) for x in args.controller_eval_diag_thresholds)
     return cmd
 
 
@@ -975,6 +1117,10 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.inner_train_episodes_per_epoch = int(args.inner_train_episodes_per_epoch)
     runtime_config.inner_train_start_stride_days = int(args.inner_start_stride_days)
     runtime_config.controller_sup_coef = float(args.controller_sup_coef)
+    runtime_config.controller_use_switch_supervision = bool(args.controller_use_switch_supervision)
+    runtime_config.controller_sup_pretrain_epochs = max(0, int(args.controller_sup_pretrain_epochs))
+    runtime_config.controller_sup_pretrain_rollout_len = max(0, int(args.controller_sup_pretrain_rollout_len))
+    runtime_config.controller_aux_pretrain_offpolicy = bool(args.controller_aux_pretrain_offpolicy)
     runtime_config.controller_check_stride_days = max(1, int(args.controller_check_stride_days))
     runtime_config.controller_no_hold_constraints = bool(args.controller_no_hold_constraints)
     runtime_config.clear_cuda_cache_on_update = bool(args.clear_cuda_cache_on_update)
@@ -983,20 +1129,56 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.reward_scale_monitor = float(args.reward_scale_controller)
     runtime_config.reward_scale_controller = float(args.reward_scale_controller)
     runtime_config.controller_algorithm = str(args.controller_algorithm)
+    runtime_config.controller_decision_mode = str(args.controller_decision_mode)
+    runtime_config.controller_eval_decision_mode = (
+        str(args.controller_eval_decision_mode)
+        if args.controller_eval_decision_mode
+        else None
+    )
+    runtime_config.controller_decision_stride = max(1, int(args.controller_decision_stride))
+    runtime_config.controller_eval_decision_stride = max(0, int(args.controller_eval_decision_stride))
+    runtime_config.controller_decision_stride_schedule = (
+        [max(1, int(x)) for x in args.controller_decision_stride_schedule]
+        if args.controller_decision_stride_schedule
+        else None
+    )
+    runtime_config.controller_fixed_decision_window = max(0, int(args.controller_fixed_decision_window))
     runtime_config.controller_rollout_len = int(args.controller_rollout_len)
     runtime_config.controller_max_segments = int(args.controller_max_segments)
     runtime_config.controller_pg_batch_windows = int(args.controller_pg_batch_windows)
+    runtime_config.controller_pg_logprob_reduction = str(args.controller_pg_logprob_reduction)
     runtime_config.controller_windows_per_epoch = int(args.controller_windows_per_epoch)
+    runtime_config.controller_fixed_pool_limit = max(0, int(args.controller_fixed_pool_limit))
     runtime_config.controller_train_fixed_episodes = bool(args.controller_train_fixed_episodes)
     runtime_config.controller_episode_batch_size = int(args.controller_episode_batch_size)
     runtime_config.controller_episode_parallel_workers = int(args.controller_episode_parallel_workers)
     runtime_config.controller_start_stride_days = int(args.controller_start_stride_days)
     runtime_config.controller_window = int(args.controller_window)
+    runtime_config.controller_hidden_dim = int(args.controller_hidden_dim)
+    runtime_config.controller_init_exit_bias = (
+        None if args.controller_init_exit_bias is None else float(args.controller_init_exit_bias)
+    )
     runtime_config.controller_entropy_coef = float(args.controller_entropy_coef)
     runtime_config.controller_aux_return_coef = float(args.controller_aux_return_coef)
     runtime_config.controller_aux_mdd_coef = float(args.controller_aux_mdd_coef)
+    runtime_config.controller_aux_switch_adv_coef = float(args.controller_aux_switch_adv_coef)
     runtime_config.controller_aux_return_target_scale = float(args.controller_aux_return_target_scale)
     runtime_config.controller_aux_mdd_target_scale = float(args.controller_aux_mdd_target_scale)
+    runtime_config.controller_aux_switch_adv_target_scale = float(args.controller_aux_switch_adv_target_scale)
+    runtime_config.controller_aux_replay_epochs = max(1, int(args.controller_aux_replay_epochs))
+    runtime_config.controller_local_adv_coef = float(args.controller_local_adv_coef)
+    runtime_config.controller_local_adv_scale = max(1e-8, float(args.controller_local_adv_scale))
+    runtime_config.controller_local_adv_clip = max(0.0, float(args.controller_local_adv_clip))
+    runtime_config.controller_local_adv_margin = max(0.0, float(args.controller_local_adv_margin))
+    runtime_config.controller_local_adv_loss_type = str(args.controller_local_adv_loss_type)
+    runtime_config.controller_local_adv_balance_classes = bool(args.controller_local_adv_balance_classes)
+    runtime_config.controller_expected_switch_penalty_coef = max(0.0, float(args.controller_expected_switch_penalty_coef))
+    runtime_config.controller_value_coef = max(0.0, float(args.controller_value_coef))
+    runtime_config.controller_value_normalize_advantage = bool(args.controller_value_normalize_advantage)
+    runtime_config.controller_compute_switch_advantage = (
+        runtime_config.controller_local_adv_coef > 0.0
+        or runtime_config.controller_aux_switch_adv_coef > 0.0
+    )
     runtime_config.controller_mdd_coef = float(args.controller_mdd_coef)
     runtime_config.controller_return_coef = float(args.controller_return_coef)
     runtime_config.controller_count_min = int(args.controller_count_min)
@@ -1008,6 +1190,21 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.controller_tau_min = float(args.controller_tau_min)
     runtime_config.controller_tau_max = float(args.controller_tau_max)
     runtime_config.controller_policy_temperature = float(args.controller_policy_temperature)
+    runtime_config.controller_eval_switch_threshold = min(1.0, max(0.0, float(args.controller_eval_switch_threshold)))
+    runtime_config.controller_eval_force_max_hold = bool(args.controller_eval_force_max_hold)
+    runtime_config.controller_eval_diagnostics = bool(args.controller_eval_diagnostics)
+    runtime_config.controller_eval_diag_thresholds = (
+        [min(1.0, max(0.0, float(x))) for x in args.controller_eval_diag_thresholds]
+        if args.controller_eval_diag_thresholds
+        else None
+    )
+    runtime_config.controller_test_thresholds = (
+        [min(1.0, max(0.0, float(x))) for x in args.controller_test_thresholds]
+        if args.controller_test_thresholds
+        else None
+    )
+    runtime_config.test_max_days = max(0, int(args.test_max_days))
+    runtime_config.test_skip_fixed_scenarios = bool(args.test_skip_fixed_scenarios)
     runtime_config.controller_state_return_scale = float(args.controller_state_return_scale)
     runtime_config.controller_state_drawdown_scale = float(args.controller_state_drawdown_scale)
     runtime_config.model_selection_metric = str(args.model_selection_metric)
@@ -1021,6 +1218,7 @@ def set_runtime_training_args(args, market_root, seed):
         runtime_config.controller_val_interval_epochs = int(args.controller_val_interval_epochs)
     elif hasattr(runtime_config, "controller_val_interval_epochs"):
         delattr(runtime_config, "controller_val_interval_epochs")
+    runtime_config.controller_skip_val = bool(args.controller_skip_val)
     runtime_config.controller_sup_horizon = int(args.min_hold)
     runtime_config.train_monitor_enabled = bool(args.train_monitor)
     runtime_config.use_rule_switch_train = False
@@ -1108,6 +1306,7 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "joint_lr_mult": args.joint_lr_mult,
             "frozen_hrl_checkpoint": args.frozen_hrl_checkpoint,
             "controller_first_joint_finetune": args.controller_first_joint_finetune,
+            "controller_only_finetune": args.controller_only_finetune,
             "inner_batch_size": args.inner_batch_size,
             "outer_update_batch_size": args.outer_update_batch_size,
             "trade_num": args.trade_num,
@@ -1120,23 +1319,49 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "inner_feature_gate": False,
             "inner_norm_mode": args.inner_norm_mode,
             "controller_sup_coef": args.controller_sup_coef,
+            "controller_use_switch_supervision": getattr(runtime_config, "controller_use_switch_supervision", None),
+            "controller_sup_pretrain_epochs": getattr(runtime_config, "controller_sup_pretrain_epochs", None),
+            "controller_sup_pretrain_rollout_len": getattr(runtime_config, "controller_sup_pretrain_rollout_len", None),
+            "controller_aux_pretrain_offpolicy": getattr(runtime_config, "controller_aux_pretrain_offpolicy", None),
             "controller_check_stride_days": getattr(runtime_config, "controller_check_stride_days", None),
             "controller_no_hold_constraints": getattr(runtime_config, "controller_no_hold_constraints", None),
             "controller_algorithm": getattr(runtime_config, "controller_algorithm", None),
+            "controller_decision_mode": getattr(runtime_config, "controller_decision_mode", None),
+            "controller_eval_decision_mode": getattr(runtime_config, "controller_eval_decision_mode", None),
+            "controller_decision_stride": getattr(runtime_config, "controller_decision_stride", None),
+            "controller_fixed_pool_limit": getattr(runtime_config, "controller_fixed_pool_limit", None),
+            "controller_eval_decision_stride": getattr(runtime_config, "controller_eval_decision_stride", None),
+            "controller_decision_stride_schedule": getattr(runtime_config, "controller_decision_stride_schedule", None),
+            "controller_fixed_decision_window": getattr(runtime_config, "controller_fixed_decision_window", None),
             "controller_rollout_len": getattr(runtime_config, "controller_rollout_len", None),
             "controller_max_segments": getattr(runtime_config, "controller_max_segments", None),
             "controller_pg_batch_windows": getattr(runtime_config, "controller_pg_batch_windows", None),
+            "controller_pg_logprob_reduction": getattr(runtime_config, "controller_pg_logprob_reduction", None),
             "controller_windows_per_epoch": getattr(runtime_config, "controller_windows_per_epoch", None),
             "controller_train_fixed_episodes": getattr(runtime_config, "controller_train_fixed_episodes", None),
             "controller_episode_batch_size": getattr(runtime_config, "controller_episode_batch_size", None),
             "controller_episode_parallel_workers": getattr(runtime_config, "controller_episode_parallel_workers", None),
             "controller_start_stride_days": getattr(runtime_config, "controller_start_stride_days", None),
             "controller_window": getattr(runtime_config, "controller_window", None),
+            "controller_hidden_dim": getattr(runtime_config, "controller_hidden_dim", None),
+            "controller_init_exit_bias": getattr(runtime_config, "controller_init_exit_bias", None),
             "controller_entropy_coef": getattr(runtime_config, "controller_entropy_coef", None),
             "controller_aux_return_coef": getattr(runtime_config, "controller_aux_return_coef", None),
             "controller_aux_mdd_coef": getattr(runtime_config, "controller_aux_mdd_coef", None),
+            "controller_aux_switch_adv_coef": getattr(runtime_config, "controller_aux_switch_adv_coef", None),
             "controller_aux_return_target_scale": getattr(runtime_config, "controller_aux_return_target_scale", None),
             "controller_aux_mdd_target_scale": getattr(runtime_config, "controller_aux_mdd_target_scale", None),
+            "controller_aux_switch_adv_target_scale": getattr(runtime_config, "controller_aux_switch_adv_target_scale", None),
+            "controller_aux_replay_epochs": getattr(runtime_config, "controller_aux_replay_epochs", None),
+            "controller_local_adv_coef": getattr(runtime_config, "controller_local_adv_coef", None),
+            "controller_local_adv_scale": getattr(runtime_config, "controller_local_adv_scale", None),
+            "controller_local_adv_clip": getattr(runtime_config, "controller_local_adv_clip", None),
+            "controller_local_adv_margin": getattr(runtime_config, "controller_local_adv_margin", None),
+            "controller_local_adv_loss_type": getattr(runtime_config, "controller_local_adv_loss_type", None),
+            "controller_local_adv_balance_classes": getattr(runtime_config, "controller_local_adv_balance_classes", None),
+            "controller_expected_switch_penalty_coef": getattr(runtime_config, "controller_expected_switch_penalty_coef", None),
+            "controller_value_coef": getattr(runtime_config, "controller_value_coef", None),
+            "controller_value_normalize_advantage": getattr(runtime_config, "controller_value_normalize_advantage", None),
             "controller_mdd_coef": getattr(runtime_config, "controller_mdd_coef", None),
             "controller_return_coef": getattr(runtime_config, "controller_return_coef", None),
             "controller_count_min": getattr(runtime_config, "controller_count_min", None),
@@ -1147,9 +1372,16 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "controller_switch_coef": getattr(runtime_config, "controller_switch_coef", None),
             "controller_turnover_coef": getattr(runtime_config, "controller_turnover_coef", None),
             "controller_val_interval_epochs": getattr(runtime_config, "controller_val_interval_epochs", None),
+            "controller_skip_val": getattr(runtime_config, "controller_skip_val", None),
             "controller_tau_min": getattr(runtime_config, "controller_tau_min", None),
             "controller_tau_max": getattr(runtime_config, "controller_tau_max", None),
             "controller_policy_temperature": getattr(runtime_config, "controller_policy_temperature", None),
+            "controller_eval_switch_threshold": getattr(runtime_config, "controller_eval_switch_threshold", None),
+            "controller_eval_force_max_hold": getattr(runtime_config, "controller_eval_force_max_hold", None),
+            "controller_eval_diagnostics": getattr(runtime_config, "controller_eval_diagnostics", None),
+            "controller_eval_diag_thresholds": getattr(runtime_config, "controller_eval_diag_thresholds", None),
+            "controller_test_thresholds": getattr(runtime_config, "controller_test_thresholds", None),
+            "test_max_days": getattr(runtime_config, "test_max_days", None),
             "controller_state_return_scale": getattr(runtime_config, "controller_state_return_scale", None),
             "controller_state_drawdown_scale": getattr(runtime_config, "controller_state_drawdown_scale", None),
             "model_selection_metric": getattr(runtime_config, "model_selection_metric", None),
@@ -1269,8 +1501,9 @@ def run_child(args):
         getattr(runtime_config, "controller_selection_metric", "risk_return"),
     )
     logger.info(
-        "Controller policy: %s, sup_coef=%s, check_stride_days=%s",
+        "Controller policy: %s, switch_sup=%s, sup_coef=%s, check_stride_days=%s",
         "counterfactual PG controller" if runtime_config.train_monitor_enabled else "forced hold/switch constraints only",
+        getattr(runtime_config, "controller_use_switch_supervision", False),
         getattr(runtime_config, "controller_sup_coef", None),
         getattr(runtime_config, "controller_check_stride_days", None),
     )
@@ -1324,6 +1557,20 @@ def run_child(args):
             f"{len(env.train_indices_pool)} != {args.train_episodes_per_epoch}"
         )
 
+    if args.test_only_checkpoint:
+        checkpoint_path = Path(args.test_only_checkpoint).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Test checkpoint not found: {checkpoint_path}")
+        trainer.test(str(checkpoint_path))
+        result = {"best_ckpt": str(checkpoint_path), "test_only": True}
+        with (market_root / f"seed_{args.seed}_train_result.json").open("w", encoding="utf-8") as fh:
+            json.dump(result, fh, ensure_ascii=False, indent=2)
+        logger.info("HRL test-only completed: %s", result)
+        return
+
+    if args.controller_first_joint_finetune and args.controller_only_finetune:
+        raise ValueError("--controller_first_joint_finetune and --controller_only_finetune are mutually exclusive.")
+
     if args.controller_first_joint_finetune:
         if not args.frozen_hrl_checkpoint:
             raise ValueError("--controller_first_joint_finetune requires --frozen_hrl_checkpoint.")
@@ -1340,6 +1587,24 @@ def run_child(args):
             train_monitor=runtime_config.train_monitor_enabled,
             save_prefix=(
                 f"ctrl_first_{args.market}_seed{args.seed}_"
+                f"op{_coef_tag(args.outer_pred_coef)}_ip{_coef_tag(args.inner_pred_coef)}"
+            ),
+        )
+    elif args.controller_only_finetune:
+        if not args.frozen_hrl_checkpoint:
+            raise ValueError("--controller_only_finetune requires --frozen_hrl_checkpoint.")
+        checkpoint_path = Path(args.frozen_hrl_checkpoint).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Frozen HRL checkpoint not found: {checkpoint_path}")
+        trainer.load_frozen_hrl_checkpoint(str(checkpoint_path))
+        result = train_controller_only_from_frozen(
+            trainer,
+            controller_episodes=stage_episode_total(args, "warmup_monitor"),
+            fixed_cycle=fixed_cycle,
+            val_interval=args.val_interval,
+            train_monitor=runtime_config.train_monitor_enabled,
+            save_prefix=(
+                f"ctrl_only_{args.market}_seed{args.seed}_"
                 f"op{_coef_tag(args.outer_pred_coef)}_ip{_coef_tag(args.inner_pred_coef)}"
             ),
         )

@@ -284,6 +284,7 @@ class ActorScoreSupervisionTests(unittest.TestCase):
         env.reward_scale_inner = 1.0
         env.reward_scale_controller = 1.0
         env.controller_sup_enabled = False
+        env.controller_switch_advantage_enabled = True
         env.portfolio_value = torch.tensor(1.0)
         env.prev_weights = torch.tensor([0.5, 0.5, 0.0], dtype=torch.float32)
         env.prev_base_weight = env.prev_weights.clone()
@@ -306,6 +307,56 @@ class ActorScoreSupervisionTests(unittest.TestCase):
         _, _, _, info = env.step(
             torch.tensor([0.5, 0.5, 0.0], dtype=torch.float32),
             torch.tensor([0.5, 0.5, 0.0], dtype=torch.float32),
+            outer_action=torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32),
+            is_switch=False,
+        )
+
+        expected_return = torch.log(torch.tensor(0.995, dtype=torch.float32))
+        expected_mdd = torch.tensor(0.05, dtype=torch.float32)
+        expected_switch_advantage = torch.log(torch.tensor(1.0, dtype=torch.float32)) - expected_return
+        torch.testing.assert_close(info["controller_hold_return_target"], expected_return)
+        torch.testing.assert_close(info["controller_hold_mdd_target"], expected_mdd)
+        torch.testing.assert_close(info["controller_switch_advantage"], expected_switch_advantage)
+
+    def test_env_skips_switch_advantage_by_default_for_fast_hrl_steps(self):
+        env = PPO_Env.__new__(PPO_Env)
+        env.device = torch.device("cpu")
+        env.day = 1
+        env.stop_step = 5
+        env.total_days = 6
+        env.num_stocks = 3
+        env.max_hold = 4
+        env.min_hold = 2
+        env.transaction_cost_pct = 0.0
+        env.risk_gamma = 5.0
+        env.reward_scale_portfolio = 1.0
+        env.reward_scale_base = 1.0
+        env.reward_scale_inner = 1.0
+        env.reward_scale_controller = 1.0
+        env.controller_sup_enabled = False
+        env.portfolio_value = torch.tensor(1.0)
+        env.prev_weights = torch.tensor([0.5, 0.5, 0.0], dtype=torch.float32)
+        env.prev_base_weight = env.prev_weights.clone()
+        env.t_held = 2
+        env.peak_value = 1.0
+        env.segment_init_value = 1.0
+        env.cumulative_alpha = 0.0
+        env.cumulative_risk = 0.0
+        env.all_dates = pd.date_range("2020-01-01", periods=8)
+        env.ratio = torch.tensor(
+            [
+                [1.00, 0.80, 1.25, 1.00, 1.00],
+                [1.00, 1.10, 0.90, 1.00, 1.00],
+                [1.00, 1.00, 1.00, 1.00, 1.00],
+            ],
+            dtype=torch.float32,
+        )
+        env._get_observation = lambda: {}
+
+        _, _, _, info = env.step(
+            torch.tensor([0.5, 0.5, 0.0], dtype=torch.float32),
+            torch.tensor([0.5, 0.5, 0.0], dtype=torch.float32),
+            outer_action=torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32),
             is_switch=False,
         )
 
@@ -313,6 +364,7 @@ class ActorScoreSupervisionTests(unittest.TestCase):
         expected_mdd = torch.tensor(0.05, dtype=torch.float32)
         torch.testing.assert_close(info["controller_hold_return_target"], expected_return)
         torch.testing.assert_close(info["controller_hold_mdd_target"], expected_mdd)
+        torch.testing.assert_close(info["controller_switch_advantage"], torch.tensor(0.0))
 
     def test_monitor_update_trains_remaining_hold_return_and_mdd_heads(self):
         monitor = _FakeMonitor()

@@ -92,7 +92,14 @@ class PPO_Env(gym.Env):
         self.controller_sup_scale = float(getattr(config, 'controller_sup_scale', 0.05))
         self.controller_sup_max_weight = float(getattr(config, 'controller_sup_max_weight', 5.0))
         self.controller_sup_coef = float(getattr(config, 'controller_sup_coef', getattr(config, 'monitor_sup_coef', 0.0)))
-        self.controller_sup_enabled = self.controller_sup_coef > 0.0
+        self.controller_sup_enabled = (
+            self.controller_sup_coef > 0.0
+            and bool(getattr(config, 'controller_use_switch_supervision', False))
+        )
+        self.controller_switch_advantage_enabled = (
+            bool(getattr(config, 'controller_compute_switch_advantage', False))
+            or float(getattr(config, 'controller_local_adv_coef', 0.0)) > 0.0
+        )
 
         self.monitor_reward_mode = getattr(config, 'monitor_reward_mode', 'mean')
 
@@ -314,7 +321,7 @@ class PPO_Env(gym.Env):
             episode_len: int,
             stride_days: int,
             start_offsets: int = None):
-        """Build starts by taking several dense offsets, then cutting each long sequence into episodes."""
+        """Build starts by subsampling offsets within a dense window, then cutting episodes."""
         episode_len = max(1, int(episode_len))
         stride_days = max(1, int(stride_days))
         raw = [int(t) for t in raw_indices]
@@ -325,13 +332,10 @@ class PPO_Env(gym.Env):
         if start_offsets is None:
             start_offsets = len(raw)
         start_offsets = max(1, int(start_offsets))
-        offset_count = min(start_offsets, len(raw))
+        offset_limit = min(start_offsets, len(raw))
 
         starts = []
-        for offset_idx in range(offset_count):
-            base_pos = offset_idx * stride_days
-            if base_pos >= len(raw):
-                break
+        for base_pos in range(0, offset_limit, stride_days):
             start = raw[base_pos]
             while start + episode_len <= absolute_limit:
                 starts.append(start)
@@ -493,6 +497,27 @@ class PPO_Env(gym.Env):
 
         final_weights = real_weight.flatten().detach()
         new_base_weight = base_weight.flatten().detach()
+        candidate_switch_weight = (
+            outer_action.flatten().detach()
+            if outer_action is not None
+            else new_base_weight
+        )
+        if bool(getattr(self, 'controller_switch_advantage_enabled', False)):
+            controller_switch_return_target, _ = self._future_portfolio_return_and_max_drawdown(
+                candidate_switch_weight,
+                self.day,
+                remaining_hold_horizon,
+            )
+            switch_turnover_to_candidate = torch.sum(
+                torch.abs(self._normalize(candidate_switch_weight) - current_holdings_drift.detach())
+            )
+            controller_switch_advantage = (
+                controller_switch_return_target
+                - controller_hold_return_target
+                - switch_turnover_to_candidate * self.transaction_cost_pct
+            )
+        else:
+            controller_switch_advantage = controller_hold_return_target.new_tensor(0.0)
 
         if is_switch:
             self.t_held = 1
@@ -527,11 +552,6 @@ class PPO_Env(gym.Env):
         inner_stock_return_target = self._future_stock_return_target(self.day, 1)
 
         if self.controller_sup_enabled:
-            candidate_switch_weight = (
-                outer_action.flatten().detach()
-                if outer_action is not None
-                else new_base_weight
-            )
             sup_h = max(1, int(self.controller_sup_horizon))
             hold_20 = self._future_outer_sum(weight_drifted_norm.detach(), self.day, sup_h)
             switch_20 = self._future_outer_sum(candidate_switch_weight.detach(), self.day, sup_h)
@@ -587,6 +607,7 @@ class PPO_Env(gym.Env):
             'inner_next_return_target': inner_stock_return_target.detach(),
             'controller_hold_return_target': controller_hold_return_target.detach(),
             'controller_hold_mdd_target': controller_hold_mdd_target.detach(),
+            'controller_switch_advantage': controller_switch_advantage.detach(),
             'controller_switch_label': controller_switch_label.detach(),
             'controller_sup_weight': controller_sup_weight.detach(),
             'controller_switch_adv_20': switch_adv_20.detach(),

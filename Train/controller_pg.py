@@ -62,11 +62,13 @@ def controller_reward(
         switch_coef: float = 0.0,
         turnover_coef: float = 0.0,
 ) -> float:
-    """Relative-return controller reward with a max-switch overflow penalty.
+    """Relative-return controller reward with a normalized max-switch overflow penalty.
 
     Legacy keyword arguments are accepted for compatibility, but the current
     controller objective intentionally ignores MDD, turnover, and minimum-count
     penalties. Forced max-hold switches already provide the lower switch bound.
+    Overflow is divided by ``max_switch_count ** 2`` so the switch term stays on
+    a similar scale to log-return uplift across different rollout lengths.
     """
     return_uplift = float(controlled.log_return) - float(baseline.log_return)
     allowed = int(count_max if max_switch_count is None else max_switch_count)
@@ -75,9 +77,10 @@ def controller_reward(
         controlled.segment_count,
         max_switch_count=allowed,
     )
+    normalized_overflow_penalty = overflow_penalty / float(max(1, allowed) ** 2)
     return (
         float(return_coef) * return_uplift
-        - penalty_coef * overflow_penalty
+        - penalty_coef * normalized_overflow_penalty
     )
 
 
@@ -87,9 +90,12 @@ def controller_pg_loss(
         entropies: torch.Tensor = None,
         *,
         entropy_coef: float = 0.01,
+        values: torch.Tensor = None,
+        value_coef: float = 0.0,
+        normalize_value_advantage: bool = True,
         eps: float = 1e-8,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """REINFORCE loss with batch-normalized counterfactual rewards."""
+    """REINFORCE/actor-critic loss for counterfactual controller rewards."""
     if episode_log_probs.numel() == 0:
         raise ValueError("controller_pg_loss requires at least one episode log-prob.")
 
@@ -98,12 +104,16 @@ def controller_pg_loss(
     if rewards.shape[0] != episode_log_probs.shape[0]:
         raise ValueError("rewards and episode_log_probs must have the same length.")
 
-    reward_mean = rewards.mean()
-    reward_std = rewards.std(unbiased=False)
-    if rewards.numel() > 1:
-        advantage = (rewards - reward_mean) / reward_std.clamp_min(eps)
+    value_loss = episode_log_probs.new_tensor(0.0)
+    if values is not None:
+        values = values.to(device=episode_log_probs.device, dtype=episode_log_probs.dtype).view(-1)
+        if values.shape[0] != episode_log_probs.shape[0]:
+            raise ValueError("values and episode_log_probs must have the same length.")
+        raw_advantage = rewards - values.detach()
+        value_loss = torch.mean((values - rewards) ** 2)
+        advantage = raw_advantage
     else:
-        advantage = rewards - reward_mean
+        advantage = rewards
 
     policy_loss = -(advantage.detach() * episode_log_probs).mean()
     if entropies is None:
@@ -111,13 +121,42 @@ def controller_pg_loss(
     else:
         entropy_term = entropies.to(device=episode_log_probs.device, dtype=episode_log_probs.dtype).view(-1).mean()
     entropy_loss = -float(entropy_coef) * entropy_term
-    loss = policy_loss + entropy_loss
+    loss = policy_loss + entropy_loss + float(value_coef) * value_loss
+    reward_mean = rewards.mean()
+    reward_std = rewards.std(unbiased=False)
     diagnostics = {
         "loss": float(loss.detach().cpu().item()),
+        "loss_abs": float(loss.detach().abs().cpu().item()),
         "policy_loss": float(policy_loss.detach().cpu().item()),
+        "policy_abs_loss": float(policy_loss.detach().abs().cpu().item()),
         "entropy": float(entropy_term.detach().cpu().item()),
         "entropy_loss": float(entropy_loss.detach().cpu().item()),
         "reward_mean": float(reward_mean.detach().cpu().item()),
         "reward_std": float(reward_std.detach().cpu().item()),
+        "reward_min": float(rewards.min().detach().cpu().item()),
+        "reward_max": float(rewards.max().detach().cpu().item()),
+        "reward_abs_mean": float(rewards.abs().mean().detach().cpu().item()),
+        "value_loss": float(value_loss.detach().cpu().item()),
+        "value_weighted_loss": float((float(value_coef) * value_loss).detach().cpu().item()),
     }
     return loss, diagnostics
+
+
+def overflow_switch_policy_loss(
+        switch_log_probs: torch.Tensor,
+        overflow_orders: torch.Tensor,
+        *,
+        penalty_coef: float,
+) -> torch.Tensor:
+    """Policy-gradient cost for sampled switch actions beyond the max-switch threshold."""
+    if switch_log_probs.numel() == 0 or float(penalty_coef) <= 0.0:
+        return switch_log_probs.new_tensor(0.0)
+    switch_log_probs = switch_log_probs.view(-1)
+    overflow_orders = overflow_orders.to(
+        device=switch_log_probs.device,
+        dtype=switch_log_probs.dtype,
+    ).view(-1)
+    if switch_log_probs.shape[0] != overflow_orders.shape[0]:
+        raise ValueError("switch_log_probs and overflow_orders must have the same length.")
+    marginal_cost = float(penalty_coef) * (2.0 * overflow_orders.clamp_min(1.0) - 1.0)
+    return (marginal_cost.detach() * switch_log_probs).mean()
