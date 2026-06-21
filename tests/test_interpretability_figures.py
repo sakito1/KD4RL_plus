@@ -11,7 +11,9 @@ from scripts.generate_interpretability_figures import (
     ARCHIVED_METRICS,
     build_switch_event_study,
     compute_financial_metrics,
+    fixed_weight_future_curve,
     safe_corr,
+    select_switch_cases,
 )
 
 
@@ -46,6 +48,62 @@ class InterpretabilityFigureHelperTests(unittest.TestCase):
         self.assertEqual(len(study), 5)
         self.assertEqual(study["event_count"].iloc[0], 1)
         self.assertEqual(study["mean_cum_return"].iloc[2], 0.0)
+
+    def test_fixed_weight_future_curve_includes_transaction_cost(self):
+        ratio_matrix = np.array(
+            [
+                [0.90, 0.90],
+                [1.10, 1.10],
+            ],
+            dtype="float64",
+        )
+        weights = np.array([1.0, 0.0])
+        current_weights = np.array([0.0, 1.0])
+
+        curve = fixed_weight_future_curve(
+            ratio_matrix,
+            weights,
+            current_weights=current_weights,
+            transaction_cost=0.01,
+        )
+
+        self.assertEqual(curve.tolist()[0], 1.0)
+        self.assertAlmostEqual(curve[1], 0.90 * 0.98)
+        self.assertAlmostEqual(curve[2], 0.81 * 0.98)
+
+    def test_select_switch_cases_prioritizes_avoided_downside(self):
+        import pandas as pd
+
+        trace = pd.DataFrame(
+            [
+                {
+                    "date": "2020-01-01",
+                    "is_free_switch": 1,
+                    "hold_future_return_20": -0.12,
+                    "switch_future_return_20": 0.03,
+                    "avoided_loss_20": 0.15,
+                },
+                {
+                    "date": "2020-01-02",
+                    "is_free_switch": 1,
+                    "hold_future_return_20": -0.02,
+                    "switch_future_return_20": 0.10,
+                    "avoided_loss_20": 0.12,
+                },
+                {
+                    "date": "2020-01-03",
+                    "is_free_switch": 0,
+                    "hold_future_return_20": -0.30,
+                    "switch_future_return_20": 0.30,
+                    "avoided_loss_20": 0.60,
+                },
+            ]
+        )
+
+        cases = select_switch_cases(trace, top_n=2)
+
+        self.assertEqual(cases["date"].tolist(), ["2020-01-01", "2020-01-02"])
+        self.assertEqual(cases["case_rank"].tolist(), [1, 2])
 
 
 if __name__ == "__main__":

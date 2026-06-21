@@ -195,6 +195,69 @@ def build_switch_event_study(
     )
 
 
+def _normalize_np(values: Sequence[float]) -> np.ndarray:
+    arr = np.asarray(list(values), dtype="float64")
+    arr = np.clip(arr, 0.0, None)
+    total = float(arr.sum())
+    if total <= 1e-12:
+        return np.ones_like(arr) / float(max(arr.size, 1))
+    return arr / total
+
+
+def fixed_weight_future_curve(
+    ratio_matrix: Sequence[Sequence[float]],
+    weights: Sequence[float],
+    *,
+    current_weights: Sequence[float] = None,
+    transaction_cost: float = 0.0,
+) -> np.ndarray:
+    ratios = np.asarray(ratio_matrix, dtype="float64")
+    if ratios.ndim != 2 or ratios.shape[1] <= 0:
+        return np.ones(1, dtype="float64")
+    weights_arr = _normalize_np(weights)
+    if weights_arr.size != ratios.shape[0]:
+        raise ValueError("weights length must match ratio_matrix asset dimension")
+    cost_factor = 1.0
+    if current_weights is not None:
+        current = _normalize_np(current_weights)
+        if current.size != weights_arr.size:
+            raise ValueError("current_weights length must match weights length")
+        turnover = float(np.sum(np.abs(weights_arr - current)))
+        cost_factor = max(0.0, 1.0 - turnover * float(transaction_cost))
+    growth = np.cumprod(ratios, axis=1)
+    future_values = np.sum(weights_arr[:, None] * growth, axis=0) * cost_factor
+    return np.concatenate([np.ones(1, dtype="float64"), future_values])
+
+
+def max_drawdown_from_curve(curve: Sequence[float]) -> float:
+    values = np.asarray(list(curve), dtype="float64")
+    if values.size <= 1:
+        return 0.0
+    peaks = np.maximum.accumulate(np.maximum(values, 1e-12))
+    return float(np.max((peaks - values) / peaks))
+
+
+def select_switch_cases(trace: pd.DataFrame, *, top_n: int = 4) -> pd.DataFrame:
+    if trace.empty or "avoided_loss_20" not in trace.columns:
+        return pd.DataFrame()
+    cases = trace[trace["is_free_switch"] == 1].copy()
+    numeric_cols = ["hold_future_return_20", "switch_future_return_20", "avoided_loss_20"]
+    for col in numeric_cols:
+        cases[col] = pd.to_numeric(cases[col], errors="coerce")
+    cases = cases[np.isfinite(cases["avoided_loss_20"])]
+    if cases.empty:
+        return cases
+    downside = cases[cases["hold_future_return_20"] < 0.0]
+    if len(downside) >= int(top_n):
+        cases = downside
+    cases = cases.sort_values(
+        ["avoided_loss_20", "switch_future_return_20"],
+        ascending=[False, False],
+    ).head(int(top_n)).copy()
+    cases.insert(0, "case_rank", np.arange(1, len(cases) + 1))
+    return cases
+
+
 def write_ablation_metrics(output_dir: Path) -> pd.DataFrame:
     rows = []
     for (market, scenario), metrics in ARCHIVED_METRICS.items():
@@ -325,6 +388,47 @@ def _normalized_row_sum_abs(x, y) -> Tuple[float, float, float]:
     return turnover, overlap, concentration
 
 
+def _tensor_row_to_numpy(tensor) -> np.ndarray:
+    return tensor.detach().view(-1).cpu().numpy().astype("float64")
+
+
+def _future_curve_from_env(env, weights, *, start_day: int, horizon: int, current_weights=None) -> np.ndarray:
+    stop_day = min(int(start_day) + int(horizon), int(env.ratio.shape[1]))
+    if stop_day <= int(start_day):
+        return np.ones(1, dtype="float64")
+    ratio_matrix = env.ratio[:, int(start_day) : stop_day].detach().cpu().numpy().astype("float64")
+    current = _tensor_row_to_numpy(current_weights) if current_weights is not None else None
+    return fixed_weight_future_curve(
+        ratio_matrix,
+        _tensor_row_to_numpy(weights),
+        current_weights=current,
+        transaction_cost=float(getattr(env, "transaction_cost_pct", 0.0)),
+    )
+
+
+def _safe_json_array(values: Sequence[float]) -> str:
+    return json.dumps([float(x) for x in values], ensure_ascii=False)
+
+
+def _stock_names_for_env(env) -> Sequence[str]:
+    try:
+        return list(env._load_stock_list(env.dataset["stocks_path"]))
+    except Exception:
+        return [str(i) for i in range(int(getattr(env, "num_stocks", 0)))]
+
+
+def _top_weights_text(weights, names: Sequence[str], *, top_n: int = 5) -> str:
+    arr = _normalize_np(_tensor_row_to_numpy(weights))
+    if arr.size <= 0:
+        return ""
+    top_idx = np.argsort(arr)[::-1][: int(top_n)]
+    parts = []
+    for idx in top_idx:
+        label = names[int(idx)] if int(idx) < len(names) else str(int(idx))
+        parts.append(f"{label}:{arr[int(idx)] * 100.0:.1f}%")
+    return "; ".join(parts)
+
+
 def collect_scenario_trace(trainer, *, scenario: str, fixed_cycle=None, disable_inner=False) -> pd.DataFrame:
     import torch
 
@@ -340,6 +444,7 @@ def collect_scenario_trace(trainer, *, scenario: str, fixed_cycle=None, disable_
     segment_peak_value = segment_start_value
     switch_count = 0
     free_switch_count = 0
+    stock_names = _stock_names_for_env(env)
 
     with torch.no_grad():
         while True:
@@ -389,6 +494,49 @@ def collect_scenario_trace(trainer, *, scenario: str, fixed_cycle=None, disable_
                 out["act_out"],
             )
             date_value = str(env.all_dates[int(env.day)].date()) if hasattr(env, "all_dates") else str(int(env.day))
+            hold_future_return_20 = np.nan
+            switch_future_return_20 = np.nan
+            avoided_loss_20 = np.nan
+            hold_future_mdd_20 = np.nan
+            switch_future_mdd_20 = np.nan
+            hold_curve_20 = ""
+            switch_curve_20 = ""
+            hold_top_weights = ""
+            switch_top_weights = ""
+            if is_free_switch:
+                hold_exec = trainer._deterministic_inner_exec(
+                    obs,
+                    obs["base_drift"].detach(),
+                    obs["weights_drift"].detach(),
+                )
+                switch_exec = trainer._deterministic_inner_exec(
+                    obs,
+                    out["act_out"].detach(),
+                    obs["weights_drift"].detach(),
+                )
+                hold_curve = _future_curve_from_env(
+                    env,
+                    hold_exec,
+                    start_day=int(env.day),
+                    horizon=20,
+                    current_weights=obs["weights_drift"],
+                )
+                switch_curve = _future_curve_from_env(
+                    env,
+                    switch_exec,
+                    start_day=int(env.day),
+                    horizon=20,
+                    current_weights=obs["weights_drift"],
+                )
+                hold_future_return_20 = float(hold_curve[-1] - 1.0)
+                switch_future_return_20 = float(switch_curve[-1] - 1.0)
+                avoided_loss_20 = float(switch_future_return_20 - hold_future_return_20)
+                hold_future_mdd_20 = max_drawdown_from_curve(hold_curve)
+                switch_future_mdd_20 = max_drawdown_from_curve(switch_curve)
+                hold_curve_20 = _safe_json_array(hold_curve)
+                switch_curve_20 = _safe_json_array(switch_curve)
+                hold_top_weights = _top_weights_text(hold_exec, stock_names)
+                switch_top_weights = _top_weights_text(switch_exec, stock_names)
             next_obs, _, done, info = env.step(
                 out["weights_exec"].detach(),
                 out["base_used"].detach(),
@@ -426,6 +574,15 @@ def collect_scenario_trace(trainer, *, scenario: str, fixed_cycle=None, disable_
                     "candidate_turnover": turnover_candidate,
                     "candidate_overlap": overlap_candidate,
                     "hold_concentration": concentration,
+                    "hold_future_return_20": hold_future_return_20,
+                    "switch_future_return_20": switch_future_return_20,
+                    "avoided_loss_20": avoided_loss_20,
+                    "hold_future_mdd_20": hold_future_mdd_20,
+                    "switch_future_mdd_20": switch_future_mdd_20,
+                    "hold_curve_20": hold_curve_20,
+                    "switch_curve_20": switch_curve_20,
+                    "hold_top_weights": hold_top_weights,
+                    "switch_top_weights": switch_top_weights,
                     "switch_count_so_far": switch_count,
                     "free_switch_count_so_far": free_switch_count,
                 }
@@ -444,6 +601,7 @@ def collect_all_traces(
     results_end: Path,
 ) -> Dict[str, Dict[str, pd.DataFrame]]:
     traces: Dict[str, Dict[str, pd.DataFrame]] = {}
+    case_frames = []
     for market in markets:
         trainer = build_loaded_trainer(market, output_dir, device, results_end)
         fixed_cycle = int(getattr(trainer.cfg, "max_hold", 30))
@@ -473,6 +631,15 @@ def collect_all_traces(
             post_days=20,
         )
         event_df.to_csv(output_dir / f"switch_event_{market}.csv", index=False)
+        cases = select_switch_cases(market_traces["Controller+HRL"], top_n=2)
+        if not cases.empty:
+            cases.insert(1, "market", market)
+            case_frames.append(cases)
+            cases.to_csv(output_dir / f"controller_switch_cases_{market}.csv", index=False)
+    if case_frames:
+        pd.concat(case_frames, ignore_index=True).to_csv(
+            output_dir / "controller_switch_cases.csv", index=False
+        )
     return traces
 
 
@@ -657,6 +824,104 @@ def plot_switch_event_study(output_dir: Path) -> Path:
     return path
 
 
+def _parse_curve_json(value: object) -> np.ndarray:
+    if not isinstance(value, str) or not value:
+        return np.ones(1, dtype="float64")
+    try:
+        return np.asarray(json.loads(value), dtype="float64")
+    except json.JSONDecodeError:
+        return np.ones(1, dtype="float64")
+
+
+def plot_controller_case_studies(output_dir: Path) -> Path:
+    import matplotlib.pyplot as plt
+
+    path_csv = output_dir / "controller_switch_cases.csv"
+    if not path_csv.exists():
+        return output_dir / "fig6_controller_switch_cases.png"
+    cases = pd.read_csv(path_csv).head(4)
+    if cases.empty:
+        return output_dir / "fig6_controller_switch_cases.png"
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7.2), sharex=True)
+    axes = np.ravel(axes)
+    for ax, (_, row) in zip(axes, cases.iterrows()):
+        hold_curve = _parse_curve_json(row.get("hold_curve_20"))
+        switch_curve = _parse_curve_json(row.get("switch_curve_20"))
+        x = np.arange(min(len(hold_curve), len(switch_curve)))
+        hold_curve = hold_curve[: len(x)]
+        switch_curve = switch_curve[: len(x)]
+        ax.plot(x, (hold_curve - 1.0) * 100.0, label="hold old portfolio", color="#8f8f8f", linewidth=2)
+        ax.plot(x, (switch_curve - 1.0) * 100.0, label="switch portfolio", color="#c4493d", linewidth=2)
+        ax.axhline(0.0, color="#202020", linewidth=0.8)
+        ax.set_title(
+            f"{str(row['market']).upper()} {row['date']} | avoided {row['avoided_loss_20'] * 100.0:.1f} pp"
+        )
+        ax.set_xlabel("Trading days after switch")
+        ax.set_ylabel("Forward return (%)")
+        ax.grid(alpha=0.25)
+        annotation = (
+            f"exit_prob={row['exit_prob']:.2f}\n"
+            f"pred_adv={row['switch_advantage_pred']:.3f}\n"
+            f"hold={row['hold_future_return_20'] * 100.0:.1f}%  "
+            f"switch={row['switch_future_return_20'] * 100.0:.1f}%"
+        )
+        ax.text(
+            0.03,
+            0.05,
+            annotation,
+            transform=ax.transAxes,
+            fontsize=8,
+            bbox={"facecolor": "white", "edgecolor": "#d0d0d0", "alpha": 0.85},
+        )
+    for ax in axes[len(cases) :]:
+        ax.axis("off")
+    axes[0].legend(frameon=False, fontsize=8)
+    path = output_dir / "fig6_controller_switch_cases.png"
+    _savefig(path)
+    return path
+
+
+def write_case_report(output_dir: Path) -> Path:
+    path = output_dir / "controller_switch_cases_zh.md"
+    csv_path = output_dir / "controller_switch_cases.csv"
+    if not csv_path.exists():
+        path.write_text("# Controller switch case studies\n\n尚未生成 case 数据。\n", encoding="utf-8")
+        return path
+    cases = pd.read_csv(csv_path)
+    lines = ["# Controller switch case studies", ""]
+    for _, row in cases.iterrows():
+        market = str(row["market"]).upper()
+        avoided_pp = float(row["avoided_loss_20"]) * 100.0
+        hold_ret = float(row["hold_future_return_20"]) * 100.0
+        switch_ret = float(row["switch_future_return_20"]) * 100.0
+        hold_mdd = float(row["hold_future_mdd_20"]) * 100.0
+        switch_mdd = float(row["switch_future_mdd_20"]) * 100.0
+        lines.extend(
+            [
+                f"## Case {int(row['case_rank'])} | {market} | {row['date']}",
+                "",
+                (
+                    f"- controller 当日触发自由 switch，`exit_prob={float(row['exit_prob']):.3f}`，"
+                    f"`switch_advantage_pred={float(row['switch_advantage_pred']):.4f}`。"
+                ),
+                (
+                    f"- 事后 20 个交易日 counterfactual：如果继续持有旧组合，收益约为 {hold_ret:.2f}%，"
+                    f"切换到新组合后收益约为 {switch_ret:.2f}%，相当于避免/改善 {avoided_pp:.2f} 个百分点。"
+                ),
+                (
+                    f"- 风险侧：旧组合 20 日路径最大回撤约 {hold_mdd:.2f}%，"
+                    f"切换组合约 {switch_mdd:.2f}%。"
+                ),
+                f"- 旧组合主要权重：{row.get('hold_top_weights', '')}",
+                f"- 切换组合主要权重：{row.get('switch_top_weights', '')}",
+                "",
+            ]
+        )
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 def write_all_figures(output_dir: Path, traces: Dict[str, Dict[str, pd.DataFrame]]) -> None:
     traces = _load_or_concat_traces(output_dir, traces)
     plot_ablation_summary(output_dir)
@@ -665,6 +930,8 @@ def write_all_figures(output_dir: Path, traces: Dict[str, Dict[str, pd.DataFrame
         plot_controller_timeline(output_dir, traces)
         plot_signal_relationships(output_dir, traces)
         plot_switch_event_study(output_dir)
+        plot_controller_case_studies(output_dir)
+        write_case_report(output_dir)
 
 
 def write_paper_conclusions(output_dir: Path, traces: Dict[str, Dict[str, pd.DataFrame]]) -> Path:
@@ -684,6 +951,10 @@ controller 的作用更明显：它将固定 30 日再平衡改为状态驱动�
 图 3 展示了 switch 不是机械地每 30 天发生，而是集中在若干状态变化阶段。图 4 进一步展示 `exit_prob` 与持仓段状态、候选切换优势之间的关系；图 5 将自由切换日对齐后观察切换前后的平均收益路径，用来说明 controller 是否倾向于在局部走弱后触发换仓，以及换仓后组合表现是否改善。
 
 需要强调的是，这些图提供的是模型层面的可解释性证据：它们说明 controller 的决策与可观测组合状态和候选切换信号相关，并证明该机制在 held-out test period 中改善了结果；但它们不应被表述为对真实市场因果机制的严格证明。
+
+## 典型 switch case
+
+为增强可解释性，脚本进一步筛选了若干自由 switch case。筛选标准是：controller 当日主动 switch，且事后 20 个交易日里，“继续持有旧组合”的 counterfactual 收益明显弱于“切换到新组合”的收益。对应结果见 `fig6_controller_switch_cases.png` 和 `controller_switch_cases_zh.md`。这类 case 可以用来说明 controller 的具体行为：它并不是抽象地提高交易频率，而是在某些旧组合后续表现较差的节点触发 outer actor 重新选股，从而避开一段潜在下跌或获得更好的后续收益。
 """
     path.write_text(text, encoding="utf-8")
     return path
