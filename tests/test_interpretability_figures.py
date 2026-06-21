@@ -11,9 +11,11 @@ from scripts.generate_interpretability_figures import (
     ARCHIVED_METRICS,
     build_switch_event_study,
     build_switch_narrative_cases,
+    build_multiswitch_windows,
     compute_financial_metrics,
     fixed_weight_future_curve,
     safe_corr,
+    select_multiswitch_window_case,
     select_paper_switch_cases,
     select_switch_cases,
 )
@@ -234,6 +236,41 @@ class InterpretabilityFigureHelperTests(unittest.TestCase):
 
         self.assertEqual(selected["market"].tolist(), ["sh", "sh", "nas", "nas"])
         self.assertEqual(selected["post_horizon"].tolist(), [20, 20, 10, 20])
+
+    def test_build_multiswitch_windows_scores_30_day_risk_control(self):
+        import json
+        import pandas as pd
+
+        dates = pd.date_range("2020-01-01", periods=6, freq="D").strftime("%Y-%m-%d")
+        controller = pd.DataFrame(
+            {
+                "date": dates,
+                "portfolio_value": [1.00, 1.02, 1.01, 1.04, 1.03, 1.06],
+                "is_free_switch": [0, 1, 0, 1, 0, 1],
+                "is_switch": [0, 1, 0, 1, 0, 1],
+            }
+        )
+        fixed = pd.DataFrame(
+            {
+                "date": dates,
+                "portfolio_value": [1.00, 0.99, 0.94, 0.96, 0.95, 0.98],
+            }
+        )
+
+        windows = build_multiswitch_windows(
+            controller,
+            fixed,
+            market="nas",
+            window_days=5,
+            min_free_switches=2,
+        )
+        selected = select_multiswitch_window_case(windows)
+
+        self.assertEqual(selected["market"], "nas")
+        self.assertEqual(selected["free_switches"], 3)
+        self.assertGreater(selected["mdd_reduction"], 0.0)
+        self.assertGreater(selected["return_gap"], 0.0)
+        self.assertEqual(json.loads(selected["switch_offsets"]), [1, 3, 5])
 
 
 if __name__ == "__main__":

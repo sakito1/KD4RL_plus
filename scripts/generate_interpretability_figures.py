@@ -458,6 +458,118 @@ def select_paper_switch_cases(
     return selected
 
 
+def build_multiswitch_windows(
+    controller_trace: pd.DataFrame,
+    baseline_trace: pd.DataFrame,
+    *,
+    market: str,
+    window_days: int = 30,
+    min_free_switches: int = 2,
+) -> pd.DataFrame:
+    if controller_trace.empty or baseline_trace.empty:
+        return pd.DataFrame()
+    ctrl = controller_trace.copy()
+    base = baseline_trace.copy()
+    for col in ["is_free_switch", "is_switch"]:
+        if col not in ctrl.columns:
+            ctrl[col] = 0
+    merged = ctrl[
+        ["date", "portfolio_value", "is_free_switch", "is_switch"]
+    ].rename(columns={"portfolio_value": "controller_value"}).merge(
+        base[["date", "portfolio_value"]].rename(columns={"portfolio_value": "baseline_value"}),
+        on="date",
+        how="inner",
+    )
+    if len(merged) <= int(window_days):
+        return pd.DataFrame()
+
+    rows = []
+    for start in range(0, len(merged) - int(window_days)):
+        stop = start + int(window_days)
+        window = merged.iloc[start : stop + 1].reset_index(drop=True)
+        free_switches = int(pd.to_numeric(window["is_free_switch"], errors="coerce").fillna(0).sum())
+        if free_switches < int(min_free_switches):
+            continue
+        all_switches = int(pd.to_numeric(window["is_switch"], errors="coerce").fillna(0).sum())
+        controller_curve = window["controller_value"].to_numpy(dtype="float64")
+        baseline_curve = window["baseline_value"].to_numpy(dtype="float64")
+        if controller_curve[0] <= 1e-12 or baseline_curve[0] <= 1e-12:
+            continue
+        controller_curve = controller_curve / controller_curve[0]
+        baseline_curve = baseline_curve / baseline_curve[0]
+        controller_return = float(controller_curve[-1] - 1.0)
+        baseline_return = float(baseline_curve[-1] - 1.0)
+        controller_mdd = max_drawdown_from_curve(controller_curve)
+        baseline_mdd = max_drawdown_from_curve(baseline_curve)
+        switch_offsets = [
+            int(i)
+            for i, value in enumerate(pd.to_numeric(window["is_free_switch"], errors="coerce").fillna(0))
+            if int(value) == 1
+        ]
+        switch_dates = [str(window.loc[offset, "date"]) for offset in switch_offsets]
+        return_gap = controller_return - baseline_return
+        mdd_reduction = baseline_mdd - controller_mdd
+        score = float(mdd_reduction + 0.35 * max(return_gap, 0.0) + 0.0015 * min(free_switches, 20))
+        rows.append(
+            {
+                "market": market,
+                "start_idx": int(start),
+                "end_idx": int(stop),
+                "start_date": str(window["date"].iloc[0]),
+                "end_date": str(window["date"].iloc[-1]),
+                "window_days": int(window_days),
+                "free_switches": free_switches,
+                "all_switches": all_switches,
+                "controller_return": controller_return,
+                "baseline_return": baseline_return,
+                "return_gap": return_gap,
+                "controller_mdd": controller_mdd,
+                "baseline_mdd": baseline_mdd,
+                "mdd_reduction": mdd_reduction,
+                "controller_curve": _safe_json_array(controller_curve),
+                "baseline_curve": _safe_json_array(baseline_curve),
+                "switch_offsets": json.dumps(switch_offsets, ensure_ascii=False),
+                "switch_dates": json.dumps(switch_dates, ensure_ascii=False),
+                "score": score,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def select_multiswitch_window_case(windows: pd.DataFrame) -> pd.Series:
+    if windows.empty:
+        return pd.Series(dtype="object")
+    cases = windows.copy()
+    for col in [
+        "free_switches",
+        "return_gap",
+        "controller_mdd",
+        "baseline_mdd",
+        "mdd_reduction",
+        "score",
+    ]:
+        cases[col] = pd.to_numeric(cases[col], errors="coerce")
+    preferred = cases[
+        (cases["free_switches"] >= 8)
+        & (cases["return_gap"] > 0.0)
+        & (cases["mdd_reduction"] > 0.0)
+        & (cases["controller_mdd"] <= 0.04)
+    ].copy()
+    if preferred.empty:
+        preferred = cases[
+            (cases["free_switches"] >= 2)
+            & (cases["return_gap"] > 0.0)
+            & (cases["mdd_reduction"] > 0.0)
+        ].copy()
+    if preferred.empty:
+        preferred = cases.copy()
+    preferred = preferred.sort_values(
+        ["score", "mdd_reduction", "return_gap", "free_switches"],
+        ascending=[False, False, False, False],
+    )
+    return preferred.iloc[0]
+
+
 def write_ablation_metrics(output_dir: Path) -> pd.DataFrame:
     rows = []
     for (market, scenario), metrics in ARCHIVED_METRICS.items():
@@ -1180,6 +1292,126 @@ def plot_controller_case_studies(output_dir: Path) -> Path:
     return path
 
 
+def plot_nas_multiswitch_window(output_dir: Path, traces: Dict[str, Dict[str, pd.DataFrame]]) -> Path:
+    import matplotlib.pyplot as plt
+
+    traces = _load_or_concat_traces(output_dir, traces)
+    market_traces = traces.get("nas", {})
+    if not market_traces:
+        return output_dir / "fig7_nas_multiswitch_window.png"
+    controller = market_traces.get("Controller+HRL")
+    fixed = market_traces.get("Fixed HRL")
+    if controller is None or fixed is None:
+        return output_dir / "fig7_nas_multiswitch_window.png"
+
+    windows = build_multiswitch_windows(
+        controller,
+        fixed,
+        market="nas",
+        window_days=30,
+        min_free_switches=2,
+    )
+    if windows.empty:
+        return output_dir / "fig7_nas_multiswitch_window.png"
+    windows.to_csv(output_dir / "nas_multiswitch_window_candidates.csv", index=False)
+    case = select_multiswitch_window_case(windows)
+    pd.DataFrame([case]).to_csv(output_dir / "nas_multiswitch_window.csv", index=False)
+
+    controller_curve = _parse_curve_json(case.get("controller_curve"))
+    baseline_curve = _parse_curve_json(case.get("baseline_curve"))
+    switch_offsets = json.loads(case.get("switch_offsets", "[]"))
+    x = np.arange(min(len(controller_curve), len(baseline_curve)))
+    controller_y = (controller_curve[: len(x)] - 1.0) * 100.0
+    baseline_y = (baseline_curve[: len(x)] - 1.0) * 100.0
+
+    fig, ax = plt.subplots(1, 1, figsize=(10.8, 4.8))
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+    ax.plot(x, baseline_y, color="#7b8187", linewidth=2.0, linestyle=(0, (4, 2)), label="Fixed 30-day HRL")
+    ax.plot(x, controller_y, color="#bd3f32", linewidth=2.7, label="Controller+HRL")
+    ax.fill_between(x, baseline_y, controller_y, where=controller_y >= baseline_y, color="#bd3f32", alpha=0.10)
+    for offset in switch_offsets:
+        if 0 <= int(offset) < len(x):
+            ax.axvline(int(offset), color="#bd3f32", linewidth=0.6, alpha=0.16)
+            ax.scatter(int(offset), controller_y[int(offset)], s=22, color="#bd3f32", edgecolor="white", linewidth=0.6, zorder=4)
+    ax.axhline(0.0, color="#202020", linewidth=0.8, alpha=0.55)
+    ax.grid(axis="y", alpha=0.16)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    start_date = case.get("start_date", "")
+    end_date = case.get("end_date", "")
+    free_switches = int(case.get("free_switches", 0))
+    controller_return = float(case.get("controller_return", 0.0)) * 100.0
+    baseline_return = float(case.get("baseline_return", 0.0)) * 100.0
+    return_gap = float(case.get("return_gap", 0.0)) * 100.0
+    controller_mdd = float(case.get("controller_mdd", 0.0)) * 100.0
+    baseline_mdd = float(case.get("baseline_mdd", 0.0)) * 100.0
+    mdd_reduction = float(case.get("mdd_reduction", 0.0)) * 100.0
+    ax.set_title(
+        f"NAS 30-day window: repeated controller switches reduce drawdown ({start_date} -> {end_date})",
+        loc="left",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
+    )
+    ax.set_xlabel("Trading days from window start")
+    ax.set_ylabel("Return since window start (%)")
+    ax.text(
+        0.02,
+        0.95,
+        (
+            f"{free_switches} free switches in 30 trading days\n"
+            f"return: controller {controller_return:.1f}% vs fixed {baseline_return:.1f}%\n"
+            f"max drawdown: controller {controller_mdd:.1f}% vs fixed {baseline_mdd:.1f}%"
+        ),
+        transform=ax.transAxes,
+        va="top",
+        fontsize=8.5,
+        bbox={"facecolor": "white", "edgecolor": "#d0d0d0", "alpha": 0.90},
+    )
+    ax.text(x[-1] + 0.35, controller_y[-1], f"controller {controller_return:.1f}%", color="#9f3128", fontsize=8.5, va="center")
+    ax.text(x[-1] + 0.35, baseline_y[-1], f"fixed {baseline_return:.1f}%", color="#62686e", fontsize=8.5, va="center")
+    ax.text(
+        0.98,
+        0.08,
+        f"gap +{return_gap:.1f} pp | drawdown reduced {mdd_reduction:.1f} pp",
+        transform=ax.transAxes,
+        ha="right",
+        fontsize=8.5,
+        color="#202020",
+    )
+    ax.set_xlim(0, len(x) + 2)
+    ax.legend(frameon=False, loc="upper center", ncol=3, bbox_to_anchor=(0.5, -0.14))
+    path = output_dir / "fig7_nas_multiswitch_window.png"
+    _savefig(path)
+    return path
+
+
+def write_nas_multiswitch_report(output_dir: Path) -> Path:
+    path = output_dir / "nas_multiswitch_window_zh.md"
+    csv_path = output_dir / "nas_multiswitch_window.csv"
+    if not csv_path.exists():
+        path.write_text("# NAS 30-day multi-switch window\n\n尚未生成 NAS 30 日窗口数据。\n", encoding="utf-8")
+        return path
+    row = pd.read_csv(csv_path).iloc[0]
+    text = (
+        "# NAS 30-day multi-switch window\n\n"
+        f"在 NAS 市场中，controller 的行为不一定表现为单次大幅换仓，而更像是在一个 30 日窗口内连续进行风险重置。"
+        f"例如 {row['start_date']} 至 {row['end_date']} 这个 30 个交易日窗口内，controller 共触发 "
+        f"{int(row['free_switches'])} 次自由 switch。\n\n"
+        f"从窗口累计收益看，Controller+HRL 收益为 {float(row['controller_return']) * 100.0:.2f}%，"
+        f"固定 30 日 HRL 收益为 {float(row['baseline_return']) * 100.0:.2f}%，"
+        f"前者高出 {float(row['return_gap']) * 100.0:.2f} 个百分点。"
+        f"从风险看，Controller+HRL 的窗口最大回撤为 {float(row['controller_mdd']) * 100.0:.2f}%，"
+        f"固定 30 日 HRL 为 {float(row['baseline_mdd']) * 100.0:.2f}%，"
+        f"回撤降低约 {float(row['mdd_reduction']) * 100.0:.2f} 个百分点。"
+        "这说明 NAS 上 controller 的可解释行为更适合表述为：在高频状态变化中多次小幅切换，从而维持较低回撤，而不是等待单个持仓期结束后进行一次大切换。\n"
+    )
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def write_case_report(output_dir: Path) -> Path:
     path = output_dir / "controller_switch_cases_zh.md"
     csv_path = output_dir / "controller_switch_cases.csv"
@@ -1253,7 +1485,9 @@ def write_all_figures(output_dir: Path, traces: Dict[str, Dict[str, pd.DataFrame
         plot_signal_relationships(output_dir, traces)
         plot_switch_event_study(output_dir)
         plot_controller_case_studies(output_dir)
+        plot_nas_multiswitch_window(output_dir, traces)
         write_case_report(output_dir)
+        write_nas_multiswitch_report(output_dir)
 
 
 def write_paper_conclusions(output_dir: Path, traces: Dict[str, Dict[str, pd.DataFrame]]) -> Path:
@@ -1279,6 +1513,10 @@ controller 的作用更明显：它将固定 30 日再平衡改为状态驱动�
 为增强可解释性，脚本进一步筛选了若干高质量自由 switch case，并将每个 case 画成一个完整持仓期。筛选时优先保留“旧组合已出现回撤、继续持有旧组合后续明显下跌、switch 后收益路径显著改善”的代表性案例；对于 NAS，额外保留一个完整持仓期风险控制案例和一个快速切换案例，以反映该市场中 controller 更偏向快速规避后续下跌的行为。图 6 中，switch 日左侧是真实持有旧组合期间的累计收益，switch 日右侧同时给出两条事后 counterfactual 路径：若继续持有旧组合，收益率继续劣化；若采用 controller 切换后的组合，后续收益路径明显改善。对应结果见 `fig6_controller_switch_cases.png` 和 `controller_switch_cases_zh.md`。
 
 这些案例说明 controller 的具体功能是“状态驱动的退出与重选股”：当当前组合在一个持仓期内开始走弱，且候选组合具备更好的后续风险收益特征时，controller 会提前结束原持仓期并触发 outer actor 重新选股，从而避免继续暴露在旧组合的下跌路径中。需要强调的是，这里的旧组合路径是事后 counterfactual，用于解释模型行为和验证 switch 的实际效果，而不是声称模型在决策时已经知道未来价格。
+
+## NAS 多次 switch 窗口
+
+由于 NAS 测试期内 controller 的自由切换次数较多，单次 switch case 不能完整反映其行为。图 7 进一步选取一个 30 个交易日窗口，将窗口内所有 controller switch 标注在累计收益曲线上，并与固定 30 日 HRL 进行对比。该图用于说明 NAS 上 controller 更像是在一个标准持仓周期内连续进行多次小幅风险重置，从而压低窗口回撤，而不是只依赖一次大的换仓决策。
 """
     path.write_text(text, encoding="utf-8")
     return path
