@@ -143,6 +143,20 @@ def parse_args():
         action="store_true",
         help="Load frozen outer/inner and train only the controller; no outer/inner joint finetune.",
     )
+    parser.add_argument(
+        "--end_to_end_controller_joint",
+        action="store_true",
+        help=(
+            "In the from-scratch HRL schedule, continue after controller PG with a controller-active "
+            "joint finetune of monitor/outer/inner."
+        ),
+    )
+    parser.add_argument(
+        "--controller_joint_epochs",
+        type=int,
+        default=0,
+        help="Controller-active joint finetune epochs after from-scratch controller PG. Default: 0.",
+    )
     parser.add_argument("--warmup_outer_episodes", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--warmup_inner_episodes", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--warmup_monitor_episodes", type=int, default=None, help=argparse.SUPPRESS)
@@ -369,6 +383,33 @@ def parse_args():
             "boundary; controller_max_switches is used as a soft reward-penalty threshold."
         ),
     )
+    parser.add_argument(
+        "--controller_train_max_hold",
+        type=int,
+        default=-1,
+        help=(
+            "Controller-PG training-only max-hold override. -1 uses global max_hold; "
+            "0 disables forced max-hold inside controller training rollouts; positive values override."
+        ),
+    )
+    parser.add_argument(
+        "--controller_train_record_max_duration",
+        type=int,
+        default=0,
+        help=(
+            "Controller-PG training-only log-prob record cap. 0 records all free decisions; "
+            "positive values record only decisions with current holding duration below this cap."
+        ),
+    )
+    parser.add_argument(
+        "--controller_eval_max_hold",
+        type=int,
+        default=-1,
+        help=(
+            "Controller eval/test max-hold override for controller_no_hold_constraints. "
+            "-1 uses global max_hold; 0 disables forced max-hold; positive values override."
+        ),
+    )
     parser.add_argument("--controller_rollout_len", type=int, default=400)
     parser.add_argument("--controller_max_segments", type=int, default=25)
     parser.add_argument("--controller_pg_batch_windows", type=int, default=4)
@@ -394,6 +435,15 @@ def parse_args():
     parser.add_argument("--controller_aux_return_coef", type=float, default=0.0)
     parser.add_argument("--controller_aux_mdd_coef", type=float, default=0.0)
     parser.add_argument("--controller_aux_switch_adv_coef", type=float, default=0.0)
+    parser.add_argument(
+        "--controller_aux_switch_adv_loss_type",
+        choices=["smooth_l1", "weighted_bce", "bce"],
+        default="smooth_l1",
+    )
+    parser.add_argument("--controller_switch_adv_logit_coef", type=float, default=0.0)
+    parser.add_argument("--controller_switch_adv_logit_scale", type=float, default=0.02)
+    parser.add_argument("--controller_switch_adv_logit_detach", action="store_true")
+    parser.add_argument("--controller_compute_switch_advantage", action="store_true")
     parser.add_argument("--controller_aux_return_target_scale", type=float, default=1.0)
     parser.add_argument("--controller_aux_mdd_target_scale", type=float, default=1.0)
     parser.add_argument("--controller_aux_switch_adv_target_scale", type=float, default=1.0)
@@ -408,6 +458,7 @@ def parse_args():
     )
     parser.add_argument("--controller_local_adv_balance_classes", action="store_true")
     parser.add_argument("--controller_expected_switch_penalty_coef", type=float, default=0.0)
+    parser.add_argument("--controller_overflow_action_penalty_coef", type=float, default=0.0)
     parser.add_argument("--controller_value_coef", type=float, default=0.0)
     parser.add_argument(
         "--no_controller_value_normalize_advantage",
@@ -626,6 +677,7 @@ def normalize_training_schedule(args):
         args.warmup_monitor_epochs = int(args.controller_epochs)
     if getattr(args, "joint_outer_inner_epochs", None) is not None:
         args.joint_epochs = int(args.joint_outer_inner_epochs)
+    args.controller_joint_epochs = max(0, int(getattr(args, "controller_joint_epochs", 0) or 0))
     if getattr(args, "train_episode_count", None) is not None:
         args.train_episodes_per_epoch = args.train_episode_count
     if getattr(args, "train_episode_start_stride", None) is not None:
@@ -683,6 +735,7 @@ def normalize_training_schedule(args):
     args.controller_tau_min = min(max(float(args.controller_tau_min), 0.0), 0.99)
     args.controller_tau_max = min(max(float(args.controller_tau_max), args.controller_tau_min + 1e-6), 0.999)
     args.controller_policy_temperature = max(1e-6, float(args.controller_policy_temperature))
+    args.controller_switch_adv_logit_scale = max(1e-8, float(args.controller_switch_adv_logit_scale))
     args.controller_state_return_scale = max(1e-6, float(args.controller_state_return_scale))
     args.controller_state_drawdown_scale = max(1e-6, float(args.controller_state_drawdown_scale))
     args.controller_pg_batch_windows = max(1, int(args.controller_pg_batch_windows))
@@ -928,6 +981,12 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_episode_parallel_workers),
         "--controller_start_stride_days",
         str(args.controller_start_stride_days),
+        "--controller_train_max_hold",
+        str(args.controller_train_max_hold),
+        "--controller_train_record_max_duration",
+        str(args.controller_train_record_max_duration),
+        "--controller_eval_max_hold",
+        str(args.controller_eval_max_hold),
         "--controller_window",
         str(args.controller_window),
         "--controller_hidden_dim",
@@ -940,6 +999,12 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_aux_mdd_coef),
         "--controller_aux_switch_adv_coef",
         str(args.controller_aux_switch_adv_coef),
+        "--controller_aux_switch_adv_loss_type",
+        str(args.controller_aux_switch_adv_loss_type),
+        "--controller_switch_adv_logit_coef",
+        str(args.controller_switch_adv_logit_coef),
+        "--controller_switch_adv_logit_scale",
+        str(args.controller_switch_adv_logit_scale),
         "--controller_aux_return_target_scale",
         str(args.controller_aux_return_target_scale),
         "--controller_aux_mdd_target_scale",
@@ -958,6 +1023,8 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_local_adv_loss_type),
         "--controller_expected_switch_penalty_coef",
         str(args.controller_expected_switch_penalty_coef),
+        "--controller_overflow_action_penalty_coef",
+        str(args.controller_overflow_action_penalty_coef),
         "--controller_value_coef",
         str(args.controller_value_coef),
         "--controller_mdd_coef",
@@ -1027,6 +1094,10 @@ def build_child_command(args, market, run_root, seed):
         cmd.append("--controller_use_switch_supervision")
     if args.controller_aux_pretrain_offpolicy:
         cmd.append("--controller_aux_pretrain_offpolicy")
+    if args.controller_compute_switch_advantage:
+        cmd.append("--controller_compute_switch_advantage")
+    if args.controller_switch_adv_logit_detach:
+        cmd.append("--controller_switch_adv_logit_detach")
     if args.controller_local_adv_balance_classes:
         cmd.append("--controller_local_adv_balance_classes")
     if not args.controller_value_normalize_advantage:
@@ -1043,6 +1114,10 @@ def build_child_command(args, market, run_root, seed):
         cmd.append("--controller_first_joint_finetune")
     if args.controller_only_finetune:
         cmd.append("--controller_only_finetune")
+    if args.end_to_end_controller_joint:
+        cmd.append("--end_to_end_controller_joint")
+    if int(getattr(args, "controller_joint_epochs", 0) or 0) > 0:
+        cmd.extend(["--controller_joint_epochs", str(args.controller_joint_epochs)])
     if not args.train_episode_to_end:
         cmd.append("--no_train_episode_to_end")
     if args.inner_train_fixed_episodes:
@@ -1092,6 +1167,8 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.joint_lr_mult = float(args.joint_lr_mult)
     runtime_config.warmup_inner_epochs = int(args.warmup_inner_epochs)
     runtime_config.joint_epochs = int(args.joint_epochs)
+    runtime_config.end_to_end_controller_joint = bool(args.end_to_end_controller_joint)
+    runtime_config.controller_joint_epochs = int(args.controller_joint_epochs)
     runtime_config.joint_single_full_episode = bool(args.joint_single_full_episode)
     if args.ssm_data_path:
         runtime_config.dataset = dict(runtime_config.dataset)
@@ -1153,6 +1230,9 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.controller_episode_batch_size = int(args.controller_episode_batch_size)
     runtime_config.controller_episode_parallel_workers = int(args.controller_episode_parallel_workers)
     runtime_config.controller_start_stride_days = int(args.controller_start_stride_days)
+    runtime_config.controller_train_max_hold = max(-1, int(args.controller_train_max_hold))
+    runtime_config.controller_train_record_max_duration = max(0, int(args.controller_train_record_max_duration))
+    runtime_config.controller_eval_max_hold = max(-1, int(args.controller_eval_max_hold))
     runtime_config.controller_window = int(args.controller_window)
     runtime_config.controller_hidden_dim = int(args.controller_hidden_dim)
     runtime_config.controller_init_exit_bias = (
@@ -1162,6 +1242,10 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.controller_aux_return_coef = float(args.controller_aux_return_coef)
     runtime_config.controller_aux_mdd_coef = float(args.controller_aux_mdd_coef)
     runtime_config.controller_aux_switch_adv_coef = float(args.controller_aux_switch_adv_coef)
+    runtime_config.controller_aux_switch_adv_loss_type = str(args.controller_aux_switch_adv_loss_type)
+    runtime_config.controller_switch_adv_logit_coef = float(args.controller_switch_adv_logit_coef)
+    runtime_config.controller_switch_adv_logit_scale = max(1e-8, float(args.controller_switch_adv_logit_scale))
+    runtime_config.controller_switch_adv_logit_detach = bool(args.controller_switch_adv_logit_detach)
     runtime_config.controller_aux_return_target_scale = float(args.controller_aux_return_target_scale)
     runtime_config.controller_aux_mdd_target_scale = float(args.controller_aux_mdd_target_scale)
     runtime_config.controller_aux_switch_adv_target_scale = float(args.controller_aux_switch_adv_target_scale)
@@ -1173,10 +1257,12 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.controller_local_adv_loss_type = str(args.controller_local_adv_loss_type)
     runtime_config.controller_local_adv_balance_classes = bool(args.controller_local_adv_balance_classes)
     runtime_config.controller_expected_switch_penalty_coef = max(0.0, float(args.controller_expected_switch_penalty_coef))
+    runtime_config.controller_overflow_action_penalty_coef = max(0.0, float(args.controller_overflow_action_penalty_coef))
     runtime_config.controller_value_coef = max(0.0, float(args.controller_value_coef))
     runtime_config.controller_value_normalize_advantage = bool(args.controller_value_normalize_advantage)
     runtime_config.controller_compute_switch_advantage = (
-        runtime_config.controller_local_adv_coef > 0.0
+        bool(args.controller_compute_switch_advantage)
+        or runtime_config.controller_local_adv_coef > 0.0
         or runtime_config.controller_aux_switch_adv_coef > 0.0
     )
     runtime_config.controller_mdd_coef = float(args.controller_mdd_coef)
@@ -1307,6 +1393,8 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "frozen_hrl_checkpoint": args.frozen_hrl_checkpoint,
             "controller_first_joint_finetune": args.controller_first_joint_finetune,
             "controller_only_finetune": args.controller_only_finetune,
+            "end_to_end_controller_joint": args.end_to_end_controller_joint,
+            "controller_joint_epochs": args.controller_joint_epochs,
             "inner_batch_size": args.inner_batch_size,
             "outer_update_batch_size": args.outer_update_batch_size,
             "trade_num": args.trade_num,
@@ -1342,6 +1430,9 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "controller_episode_batch_size": getattr(runtime_config, "controller_episode_batch_size", None),
             "controller_episode_parallel_workers": getattr(runtime_config, "controller_episode_parallel_workers", None),
             "controller_start_stride_days": getattr(runtime_config, "controller_start_stride_days", None),
+            "controller_train_max_hold": getattr(runtime_config, "controller_train_max_hold", None),
+            "controller_train_record_max_duration": getattr(runtime_config, "controller_train_record_max_duration", None),
+            "controller_eval_max_hold": getattr(runtime_config, "controller_eval_max_hold", None),
             "controller_window": getattr(runtime_config, "controller_window", None),
             "controller_hidden_dim": getattr(runtime_config, "controller_hidden_dim", None),
             "controller_init_exit_bias": getattr(runtime_config, "controller_init_exit_bias", None),
@@ -1349,6 +1440,11 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "controller_aux_return_coef": getattr(runtime_config, "controller_aux_return_coef", None),
             "controller_aux_mdd_coef": getattr(runtime_config, "controller_aux_mdd_coef", None),
             "controller_aux_switch_adv_coef": getattr(runtime_config, "controller_aux_switch_adv_coef", None),
+            "controller_aux_switch_adv_loss_type": getattr(runtime_config, "controller_aux_switch_adv_loss_type", None),
+            "controller_switch_adv_logit_coef": getattr(runtime_config, "controller_switch_adv_logit_coef", None),
+            "controller_switch_adv_logit_scale": getattr(runtime_config, "controller_switch_adv_logit_scale", None),
+            "controller_switch_adv_logit_detach": getattr(runtime_config, "controller_switch_adv_logit_detach", None),
+            "controller_compute_switch_advantage": getattr(runtime_config, "controller_compute_switch_advantage", None),
             "controller_aux_return_target_scale": getattr(runtime_config, "controller_aux_return_target_scale", None),
             "controller_aux_mdd_target_scale": getattr(runtime_config, "controller_aux_mdd_target_scale", None),
             "controller_aux_switch_adv_target_scale": getattr(runtime_config, "controller_aux_switch_adv_target_scale", None),
@@ -1360,6 +1456,7 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "controller_local_adv_loss_type": getattr(runtime_config, "controller_local_adv_loss_type", None),
             "controller_local_adv_balance_classes": getattr(runtime_config, "controller_local_adv_balance_classes", None),
             "controller_expected_switch_penalty_coef": getattr(runtime_config, "controller_expected_switch_penalty_coef", None),
+            "controller_overflow_action_penalty_coef": getattr(runtime_config, "controller_overflow_action_penalty_coef", None),
             "controller_value_coef": getattr(runtime_config, "controller_value_coef", None),
             "controller_value_normalize_advantage": getattr(runtime_config, "controller_value_normalize_advantage", None),
             "controller_mdd_coef": getattr(runtime_config, "controller_mdd_coef", None),
@@ -1570,6 +1667,15 @@ def run_child(args):
 
     if args.controller_first_joint_finetune and args.controller_only_finetune:
         raise ValueError("--controller_first_joint_finetune and --controller_only_finetune are mutually exclusive.")
+    if args.end_to_end_controller_joint and (
+            args.controller_first_joint_finetune
+            or args.controller_only_finetune
+            or args.frozen_hrl_checkpoint
+    ):
+        raise ValueError(
+            "--end_to_end_controller_joint starts from scratch and cannot be combined with "
+            "--frozen_hrl_checkpoint, --controller_first_joint_finetune, or --controller_only_finetune."
+        )
 
     if args.controller_first_joint_finetune:
         if not args.frozen_hrl_checkpoint:

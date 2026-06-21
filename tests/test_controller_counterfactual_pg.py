@@ -280,6 +280,7 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         trainer.cfg = SimpleNamespace(
             controller_no_hold_constraints=True,
             controller_decision_mode="daily",
+            controller_train_max_hold=0,
             max_hold=30,
         )
         spec = PhaseSpec(
@@ -302,6 +303,80 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
 
         self.assertEqual(force_switch, 1)
         self.assertTrue(force_locked)
+
+    def test_controller_eval_max_hold_can_disable_eval_only_forced_switch(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.cfg = SimpleNamespace(
+            controller_no_hold_constraints=True,
+            controller_decision_mode="daily",
+            controller_eval_max_hold=0,
+            max_hold=30,
+        )
+        spec = PhaseSpec(
+            use_schedule=False,
+            inner_always_zero=False,
+            monitor_always_forced=False,
+            mask_monitor_update=False,
+            use_hold_constraints=True,
+        )
+
+        force_switch, force_locked = trainer._compute_force_switch_locked(
+            spec=spec,
+            phase="joint",
+            step_idx=30,
+            duration=30,
+            is_train=False,
+            switch_schedule=None,
+            fixed_cycle=None,
+        )
+
+        self.assertIsNone(force_switch)
+        self.assertFalse(force_locked)
+
+        trainer.cfg.controller_eval_max_hold = -1
+        force_switch, force_locked = trainer._compute_force_switch_locked(
+            spec=spec,
+            phase="joint",
+            step_idx=30,
+            duration=30,
+            is_train=False,
+            switch_schedule=None,
+            fixed_cycle=None,
+        )
+        self.assertEqual(force_switch, 1)
+        self.assertTrue(force_locked)
+
+    def test_controller_training_max_hold_can_disable_training_only_forced_switch(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+
+        trainer.cfg = SimpleNamespace(max_hold=30)
+        self.assertEqual(
+            trainer._controller_train_max_hold(fixed_cycle=40, rollout_len=600),
+            30,
+        )
+
+        trainer.cfg = SimpleNamespace(max_hold=30, controller_train_max_hold=120)
+        self.assertEqual(
+            trainer._controller_train_max_hold(fixed_cycle=40, rollout_len=600),
+            120,
+        )
+
+        trainer.cfg = SimpleNamespace(max_hold=30, controller_train_max_hold=0)
+        self.assertEqual(
+            trainer._controller_train_max_hold(fixed_cycle=40, rollout_len=600),
+            601,
+        )
+
+    def test_controller_train_record_max_duration_limits_pg_records_to_eval_window(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+
+        trainer.cfg = SimpleNamespace(controller_train_record_max_duration=30)
+        self.assertTrue(trainer._controller_should_record_train_decision(duration=29))
+        self.assertFalse(trainer._controller_should_record_train_decision(duration=30))
+        self.assertFalse(trainer._controller_should_record_train_decision(duration=300))
+
+        trainer.cfg = SimpleNamespace(controller_train_record_max_duration=0)
+        self.assertTrue(trainer._controller_should_record_train_decision(duration=300))
 
     def test_eval_decision_mode_can_override_training_fixed_window(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
@@ -766,6 +841,53 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         expected = torch.nn.functional.smooth_l1_loss(
             torch.tensor([0.02]),
             torch.tensor([0.40]),
+        )
+        self.assertIsNotNone(aux_switch_adv_loss)
+        torch.testing.assert_close(aux_switch_adv_loss.detach(), expected)
+
+    def test_controller_terms_can_use_weighted_bce_switch_advantage_aux_loss(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.device = torch.device("cpu")
+        trainer.cfg = SimpleNamespace(
+            controller_aux_return_coef=0.0,
+            controller_aux_mdd_coef=0.0,
+            controller_aux_switch_adv_coef=1.0,
+            controller_aux_switch_adv_loss_type="weighted_bce",
+            controller_aux_switch_adv_target_scale=1.0,
+            controller_local_adv_scale=0.1,
+            controller_local_adv_clip=10.0,
+            controller_local_adv_margin=0.0,
+            controller_sup_coef=0.0,
+            controller_use_switch_supervision=False,
+            controller_max_switches=0,
+            controller_local_adv_coef=0.0,
+        )
+        trainer.agent = SimpleNamespace(
+            net=SimpleNamespace(mon=_FakeControllerMonitor())
+        )
+        record = {
+            "ssm": {
+                "z": torch.zeros(1, 1),
+                "h": torch.zeros(1, 1),
+                "p": torch.zeros(1, 1),
+                "q_bear": torch.zeros(1, 1),
+                "q_bull": torch.zeros(1, 1),
+            },
+            "weights_drift": torch.ones(1, 1),
+            "port_state": torch.zeros(1, 6),
+            "switch_action": torch.ones(1, 1),
+            "asset_state": None,
+            "action": torch.tensor([1]),
+            "free_switch_index": 1,
+            "switch_advantage": torch.tensor([0.20]),
+        }
+
+        terms = trainer._controller_episode_terms([[record]])
+        aux_switch_adv_loss = terms[5]
+
+        expected = torch.nn.functional.binary_cross_entropy_with_logits(
+            torch.tensor([0.02 / 0.1]),
+            torch.tensor([1.0]),
         )
         self.assertIsNotNone(aux_switch_adv_loss)
         torch.testing.assert_close(aux_switch_adv_loss.detach(), expected)

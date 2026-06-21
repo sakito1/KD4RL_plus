@@ -123,6 +123,125 @@ class HoldExitControllerTests(unittest.TestCase):
         self.assertTrue(torch.equal(action_at_half, torch.zeros_like(action_at_half)))
         self.assertTrue(torch.equal(action_above_half, torch.ones_like(action_above_half)))
 
+    def test_switch_advantage_logit_coupling_is_disabled_by_default(self):
+        torch.manual_seed(121)
+        controller = MonitorAC(
+            z_dim=4,
+            h_dim=4,
+            port_state_dim=6,
+            hidden_dim=8,
+            action_dim=3,
+            asset_in_dim=7,
+        )
+        controller.eval()
+        with torch.no_grad():
+            controller.exit_head.weight.zero_()
+            controller.exit_head.bias.zero_()
+            controller.switch_adv_head.weight.zero_()
+            controller.switch_adv_head.bias.fill_(0.05)
+        z, p, q, weights, switch, port_state, asset_state = self._inputs()
+
+        stats = controller.decision_stats(
+            z, z, p, q, q, weights, port_state,
+            switch_action=switch,
+            asset_state=asset_state,
+        )
+
+        torch.testing.assert_close(stats["base_exit_logit"], torch.zeros_like(stats["base_exit_logit"]))
+        torch.testing.assert_close(stats["policy_logit"], torch.zeros_like(stats["policy_logit"]))
+        torch.testing.assert_close(stats["switch_advantage_pred"], torch.full_like(stats["switch_advantage_pred"], 0.05))
+
+    def test_switch_advantage_logit_coupling_can_drive_exit_policy(self):
+        torch.manual_seed(122)
+        controller = MonitorAC(
+            z_dim=4,
+            h_dim=4,
+            port_state_dim=6,
+            hidden_dim=8,
+            action_dim=3,
+            asset_in_dim=7,
+            switch_adv_logit_coef=2.0,
+            switch_adv_logit_scale=0.02,
+        )
+        controller.eval()
+        with torch.no_grad():
+            controller.exit_head.weight.zero_()
+            controller.exit_head.bias.zero_()
+            controller.switch_adv_head.weight.zero_()
+            controller.switch_adv_head.bias.fill_(0.04)
+        z, p, q, weights, switch, port_state, asset_state = self._inputs()
+
+        stats = controller.decision_stats(
+            z, z, p, q, q, weights, port_state,
+            switch_action=switch,
+            asset_state=asset_state,
+        )
+        action, _, _, _, _ = controller(
+            z, z, p, q, q, weights, port_state,
+            switch_action=switch,
+            deterministic=True,
+            asset_state=asset_state,
+        )
+
+        expected_logit = 2.0 * torch.tanh(torch.full_like(stats["policy_logit"], 0.04 / 0.02))
+        torch.testing.assert_close(stats["base_exit_logit"], torch.zeros_like(stats["base_exit_logit"]))
+        torch.testing.assert_close(stats["policy_logit"], expected_logit)
+        self.assertTrue(torch.all(action == 1).item())
+
+    def test_switch_advantage_logit_coupling_can_detach_policy_gradient(self):
+        torch.manual_seed(123)
+        z, p, q, weights, switch, port_state, asset_state = self._inputs()
+
+        attached = MonitorAC(
+            z_dim=4,
+            h_dim=4,
+            port_state_dim=6,
+            hidden_dim=8,
+            action_dim=3,
+            asset_in_dim=7,
+            switch_adv_logit_coef=2.0,
+            switch_adv_logit_scale=0.5,
+        )
+        detached = MonitorAC(
+            z_dim=4,
+            h_dim=4,
+            port_state_dim=6,
+            hidden_dim=8,
+            action_dim=3,
+            asset_in_dim=7,
+            switch_adv_logit_coef=2.0,
+            switch_adv_logit_scale=0.5,
+            switch_adv_logit_detach=True,
+        )
+        for controller in (attached, detached):
+            controller.eval()
+            with torch.no_grad():
+                controller.exit_head.weight.zero_()
+                controller.exit_head.bias.zero_()
+                controller.switch_adv_head.weight.zero_()
+                controller.switch_adv_head.bias.zero_()
+
+        attached_stats = attached.decision_stats(
+            z, z, p, q, q, weights, port_state,
+            switch_action=switch,
+            asset_state=asset_state,
+        )
+        attached_stats["policy_logit"].sum().backward()
+        detached_stats = detached.decision_stats(
+            z, z, p, q, q, weights, port_state,
+            switch_action=switch,
+            asset_state=asset_state,
+        )
+        detached_stats["policy_logit"].sum().backward()
+
+        self.assertIsNotNone(attached.exit_head.bias.grad)
+        self.assertIsNotNone(detached.exit_head.bias.grad)
+        self.assertIsNotNone(attached.switch_adv_head.bias.grad)
+        self.assertGreater(attached.switch_adv_head.bias.grad.abs().sum().item(), 0.0)
+        detached_switch_grad = detached.switch_adv_head.bias.grad
+        if detached_switch_grad is not None:
+            torch.testing.assert_close(detached_switch_grad, torch.zeros_like(detached_switch_grad))
+
     def test_deterministic_action_uses_configurable_exit_threshold(self):
         torch.manual_seed(13)
         controller = MonitorAC(

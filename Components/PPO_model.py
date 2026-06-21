@@ -465,6 +465,9 @@ class MonitorAC(nn.Module):
             weight_floor=1e-6,
             eval_switch_threshold=0.5,
             init_exit_bias=None,
+            switch_adv_logit_coef=0.0,
+            switch_adv_logit_scale=0.02,
+            switch_adv_logit_detach=False,
     ):
         super().__init__()
         self.z_dim = int(z_dim)
@@ -478,6 +481,9 @@ class MonitorAC(nn.Module):
         self.controller_window = max(1, int(controller_window))
         self.weight_floor = max(float(weight_floor), 0.0)
         self.eval_switch_threshold = min(1.0, max(0.0, float(eval_switch_threshold)))
+        self.switch_adv_logit_coef = float(switch_adv_logit_coef)
+        self.switch_adv_logit_scale = max(float(switch_adv_logit_scale), 1e-8)
+        self.switch_adv_logit_detach = bool(switch_adv_logit_detach)
 
         input_dim = self.asset_in_dim if self.asset_in_dim is not None else self.z_dim
         self.asset_lstm = nn.LSTM(
@@ -633,10 +639,24 @@ class MonitorAC(nn.Module):
             action_state,
         ], dim=-1)
         head = self.head_mlp(value_feat)
-        exit_logit = self.exit_head(head).squeeze(-1)
+        base_exit_logit = self.exit_head(head).squeeze(-1)
+        switch_advantage_pred = self.switch_adv_head(head).squeeze(-1)
+        if self.switch_adv_logit_coef != 0.0:
+            switch_adv_for_logit = (
+                switch_advantage_pred.detach()
+                if self.switch_adv_logit_detach
+                else switch_advantage_pred
+            )
+            switch_adv_logit = self.switch_adv_logit_coef * torch.tanh(
+                switch_adv_for_logit / self.switch_adv_logit_scale
+            )
+            exit_logit = base_exit_logit + switch_adv_logit
+        else:
+            exit_logit = base_exit_logit
         exit_prob = torch.sigmoid(exit_logit).clamp(1e-6, 1.0 - 1e-6)
         value = self.value_mlp(value_feat)
         return {
+            "base_exit_logit": base_exit_logit,
             "exit_logit": exit_logit,
             "exit_prob": exit_prob,
             "policy_logit": exit_logit,
@@ -645,7 +665,7 @@ class MonitorAC(nn.Module):
             "tau": torch.full_like(exit_prob, 0.5),
             "hold_return_pred": self.return_head(head).squeeze(-1),
             "hold_risk_pred": self.risk_head(head).squeeze(-1),
-            "switch_advantage_pred": self.switch_adv_head(head).squeeze(-1),
+            "switch_advantage_pred": switch_advantage_pred,
             "value": value,
             "value_feat": value_feat,
         }

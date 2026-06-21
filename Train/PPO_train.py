@@ -105,6 +105,9 @@ class HRL_Networks(nn.Module):
                 weight_floor=getattr(cfg, "controller_weight_floor", 1e-6),
                 eval_switch_threshold=getattr(cfg, "controller_eval_switch_threshold", 0.5),
                 init_exit_bias=getattr(cfg, "controller_init_exit_bias", None),
+                switch_adv_logit_coef=getattr(cfg, "controller_switch_adv_logit_coef", 0.0),
+                switch_adv_logit_scale=getattr(cfg, "controller_switch_adv_logit_scale", 0.02),
+                switch_adv_logit_detach=getattr(cfg, "controller_switch_adv_logit_detach", False),
             ),
             outer_actor_args=dict(
                 lstm_dim=HIDDEN_DIM,
@@ -668,8 +671,12 @@ class HRL_Trainer:
             return 1, True
 
         if spec.use_hold_constraints and bool(getattr(self.cfg, "controller_no_hold_constraints", False)):
-            max_hold = int(getattr(self.cfg, "max_hold", 60))
-            if duration >= max_hold:
+            max_hold = (
+                int(getattr(self.cfg, "max_hold", 60))
+                if is_train
+                else self._controller_eval_max_hold()
+            )
+            if max_hold > 0 and duration >= max_hold:
                 return 1, True
             decision_mode = self._controller_decision_mode(is_train=is_train)
             if decision_mode == "stride":
@@ -685,6 +692,7 @@ class HRL_Trainer:
             if (
                     not is_train
                     and bool(getattr(self.cfg, "controller_eval_force_max_hold", False))
+                    and max_hold > 0
                     and duration >= max_hold
             ):
                 return 1, True
@@ -982,12 +990,35 @@ class HRL_Trainer:
             "switch_advantage": switch_advantage.detach().view(-1) if isinstance(switch_advantage, torch.Tensor) else None,
         }
 
+    def _controller_train_max_hold(self, fixed_cycle: int, rollout_len: int) -> int:
+        override = int(getattr(self.cfg, "controller_train_max_hold", -1))
+        if override == 0:
+            return max(1, int(rollout_len) + 1)
+        if override > 0:
+            return override
+        fallback = fixed_cycle if fixed_cycle is not None else getattr(self.cfg, "max_hold", 60)
+        return max(1, int(getattr(self.cfg, "max_hold", fallback)))
+
+    def _controller_eval_max_hold(self) -> int:
+        override = int(getattr(self.cfg, "controller_eval_max_hold", -1))
+        if override == 0:
+            return 0
+        if override > 0:
+            return override
+        return max(1, int(getattr(self.cfg, "max_hold", 60)))
+
+    def _controller_should_record_train_decision(self, duration: int) -> bool:
+        max_duration = int(getattr(self.cfg, "controller_train_record_max_duration", 0) or 0)
+        if max_duration <= 0:
+            return True
+        return int(duration) < max_duration
+
     def _run_controller_pg_window(self, env, start_idx: int, stop_idx: int, fixed_cycle: int, epoch: int = None):
         obs = env.reset_at(start_idx, stop_idx)
         history = [env.portfolio_value.item()]
         rollout_len = max(1, int(stop_idx) - int(start_idx))
         min_hold = int(getattr(self.cfg, "min_hold", 10))
-        max_hold = int(getattr(self.cfg, "max_hold", fixed_cycle))
+        max_hold = self._controller_train_max_hold(fixed_cycle=fixed_cycle, rollout_len=rollout_len)
         max_segments = self._controller_max_allowed_switches(rollout_len, min_hold)
 
         turnover_sum = 0.0
@@ -1091,12 +1122,15 @@ class HRL_Trainer:
                     free_exit_probs = stats["exit_prob"].detach().view(-1).cpu().numpy().astype(float).tolist()
                 is_switch = bool(act_mon.item() == 1)
                 base_used = torch.where(act_mon.view(-1, 1).bool(), act_out.detach(), obs["base_drift"])
-                entropies.append(entropy.reshape(()))
+                record_train_decision = self._controller_should_record_train_decision(duration)
+                if record_train_decision:
+                    entropies.append(entropy.reshape(()))
                 if is_switch:
                     free_switch_count += 1
                     free_switch_index = free_switch_count
-                pending_record = (obs, act_out, act_mon, free_switch_index, free_exit_probs)
-                if self._controller_uses_switch_advantage_targets():
+                if record_train_decision:
+                    pending_record = (obs, act_out, act_mon, free_switch_index, free_exit_probs)
+                if record_train_decision and self._controller_uses_switch_advantage_targets():
                     with torch.no_grad():
                         hold_exec = self._deterministic_inner_exec(
                             obs,
@@ -1487,6 +1521,9 @@ class HRL_Trainer:
         aux_return_coef = float(getattr(self.cfg, "controller_aux_return_coef", 0.0))
         aux_mdd_coef = float(getattr(self.cfg, "controller_aux_mdd_coef", 0.0))
         aux_switch_adv_coef = float(getattr(self.cfg, "controller_aux_switch_adv_coef", 0.0))
+        aux_switch_adv_loss_type = str(
+            getattr(self.cfg, "controller_aux_switch_adv_loss_type", "smooth_l1")
+        ).lower()
         local_adv_coef = float(getattr(self.cfg, "controller_local_adv_coef", 0.0))
         local_adv_scale = max(float(getattr(self.cfg, "controller_local_adv_scale", 0.05)), 1e-8)
         local_adv_clip = max(float(getattr(self.cfg, "controller_local_adv_clip", 10.0)), 0.0)
@@ -1580,9 +1617,34 @@ class HRL_Trainer:
                         "controller_aux_switch_adv_target_scale",
                         1.0,
                     ))
-                    aux_switch_adv_losses.append(
-                        F.smooth_l1_loss(stats["switch_advantage_pred"].view(-1), target_switch_adv.view(-1))
-                    )
+                    pred_switch_adv = stats["switch_advantage_pred"].view(-1)
+                    target_switch_adv = target_switch_adv.view(-1)
+                    valid_switch_adv = torch.isfinite(target_switch_adv) & torch.isfinite(pred_switch_adv)
+                    if torch.count_nonzero(valid_switch_adv).item() > 0:
+                        pred_switch_adv = pred_switch_adv[valid_switch_adv]
+                        target_switch_adv = target_switch_adv[valid_switch_adv]
+                        if aux_switch_adv_loss_type in {"weighted_bce", "bce"}:
+                            effective_adv = target_switch_adv - local_adv_margin
+                            labels = (effective_adv > 0).to(dtype=pred_switch_adv.dtype)
+                            pred_logits = pred_switch_adv / local_adv_scale
+                            raw_bce = F.binary_cross_entropy_with_logits(
+                                pred_logits,
+                                labels,
+                                reduction="none",
+                            )
+                            if aux_switch_adv_loss_type == "weighted_bce":
+                                weights = (effective_adv / local_adv_scale).abs().clamp(
+                                    max=local_adv_clip,
+                                ).detach()
+                                aux_switch_adv_losses.append(
+                                    (raw_bce * weights).sum() / weights.sum().clamp_min(1e-8)
+                                )
+                            else:
+                                aux_switch_adv_losses.append(raw_bce.mean())
+                        else:
+                            aux_switch_adv_losses.append(
+                                F.smooth_l1_loss(pred_switch_adv, target_switch_adv)
+                            )
                 if sup_coef > 0.0 and record.get("sup_label") is not None and record.get("sup_weight") is not None:
                     label = record["sup_label"].to(device=self.device, dtype=stats["policy_logit"].dtype).view(-1)
                     weight = record["sup_weight"].to(device=self.device, dtype=stats["policy_logit"].dtype).view(-1)
@@ -2124,6 +2186,10 @@ class HRL_Trainer:
 
         fixed_episode_pool = bool(getattr(self.cfg, "controller_train_fixed_episodes", False))
         controller_start_pool = self._controller_train_start_pool(rollout_len) if fixed_episode_pool else None
+        controller_train_max_hold = self._controller_train_max_hold(
+            fixed_cycle=fixed_cycle,
+            rollout_len=rollout_len,
+        )
         controller_episode_batch_size = max(
             1,
             int(getattr(self.cfg, "controller_episode_batch_size", batch_windows)),
@@ -2131,12 +2197,16 @@ class HRL_Trainer:
         if fixed_episode_pool:
             self.logger.info(
                 "   [Controller Batch] fixed episode pool=%s, episode_batch_size=%s, parallel_workers=%s, "
-                "episode_len=%s, start_stride_days=%s",
+                "episode_len=%s, start_stride_days=%s, train_max_hold=%s, "
+                "record_max_duration=%s, switch_adv_mining=%s",
                 len(controller_start_pool),
                 controller_episode_batch_size,
                 max(1, int(getattr(self.cfg, "controller_episode_parallel_workers", 1))),
                 rollout_len,
                 int(getattr(self.cfg, "controller_start_stride_days", self.cfg.max_hold)),
+                controller_train_max_hold,
+                int(getattr(self.cfg, "controller_train_record_max_duration", 0) or 0),
+                bool(getattr(self.cfg, "controller_compute_switch_advantage", False)),
             )
 
         sup_pretrain_epochs = int(getattr(self.cfg, "controller_sup_pretrain_epochs", 0) or 0)
@@ -3205,6 +3275,7 @@ def train_warmup_then_joint_with_monitor(trainer,
     warmup_out_best_ckpt = f"temp_warmup_outer.pth"
     warmup_inn_best_ckpt = f"temp_warmup_inner.pth"
     hrl_fixed_best_ckpt = f"hrl_fixed_best.pth"
+    controller_best_ckpt = f"controller_best.pth"
 
     def _do_validate(tag: str, *, use_controller: bool = False, disable_inner: bool = False):
         trainer.env.set_mode("val")
@@ -3477,6 +3548,10 @@ def train_warmup_then_joint_with_monitor(trainer,
     # =========================================================
     controller_pg_result = {"best_score": 0.0, "updates": 0}
     controller_epochs = warmup_monitor_episodes // train_episodes_per_epoch if train_episodes_per_epoch > 0 else 0
+    end_to_end_controller_joint = bool(getattr(trainer.cfg, "end_to_end_controller_joint", False))
+    controller_joint_epochs = max(0, int(getattr(trainer.cfg, "controller_joint_epochs", 0) or 0))
+    run_controller_joint = end_to_end_controller_joint and controller_joint_epochs > 0
+    controller_pg_save_name = controller_best_ckpt if run_controller_joint else final_best_ckpt
     if train_monitor and controller_epochs > 0:
         trainer.logger.info(
             f"### [4/4] CONTROLLER Counterfactual PG: {controller_epochs} epochs, "
@@ -3488,21 +3563,156 @@ def train_warmup_then_joint_with_monitor(trainer,
             epochs=controller_epochs,
             fixed_cycle=fixed_cycle,
             val_interval=max(1, controller_val_interval),
-            save_name=final_best_ckpt,
+            save_name=controller_pg_save_name,
         )
     else:
         trainer.logger.info("### [4/4] CONTROLLER Counterfactual PG: skipped ###")
         trainer.save_model(final_best_ckpt)
 
+    controller_joint_result = {
+        "enabled": bool(run_controller_joint),
+        "best_score": None,
+        "episodes": 0,
+        "controller_active": False,
+        "selection_metric": str(getattr(trainer.cfg, "controller_selection_metric", "risk_return")),
+    }
+    if run_controller_joint:
+        if os.path.exists(os.path.join(trainer.model_dir, controller_best_ckpt)):
+            trainer._load_model(controller_best_ckpt)
+            trainer.logger.info("   ↺ Loaded best controller before end-to-end joint finetune.")
+        elif os.path.exists(os.path.join(trainer.model_dir, final_best_ckpt)):
+            trainer._load_model(final_best_ckpt)
+            trainer.logger.info("   ↺ Loaded current best model before end-to-end joint finetune.")
+
+        trainer.logger.info(
+            "### [5/5] END-TO-END CONTROLLER+HRL JOINT FINETUNE: %s epochs, controller active, update_every=%s steps ###",
+            controller_joint_epochs,
+            _rollout_update_steps_for("joint"),
+        )
+        trainer.agent.set_module_status("all")
+        joint_lr_mult = float(getattr(trainer.cfg, "joint_lr_mult", 1.0))
+        if hasattr(trainer.agent, "set_lr_multiplier"):
+            joint_lrs = trainer.agent.set_lr_multiplier(joint_lr_mult)
+            trainer.logger.info(
+                "End-to-end controller joint lr multiplier=%s -> monitor=%g outer=%g inner=%g",
+                joint_lr_mult,
+                joint_lrs.get("monitor", 0.0),
+                joint_lrs.get("outer", 0.0),
+                joint_lrs.get("inner", 0.0),
+            )
+
+        best_controller_joint_score = -np.inf
+        joint_update_steps = _rollout_update_steps_for("joint")
+        for ep in range(controller_joint_epochs):
+            if joint_single_full_episode:
+                previous = trainer._apply_train_episode_config(
+                    train_episode_to_end=True,
+                    train_episodes_per_epoch=1,
+                    train_start_stride_days=1,
+                    episode_len=getattr(trainer.env, "episode_len", max(1, int(fixed_cycle))),
+                )
+                try:
+                    ret = trainer.run_episode(
+                        trainer.env,
+                        mode="train",
+                        phase="joint",
+                        fixed_cycle=None,
+                        use_rule_switch=False,
+                        rollout_update_steps=joint_update_steps,
+                        auto_update_phase="joint",
+                        train_monitor=train_monitor,
+                    )
+                finally:
+                    trainer._restore_train_episode_config(previous)
+            else:
+                ret = trainer.run_episode(
+                    trainer.env,
+                    mode="train",
+                    phase="joint",
+                    fixed_cycle=None,
+                    use_rule_switch=False,
+                    rollout_update_steps=joint_update_steps,
+                    auto_update_phase="joint",
+                    train_monitor=train_monitor,
+                )
+            loss = ret.get("loss_log", {})
+            trainer.logger.info(
+                "[%s] E2E-Controller-Joint %s/%s | Updates:%s L_mon:%0.3f L_out:%0.3f L_in:%0.3f",
+                save_prefix,
+                ep + 1,
+                controller_joint_epochs,
+                ret.get("update_count", 0),
+                loss.get("mon_pi", 0.0),
+                loss.get("out_pi", 0.0),
+                loss.get("inn_pi", 0.0),
+            )
+
+            if (ep + 1) % max(1, int(val_interval)) == 0 or (ep + 1) == controller_joint_epochs:
+                trainer.env.set_mode("val")
+                trainer.agent.net.eval()
+                val_ret = trainer.run_episode(
+                    trainer.env,
+                    mode="eval",
+                    phase="joint",
+                    fixed_cycle=None,
+                    use_rule_switch=False,
+                )
+                metrics = trainer._compute_metrics(val_ret["history"])
+                score = trainer._validation_score(metrics, trainer.cfg, phase="controller")
+                trainer.env.set_mode("train")
+                trainer.agent.net.train()
+                trainer.logger.info(
+                    "   >>> [VAL e2e_controller_joint ep=%s] select=%s score=%.4f Sharpe=%.4f Ret=%.2f%% MDD=%.2f%% switches=%s",
+                    ep + 1,
+                    getattr(trainer.cfg, "controller_selection_metric", "risk_return"),
+                    score,
+                    metrics["sharpe"],
+                    metrics["total_ret"] * 100.0,
+                    metrics["max_dd"] * 100.0,
+                    val_ret.get("switch_count", 0),
+                )
+                if score > best_controller_joint_score:
+                    best_controller_joint_score = score
+                    trainer.save_model(final_best_ckpt)
+                    trainer.logger.info("       (New End-to-End Controller Joint Best: %.4f)", score)
+
+        if os.path.exists(os.path.join(trainer.model_dir, final_best_ckpt)):
+            trainer._load_model(final_best_ckpt)
+            trainer.logger.info("   ↺ End-to-end controller joint finished. Loaded best final model.")
+        else:
+            trainer.save_model(final_best_ckpt)
+        if hasattr(trainer.agent, "set_lr_multiplier"):
+            trainer.agent.set_lr_multiplier(1.0)
+        controller_joint_result = {
+            "enabled": True,
+            "best_score": float(best_controller_joint_score),
+            "episodes": int(controller_joint_epochs),
+            "controller_active": True,
+            "selection_metric": str(getattr(trainer.cfg, "controller_selection_metric", "risk_return")),
+        }
+
     trainer.save_model(final_last_ckpt)
+    final_best_score = (
+        controller_joint_result["best_score"]
+        if controller_joint_result["best_score"] is not None
+        else float(global_best_sharpe)
+    )
     return {
         "fixed_cycle": fixed_cycle,
         "best_sharpe": float(global_best_sharpe),
-        "best_selection_score": float(global_best_sharpe),
-        "model_selection_metric": str(getattr(trainer.cfg, "model_selection_metric", "sharpe")),
+        "best_selection_score": float(final_best_score),
+        "model_selection_metric": str(
+            getattr(
+                trainer.cfg,
+                "controller_selection_metric" if run_controller_joint else "model_selection_metric",
+                "risk_return" if run_controller_joint else "sharpe",
+            )
+        ),
         "best_ckpt": final_best_ckpt,
         "hrl_fixed_ckpt": hrl_fixed_best_ckpt,
+        "controller_best_ckpt": controller_best_ckpt if run_controller_joint else None,
         "controller_pg": controller_pg_result,
+        "controller_joint_finetune": controller_joint_result,
     }
 
 

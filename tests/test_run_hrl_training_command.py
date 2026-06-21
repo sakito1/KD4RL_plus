@@ -53,6 +53,28 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
         self.assertIn("--train_monitor", command)
         self.assertNotIn("--no_train_controller", command)
 
+    def test_end_to_end_controller_joint_is_forwarded_to_child_command(self):
+        args = self._args_from_cli([
+            "--markets", "sh",
+            "--train_monitor",
+            "--end_to_end_controller_joint",
+            "--controller_joint_epochs",
+            "2",
+        ])
+
+        command = run_hrl_training.build_child_command(
+            args,
+            market="sh",
+            run_root=Path("/tmp/hrl-test"),
+            seed=90,
+        )
+
+        self.assertIn("--end_to_end_controller_joint", command)
+        self.assertEqual(command[command.index("--controller_joint_epochs") + 1], "2")
+        self.assertNotIn("--frozen_hrl_checkpoint", command)
+        self.assertNotIn("--controller_only_finetune", command)
+        self.assertNotIn("--controller_first_joint_finetune", command)
+
     def test_frozen_hrl_checkpoint_is_forwarded_to_child_command(self):
         args = self._args_from_cli([
             "--markets", "sh",
@@ -61,6 +83,13 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
             "--controller_only_finetune",
             "--controller_no_hold_constraints",
             "--controller_train_fixed_episodes",
+            "--controller_train_max_hold",
+            "0",
+            "--controller_train_record_max_duration",
+            "30",
+            "--controller_eval_max_hold",
+            "0",
+            "--controller_compute_switch_advantage",
             "--controller_episode_batch_size",
             "12",
             "--controller_episode_parallel_workers",
@@ -83,6 +112,13 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
             "0.2",
             "--controller_aux_switch_adv_coef",
             "0.15",
+            "--controller_aux_switch_adv_loss_type",
+            "weighted_bce",
+            "--controller_switch_adv_logit_coef",
+            "2.0",
+            "--controller_switch_adv_logit_scale",
+            "0.02",
+            "--controller_switch_adv_logit_detach",
             "--controller_aux_pretrain_offpolicy",
             "--controller_aux_replay_epochs",
             "4",
@@ -95,6 +131,8 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
             "--controller_local_adv_balance_classes",
             "--controller_expected_switch_penalty_coef",
             "0.004",
+            "--controller_overflow_action_penalty_coef",
+            "0.02",
             "--controller_value_coef",
             "0.25",
             "--no_controller_value_normalize_advantage",
@@ -119,6 +157,10 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
         self.assertNotIn("--controller_first_joint_finetune", command)
         self.assertIn("--controller_no_hold_constraints", command)
         self.assertIn("--controller_train_fixed_episodes", command)
+        self.assertEqual(command[command.index("--controller_train_max_hold") + 1], "0")
+        self.assertEqual(command[command.index("--controller_train_record_max_duration") + 1], "30")
+        self.assertEqual(command[command.index("--controller_eval_max_hold") + 1], "0")
+        self.assertIn("--controller_compute_switch_advantage", command)
         self.assertEqual(command[command.index("--controller_episode_batch_size") + 1], "12")
         self.assertEqual(command[command.index("--controller_episode_parallel_workers") + 1], "12")
         self.assertEqual(command[command.index("--controller_window") + 1], "30")
@@ -130,6 +172,10 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--controller_aux_return_coef") + 1], "0.2")
         self.assertEqual(command[command.index("--controller_aux_mdd_coef") + 1], "0.2")
         self.assertEqual(command[command.index("--controller_aux_switch_adv_coef") + 1], "0.15")
+        self.assertEqual(command[command.index("--controller_aux_switch_adv_loss_type") + 1], "weighted_bce")
+        self.assertEqual(command[command.index("--controller_switch_adv_logit_coef") + 1], "2.0")
+        self.assertEqual(command[command.index("--controller_switch_adv_logit_scale") + 1], "0.02")
+        self.assertIn("--controller_switch_adv_logit_detach", command)
         self.assertIn("--controller_aux_pretrain_offpolicy", command)
         self.assertEqual(command[command.index("--controller_aux_replay_epochs") + 1], "4")
         self.assertEqual(command[command.index("--controller_local_adv_coef") + 1], "0.3")
@@ -137,6 +183,7 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--controller_local_adv_loss_type") + 1], "weighted_bce")
         self.assertIn("--controller_local_adv_balance_classes", command)
         self.assertEqual(command[command.index("--controller_expected_switch_penalty_coef") + 1], "0.004")
+        self.assertEqual(command[command.index("--controller_overflow_action_penalty_coef") + 1], "0.02")
         self.assertEqual(command[command.index("--controller_value_coef") + 1], "0.25")
         self.assertIn("--no_controller_value_normalize_advantage", command)
         self.assertEqual(command[command.index("--controller_max_switches") + 1], "40")
