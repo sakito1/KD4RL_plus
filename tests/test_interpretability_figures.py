@@ -155,10 +155,11 @@ class InterpretabilityFigureHelperTests(unittest.TestCase):
             ]
         )
 
-        cases = build_switch_narrative_cases(trace, market="sh", top_n=1)
+        cases = build_switch_narrative_cases(trace, market="sh", top_n=1, horizons=(2,))
 
         self.assertEqual(cases["start_date"].tolist(), ["2020-01-01"])
         self.assertEqual(cases["switch_date"].tolist(), ["2020-01-03"])
+        self.assertEqual(cases["post_horizon"].tolist(), [2])
         self.assertEqual(cases["pre_switch_return"].round(6).tolist(), [0.03])
         self.assertEqual(cases["post_hold_return"].round(6).tolist(), [-0.10])
         self.assertEqual(cases["post_switch_return"].round(6).tolist(), [0.04])
@@ -166,7 +167,7 @@ class InterpretabilityFigureHelperTests(unittest.TestCase):
         pre_curve = [round(x, 6) for x in json.loads(cases["pre_curve"].iloc[0])]
         self.assertEqual(pre_curve, [0.0, 0.08, 0.03])
 
-    def test_select_paper_switch_cases_filters_weak_examples(self):
+    def test_select_paper_switch_cases_keeps_strong_nas_examples(self):
         import pandas as pd
 
         candidates = pd.DataFrame(
@@ -179,6 +180,7 @@ class InterpretabilityFigureHelperTests(unittest.TestCase):
                     "post_hold_return": -0.04,
                     "post_switch_return": -0.03,
                     "avoided_deterioration": 0.01,
+                    "post_horizon": 20,
                     "story_score": 0.01,
                 },
                 {
@@ -189,6 +191,7 @@ class InterpretabilityFigureHelperTests(unittest.TestCase):
                     "post_hold_return": -0.10,
                     "post_switch_return": 0.04,
                     "avoided_deterioration": 0.14,
+                    "post_horizon": 20,
                     "story_score": 0.15,
                 },
                 {
@@ -199,15 +202,38 @@ class InterpretabilityFigureHelperTests(unittest.TestCase):
                     "post_hold_return": -0.03,
                     "post_switch_return": 0.03,
                     "avoided_deterioration": 0.06,
+                    "post_horizon": 20,
                     "story_score": 0.07,
+                },
+                {
+                    "market": "nas",
+                    "case_rank": 2,
+                    "holding_days": 19,
+                    "pre_switch_drawdown": 0.094,
+                    "post_hold_return": -0.030,
+                    "post_switch_return": -0.002,
+                    "avoided_deterioration": 0.028,
+                    "post_horizon": 10,
+                    "story_score": 0.04,
+                },
+                {
+                    "market": "nas",
+                    "case_rank": 3,
+                    "holding_days": 1,
+                    "pre_switch_drawdown": 0.0,
+                    "post_hold_return": -0.038,
+                    "post_switch_return": 0.002,
+                    "avoided_deterioration": 0.040,
+                    "post_horizon": 20,
+                    "story_score": 0.04,
                 },
             ]
         )
 
-        selected = select_paper_switch_cases(candidates, max_cases=3)
+        selected = select_paper_switch_cases(candidates, max_cases=4)
 
-        self.assertEqual(selected["market"].tolist(), ["sh", "sh"])
-        self.assertEqual(selected["case_rank"].tolist(), [1, 2])
+        self.assertEqual(selected["market"].tolist(), ["sh", "sh", "nas", "nas"])
+        self.assertEqual(selected["post_horizon"].tolist(), [20, 20, 10, 20])
 
 
 if __name__ == "__main__":
