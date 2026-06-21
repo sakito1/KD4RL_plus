@@ -258,6 +258,161 @@ def select_switch_cases(trace: pd.DataFrame, *, top_n: int = 4) -> pd.DataFrame:
     return cases
 
 
+def _series_drawdown(values: Sequence[float]) -> float:
+    arr = np.asarray(list(values), dtype="float64")
+    if arr.size <= 1:
+        return 0.0
+    peaks = np.maximum.accumulate(np.maximum(arr, 1e-12))
+    return float(np.max((peaks - arr) / peaks))
+
+
+def _fallback_curve_from_row(row: pd.Series, preferred: str, legacy: str) -> np.ndarray:
+    key = preferred if preferred in row and isinstance(row.get(preferred), str) else legacy
+    return _parse_curve_json(row.get(key))
+
+
+def build_switch_narrative_cases(
+    trace: pd.DataFrame,
+    *,
+    market: str,
+    top_n: int = 4,
+    min_holding_days: int = 1,
+) -> pd.DataFrame:
+    if trace.empty or "is_free_switch" not in trace.columns:
+        return pd.DataFrame()
+
+    df = trace.reset_index(drop=True).copy()
+    rows = []
+    for event_pos, row in df[df["is_free_switch"] == 1].iterrows():
+        hold_curve = _parse_curve_json(row.get("hold_curve_20"))
+        switch_curve = _parse_curve_json(row.get("switch_curve_20"))
+        horizon = min(len(hold_curve), len(switch_curve))
+        if horizon < 2:
+            continue
+        hold_curve = hold_curve[:horizon]
+        switch_curve = switch_curve[:horizon]
+
+        post_hold_return = float(hold_curve[-1] - 1.0)
+        post_switch_return = float(switch_curve[-1] - 1.0)
+        avoided = post_switch_return - post_hold_return
+        if not np.isfinite(avoided) or avoided <= 0.0:
+            continue
+        if post_hold_return >= 0.0:
+            continue
+
+        duration_value = pd.to_numeric(row.get("hold_duration", 0), errors="coerce")
+        holding_days = int(duration_value) if np.isfinite(duration_value) else 0
+        if holding_days < int(min_holding_days):
+            continue
+        start_pos = max(0, int(event_pos) - holding_days)
+
+        portfolio_col = "portfolio_value_before" if "portfolio_value_before" in df.columns else "portfolio_value"
+        switch_anchor = float(row.get(portfolio_col, row.get("portfolio_value", np.nan)))
+        if not np.isfinite(switch_anchor) and int(event_pos) > 0:
+            switch_anchor = float(df.loc[int(event_pos) - 1, "portfolio_value"])
+        if not np.isfinite(switch_anchor):
+            continue
+
+        pre_values = []
+        pre_dates = []
+        if start_pos < int(event_pos):
+            history = df.loc[start_pos : int(event_pos) - 1]
+            pre_values.extend(pd.to_numeric(history["portfolio_value"], errors="coerce").tolist())
+            pre_dates.extend(history["date"].astype(str).tolist())
+        pre_values.append(switch_anchor)
+        pre_dates.append(str(row["date"]))
+
+        pre_values_arr = np.asarray(pre_values, dtype="float64")
+        finite_mask = np.isfinite(pre_values_arr)
+        if int(finite_mask.sum()) < 1:
+            continue
+        pre_values_arr = pre_values_arr[finite_mask]
+        pre_dates = [date for date, keep in zip(pre_dates, finite_mask) if bool(keep)]
+        start_value = float(pre_values_arr[0])
+        if start_value <= 1e-12:
+            continue
+
+        pre_curve = pre_values_arr / start_value - 1.0
+        pre_drawdown = _series_drawdown(pre_values_arr)
+        peak_idx = int(np.argmax(pre_values_arr))
+        peak_date = pre_dates[peak_idx] if peak_idx < len(pre_dates) else str(row["date"])
+        peak_to_switch_return = float(pre_values_arr[-1] / max(pre_values_arr[peak_idx], 1e-12) - 1.0)
+        story_score = float(avoided + 0.15 * pre_drawdown + 0.05 * max(0.0, -peak_to_switch_return))
+
+        rows.append(
+            {
+                "market": market,
+                "start_date": pre_dates[0],
+                "peak_date": peak_date,
+                "switch_date": str(row["date"]),
+                "holding_days": holding_days,
+                "pre_switch_return": float(pre_curve[-1]),
+                "pre_switch_drawdown": pre_drawdown,
+                "peak_to_switch_return": peak_to_switch_return,
+                "post_hold_return": post_hold_return,
+                "post_switch_return": post_switch_return,
+                "avoided_deterioration": avoided,
+                "post_hold_mdd": max_drawdown_from_curve(hold_curve),
+                "post_switch_mdd": max_drawdown_from_curve(switch_curve),
+                "pre_curve": _safe_json_array(pre_curve),
+                "post_hold_curve": _safe_json_array(hold_curve),
+                "post_switch_curve": _safe_json_array(switch_curve),
+                "hold_top_weights": row.get("hold_top_weights", ""),
+                "switch_top_weights": row.get("switch_top_weights", ""),
+                "story_score": story_score,
+            }
+        )
+
+    cases = pd.DataFrame(rows)
+    if cases.empty:
+        return cases
+    cases = cases.sort_values(
+        ["story_score", "avoided_deterioration", "pre_switch_drawdown"],
+        ascending=[False, False, False],
+    ).head(int(top_n)).copy()
+    cases.insert(1, "case_rank", np.arange(1, len(cases) + 1))
+    return cases
+
+
+def select_paper_switch_cases(
+    candidates: pd.DataFrame,
+    *,
+    max_cases: int = 3,
+    min_holding_days: int = 5,
+    min_pre_drawdown: float = 0.003,
+    min_old_loss: float = 0.02,
+    min_avoided: float = 0.03,
+) -> pd.DataFrame:
+    if candidates.empty:
+        return candidates.copy()
+    cases = candidates.copy()
+    for col in [
+        "holding_days",
+        "pre_switch_drawdown",
+        "post_hold_return",
+        "post_switch_return",
+        "avoided_deterioration",
+        "story_score",
+    ]:
+        cases[col] = pd.to_numeric(cases[col], errors="coerce")
+    cases = cases[
+        (cases["holding_days"] >= int(min_holding_days))
+        & (cases["pre_switch_drawdown"] >= float(min_pre_drawdown))
+        & (cases["post_hold_return"] <= -float(min_old_loss))
+        & (cases["post_switch_return"] >= 0.0)
+        & (cases["post_switch_return"] > cases["post_hold_return"])
+        & (cases["avoided_deterioration"] >= float(min_avoided))
+    ].copy()
+    if cases.empty:
+        return cases
+    cases = cases.sort_values(
+        ["avoided_deterioration", "post_switch_return", "pre_switch_drawdown"],
+        ascending=[False, False, False],
+    ).head(int(max_cases)).copy()
+    cases["case_rank"] = np.arange(1, len(cases) + 1)
+    return cases
+
+
 def write_ablation_metrics(output_dir: Path) -> pd.DataFrame:
     rows = []
     for (market, scenario), metrics in ARCHIVED_METRICS.items():
@@ -557,12 +712,14 @@ def collect_scenario_trace(trainer, *, scenario: str, fixed_cycle=None, disable_
                     "scenario": scenario,
                     "date": date_value,
                     "step": step_idx,
+                    "portfolio_value_before": value_before,
                     "portfolio_value": value_after,
                     "daily_return": daily_return,
                     "is_switch": int(is_switch),
                     "is_free_switch": int(is_free_switch),
                     "is_forced": int(is_forced),
                     "hold_duration": duration,
+                    "segment_start_value": segment_start_value,
                     "exit_prob": _to_float(stats["exit_prob"]),
                     "base_exit_logit": _to_float(stats["base_exit_logit"]),
                     "exit_logit": _to_float(stats["exit_logit"]),
@@ -601,7 +758,7 @@ def collect_all_traces(
     results_end: Path,
 ) -> Dict[str, Dict[str, pd.DataFrame]]:
     traces: Dict[str, Dict[str, pd.DataFrame]] = {}
-    case_frames = []
+    candidate_frames = []
     for market in markets:
         trainer = build_loaded_trainer(market, output_dir, device, results_end)
         fixed_cycle = int(getattr(trainer.cfg, "max_hold", 30))
@@ -631,14 +788,24 @@ def collect_all_traces(
             post_days=20,
         )
         event_df.to_csv(output_dir / f"switch_event_{market}.csv", index=False)
-        cases = select_switch_cases(market_traces["Controller+HRL"], top_n=2)
-        if not cases.empty:
-            cases.insert(1, "market", market)
-            case_frames.append(cases)
-            cases.to_csv(output_dir / f"controller_switch_cases_{market}.csv", index=False)
-    if case_frames:
-        pd.concat(case_frames, ignore_index=True).to_csv(
-            output_dir / "controller_switch_cases.csv", index=False
+        candidates = build_switch_narrative_cases(
+            market_traces["Controller+HRL"],
+            market=market,
+            top_n=20,
+        )
+        if not candidates.empty:
+            candidate_frames.append(candidates)
+            candidates.to_csv(output_dir / f"controller_switch_case_candidates_{market}.csv", index=False)
+    selected_cases = (
+        select_paper_switch_cases(pd.concat(candidate_frames, ignore_index=True), max_cases=3)
+        if candidate_frames
+        else pd.DataFrame()
+    )
+    selected_cases.to_csv(output_dir / "controller_switch_cases.csv", index=False)
+    for market in markets:
+        selected_cases[selected_cases.get("market", pd.Series(dtype=str)) == market].to_csv(
+            output_dir / f"controller_switch_cases_{market}.csv",
+            index=False,
         )
     return traces
 
@@ -843,40 +1010,123 @@ def plot_controller_case_studies(output_dir: Path) -> Path:
     if cases.empty:
         return output_dir / "fig6_controller_switch_cases.png"
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 7.2), sharex=True)
-    axes = np.ravel(axes)
+    plt.rcParams.update(
+        {
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.titleweight": "bold",
+            "font.size": 9,
+        }
+    )
+    n_cases = min(3, len(cases))
+    cases = cases.head(n_cases)
+    fig, axes = plt.subplots(n_cases, 1, figsize=(10.8, 2.95 * n_cases), sharex=False)
+    fig.patch.set_facecolor("#ffffff")
+    axes = np.atleast_1d(axes)
     for ax, (_, row) in zip(axes, cases.iterrows()):
-        hold_curve = _parse_curve_json(row.get("hold_curve_20"))
-        switch_curve = _parse_curve_json(row.get("switch_curve_20"))
-        x = np.arange(min(len(hold_curve), len(switch_curve)))
-        hold_curve = hold_curve[: len(x)]
-        switch_curve = switch_curve[: len(x)]
-        ax.plot(x, (hold_curve - 1.0) * 100.0, label="hold old portfolio", color="#8f8f8f", linewidth=2)
-        ax.plot(x, (switch_curve - 1.0) * 100.0, label="switch portfolio", color="#c4493d", linewidth=2)
-        ax.axhline(0.0, color="#202020", linewidth=0.8)
-        ax.set_title(
-            f"{str(row['market']).upper()} {row['date']} | avoided {row['avoided_loss_20'] * 100.0:.1f} pp"
+        ax.set_facecolor("#ffffff")
+        pre_curve = _parse_curve_json(row.get("pre_curve"))
+        hold_curve = _fallback_curve_from_row(row, "post_hold_curve", "hold_curve_20")
+        switch_curve = _fallback_curve_from_row(row, "post_switch_curve", "switch_curve_20")
+        horizon = min(len(hold_curve), len(switch_curve))
+        if len(pre_curve) <= 0 or horizon <= 1:
+            ax.axis("off")
+            continue
+        hold_curve = hold_curve[:horizon]
+        switch_curve = switch_curve[:horizon]
+
+        switch_anchor = 1.0 + float(pre_curve[-1])
+        pre_x = np.arange(-(len(pre_curve) - 1), 1)
+        post_x = np.arange(horizon)
+        pre_y = pre_curve * 100.0
+        hold_y = (switch_anchor * hold_curve - 1.0) * 100.0
+        switch_y = (switch_anchor * switch_curve - 1.0) * 100.0
+
+        ax.plot(
+            pre_x,
+            pre_y,
+            label="actual old holding",
+            color="#1b4d5c",
+            linewidth=2.4,
+            solid_capstyle="round",
         )
-        ax.set_xlabel("Trading days after switch")
-        ax.set_ylabel("Forward return (%)")
-        ax.grid(alpha=0.25)
-        annotation = (
-            f"exit_prob={row['exit_prob']:.2f}\n"
-            f"pred_adv={row['switch_advantage_pred']:.3f}\n"
-            f"hold={row['hold_future_return_20'] * 100.0:.1f}%  "
-            f"switch={row['switch_future_return_20'] * 100.0:.1f}%"
+        ax.plot(
+            post_x,
+            hold_y,
+            label="counterfactual: keep old",
+            color="#7b8187",
+            linewidth=2.0,
+            linestyle=(0, (4, 2)),
+        )
+        ax.plot(
+            post_x,
+            switch_y,
+            label="controller switch",
+            color="#bd3f32",
+            linewidth=2.6,
+            solid_capstyle="round",
+        )
+        ax.fill_between(
+            post_x,
+            hold_y,
+            switch_y,
+            where=switch_y >= hold_y,
+            interpolate=True,
+            color="#bd3f32",
+            alpha=0.11,
+        )
+        ax.axvline(0.0, color="#202020", linewidth=1.0, linestyle="--", alpha=0.75)
+        ax.axhline(0.0, color="#202020", linewidth=0.8, alpha=0.55)
+
+        market = str(row.get("market", "")).upper()
+        switch_date = row.get("switch_date", row.get("date", ""))
+        start_date = row.get("start_date", "")
+        avoided = float(row.get("avoided_deterioration", row.get("avoided_loss_20", 0.0))) * 100.0
+        old_ret = float(row.get("post_hold_return", row.get("hold_future_return_20", 0.0))) * 100.0
+        new_ret = float(row.get("post_switch_return", row.get("switch_future_return_20", 0.0))) * 100.0
+        holding_value = pd.to_numeric(row.get("holding_days", max(0, len(pre_curve) - 1)), errors="coerce")
+        holding_days = int(holding_value) if np.isfinite(holding_value) else max(0, len(pre_curve) - 1)
+        ax.set_title(
+            (
+                f"Case {int(row.get('case_rank', 0))}: {market} holding period "
+                f"{start_date} -> switch {switch_date} | avoided {avoided:.1f} pp"
+            ),
+            loc="left",
+            fontsize=10.5,
+            pad=8,
+        )
+        ax.set_xlabel("Trading days around switch")
+        ax.set_ylabel("Return since holding start (%)")
+        ax.grid(axis="y", alpha=0.16)
+        ymin, ymax = ax.get_ylim()
+        ax.annotate(
+            "switch",
+            xy=(0, np.interp(0, post_x, switch_y)),
+            xytext=(0.8, ymax - (ymax - ymin) * 0.12),
+            arrowprops={"arrowstyle": "->", "color": "#202020", "linewidth": 0.8},
+            fontsize=8,
+            color="#202020",
         )
         ax.text(
-            0.03,
-            0.05,
-            annotation,
-            transform=ax.transAxes,
+            post_x[-1] + 0.35,
+            hold_y[-1],
+            f"old {old_ret:.1f}%",
+            color="#62686e",
             fontsize=8,
-            bbox={"facecolor": "white", "edgecolor": "#d0d0d0", "alpha": 0.85},
+            va="center",
         )
-    for ax in axes[len(cases) :]:
-        ax.axis("off")
-    axes[0].legend(frameon=False, fontsize=8)
+        ax.text(
+            post_x[-1] + 0.35,
+            switch_y[-1],
+            f"switch {new_ret:.1f}%",
+            color="#9f3128",
+            fontsize=8,
+            va="center",
+        )
+        x_left = min(pre_x[0], -1)
+        x_right = post_x[-1] + 4
+        ax.set_xlim(x_left, x_right)
+    fig.suptitle("Controller switch cases: avoiding deterioration after an old holding starts to weaken", y=1.01, fontsize=13)
     path = output_dir / "fig6_controller_switch_cases.png"
     _savefig(path)
     return path
@@ -889,32 +1139,54 @@ def write_case_report(output_dir: Path) -> Path:
         path.write_text("# Controller switch case studies\n\n尚未生成 case 数据。\n", encoding="utf-8")
         return path
     cases = pd.read_csv(csv_path)
-    lines = ["# Controller switch case studies", ""]
+    lines = [
+        "# Controller switch case studies",
+        "",
+        "以下案例均采用事后 counterfactual：switch 日之后，一条路径假设继续持有旧组合，另一条路径使用 controller 切换后的组合。它们用于解释 controller 的行为，不表示模型提前知道未来价格。",
+        "",
+    ]
     for _, row in cases.iterrows():
         market = str(row["market"]).upper()
-        avoided_pp = float(row["avoided_loss_20"]) * 100.0
-        hold_ret = float(row["hold_future_return_20"]) * 100.0
-        switch_ret = float(row["switch_future_return_20"]) * 100.0
-        hold_mdd = float(row["hold_future_mdd_20"]) * 100.0
-        switch_mdd = float(row["switch_future_mdd_20"]) * 100.0
+        switch_date = row.get("switch_date", row.get("date", ""))
+        start_date = row.get("start_date", "")
+        peak_date = row.get("peak_date", "")
+        holding_value = pd.to_numeric(row.get("holding_days", 0), errors="coerce")
+        holding_days = int(holding_value) if np.isfinite(holding_value) else 0
+        avoided_pp = float(row.get("avoided_deterioration", row.get("avoided_loss_20", 0.0))) * 100.0
+        pre_ret = float(row.get("pre_switch_return", 0.0)) * 100.0
+        pre_dd = float(row.get("pre_switch_drawdown", 0.0)) * 100.0
+        peak_to_switch = float(row.get("peak_to_switch_return", 0.0)) * 100.0
+        hold_ret = float(row.get("post_hold_return", row.get("hold_future_return_20", 0.0))) * 100.0
+        switch_ret = float(row.get("post_switch_return", row.get("switch_future_return_20", 0.0))) * 100.0
+        hold_mdd = float(row.get("post_hold_mdd", row.get("hold_future_mdd_20", 0.0))) * 100.0
+        switch_mdd = float(row.get("post_switch_mdd", row.get("switch_future_mdd_20", 0.0))) * 100.0
+        if pre_dd >= 0.5:
+            pre_sentence = (
+                f"switch 前组合相对持仓起点收益为 {pre_ret:.2f}%，"
+                f"段内最大回撤为 {pre_dd:.2f}%；从阶段高点 {peak_date} 到 switch 日回落 {abs(peak_to_switch):.2f}%。"
+            )
+        else:
+            pre_sentence = (
+                f"该持仓期较短或 switch 前尚未形成明显回撤，"
+                f"controller 在旧组合后续收益劣化前完成切换。"
+            )
         lines.extend(
             [
-                f"## Case {int(row['case_rank'])} | {market} | {row['date']}",
+                f"## Case {int(row['case_rank'])} | {market} | switch at {switch_date}",
                 "",
                 (
-                    f"- controller 当日触发自由 switch，`exit_prob={float(row['exit_prob']):.3f}`，"
-                    f"`switch_advantage_pred={float(row['switch_advantage_pred']):.4f}`。"
+                    f"该持仓期从 {start_date} 开始，到 {switch_date} 由 controller 主动结束，"
+                    f"共持有约 {holding_days} 个交易日。{pre_sentence}"
                 ),
                 (
-                    f"- 事后 20 个交易日 counterfactual：如果继续持有旧组合，收益约为 {hold_ret:.2f}%，"
-                    f"切换到新组合后收益约为 {switch_ret:.2f}%，相当于避免/改善 {avoided_pp:.2f} 个百分点。"
+                    f"如果 switch 后继续持有旧组合，未来 20 个交易日收益为 {hold_ret:.2f}%；"
+                    f"实际切换到新组合后的对应路径为 {switch_ret:.2f}%，"
+                    f"收益劣化被改善约 {avoided_pp:.2f} 个百分点。"
                 ),
                 (
-                    f"- 风险侧：旧组合 20 日路径最大回撤约 {hold_mdd:.2f}%，"
-                    f"切换组合约 {switch_mdd:.2f}%。"
+                    f"风险侧同样有所改善：旧组合反事实路径的 20 日最大回撤为 {hold_mdd:.2f}%，"
+                    f"switch 后组合为 {switch_mdd:.2f}%。"
                 ),
-                f"- 旧组合主要权重：{row.get('hold_top_weights', '')}",
-                f"- 切换组合主要权重：{row.get('switch_top_weights', '')}",
                 "",
             ]
         )
@@ -954,7 +1226,9 @@ controller 的作用更明显：它将固定 30 日再平衡改为状态驱动�
 
 ## 典型 switch case
 
-为增强可解释性，脚本进一步筛选了若干自由 switch case。筛选标准是：controller 当日主动 switch，且事后 20 个交易日里，“继续持有旧组合”的 counterfactual 收益明显弱于“切换到新组合”的收益。对应结果见 `fig6_controller_switch_cases.png` 和 `controller_switch_cases_zh.md`。这类 case 可以用来说明 controller 的具体行为：它并不是抽象地提高交易频率，而是在某些旧组合后续表现较差的节点触发 outer actor 重新选股，从而避开一段潜在下跌或获得更好的后续收益。
+为增强可解释性，脚本进一步筛选了若干高质量自由 switch case，并将每个 case 画成一个完整持仓期。筛选时不强制每个市场入选相同数量，而是优先保留“旧组合已出现回撤、继续持有旧组合后续明显下跌、switch 后收益路径显著改善”的代表性案例。图 6 中，switch 日左侧是真实持有旧组合期间的累计收益，switch 日右侧同时给出两条事后 counterfactual 路径：若继续持有旧组合，收益率继续劣化；若采用 controller 切换后的组合，后续收益路径明显改善。对应结果见 `fig6_controller_switch_cases.png` 和 `controller_switch_cases_zh.md`。
+
+这些案例说明 controller 的具体功能是“状态驱动的退出与重选股”：当当前组合在一个持仓期内开始走弱，且候选组合具备更好的后续风险收益特征时，controller 会提前结束原持仓期并触发 outer actor 重新选股，从而避免继续暴露在旧组合的下跌路径中。需要强调的是，这里的旧组合路径是事后 counterfactual，用于解释模型行为和验证 switch 的实际效果，而不是声称模型在决策时已经知道未来价格。
 """
     path.write_text(text, encoding="utf-8")
     return path
