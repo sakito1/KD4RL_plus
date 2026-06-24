@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "run_controller_daily_aux_pg_from_noaux_retrain.sh"
+TRAIN_SH_SCRIPT = ROOT / "train_sh" / "run_controller_daily_aux_pg_from_noaux_retrain.sh"
 
 
 def _clean_env():
@@ -33,6 +34,8 @@ def _clean_env():
         "CONTROLLER_AUX_SWITCH_ADV_LOSS_TYPE",
         "CONTROLLER_EPISODE_BATCH_SIZE",
         "CONTROLLER_EPISODE_PARALLEL_WORKERS",
+        "CONTROLLER_ONLY",
+        "JOINT_LR_MULT",
     ]:
         env.pop(key, None)
     return env
@@ -182,6 +185,39 @@ class ControllerDailyAuxPGScriptTests(unittest.TestCase):
         self.assertIn("--controller_eval_diagnostics", result.stdout)
         self.assertIn("--controller_eval_diag_thresholds 0.5", result.stdout)
         self.assertNotIn("--controller_test_thresholds", result.stdout)
+
+    def test_train_sh_controller_first_joint_uses_low_joint_lr_by_default(self):
+        with tempfile.TemporaryDirectory(prefix="controller-script-test-") as tmpdir:
+            source_root = Path(tmpdir) / "source"
+            checkpoint = source_root / "sh" / "ppo" / "seed_90" / "checkpoints" / "hrl_fixed_best.pth"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.touch()
+
+            env = _clean_env()
+            env.update({
+                "PYTHON_BIN": "/bin/echo",
+                "SOURCE_ROOT": str(source_root),
+                "OUTPUT_ROOT": str(Path(tmpdir) / "out"),
+                "CONTROLLER_ONLY": "0",
+                "NAS_SEEDS": "",
+                "SH_SEEDS": "90",
+            })
+
+            result = subprocess.run(
+                ["bash", str(TRAIN_SH_SCRIPT)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=30,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stdout)
+        self.assertIn("mode=controller_first_joint", result.stdout)
+        self.assertIn("--controller_first_joint_finetune", result.stdout)
+        self.assertIn("--joint_epochs 1", result.stdout)
+        self.assertIn("--joint_lr_mult 0.0001", result.stdout)
 
 
 if __name__ == "__main__":

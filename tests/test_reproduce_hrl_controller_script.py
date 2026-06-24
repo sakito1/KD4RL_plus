@@ -15,7 +15,7 @@ class ReproduceHRLControllerScriptTests(unittest.TestCase):
             cls.script = fh.read()
 
     def _default_value(self, name):
-        match = re.search(rf'{name}="\$\{{{name}:-([^}}]+)\}}"', self.script)
+        match = re.search(rf'{name}="\$\{{{name}:?-([^}}]+)\}}"', self.script)
         self.assertIsNotNone(match, f"{name} default not found")
         return match.group(1)
 
@@ -38,6 +38,7 @@ class ReproduceHRLControllerScriptTests(unittest.TestCase):
         self.assertIn("--no_train_controller", self.script)
 
     def test_stage_two_uses_successful_controller_pg_recipe(self):
+        self.assertEqual(self._default_value("JOINT_EPOCHS"), "0")
         self.assertEqual(self._default_value("CONTROLLER_EPOCHS"), "3")
         self.assertEqual(self._default_value("CONTROLLER_FIXED_POOL_LIMIT"), "12")
         self.assertEqual(self._default_value("CONTROLLER_INIT_EXIT_BIAS"), "-1.0")
@@ -55,6 +56,11 @@ class ReproduceHRLControllerScriptTests(unittest.TestCase):
         self.assertEqual(self._default_value("ALLOW_EXISTING_OUTPUT"), "0")
         self.assertIn("Refusing to reuse existing HRL run directory", self.script)
         self.assertIn("Refusing to reuse existing controller run directory", self.script)
+
+    def test_archived_best_floor_is_explicit_and_preserves_candidate_outputs(self):
+        self.assertEqual(self._default_value("USE_ARCHIVED_BEST_FLOOR"), "0")
+        self.assertIn("candidate_before_archived_floor", self.script)
+        self.assertIn("archived_best_floor.json", self.script)
 
 
 if __name__ == "__main__":

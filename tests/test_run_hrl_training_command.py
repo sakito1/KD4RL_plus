@@ -75,6 +75,21 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
         self.assertNotIn("--controller_only_finetune", command)
         self.assertNotIn("--controller_first_joint_finetune", command)
 
+    def test_controller_deterministic_rollout_sampling_is_forwarded_to_child_command(self):
+        args = self._args_from_cli([
+            "--markets", "nas",
+            "--controller_deterministic_rollout_sampling",
+        ])
+
+        command = run_hrl_training.build_child_command(
+            args,
+            market="nas",
+            run_root=Path("/tmp/hrl-test"),
+            seed=49,
+        )
+
+        self.assertIn("--controller_deterministic_rollout_sampling", command)
+
     def test_frozen_hrl_checkpoint_is_forwarded_to_child_command(self):
         args = self._args_from_cli([
             "--markets", "sh",

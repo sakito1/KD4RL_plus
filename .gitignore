@@ -3,6 +3,11 @@ data/
 *.pth
 *.pt
 *.ckpt
+*.pdf
+*.png
+*.csv
+*.json
+
 runs/
 results/
 ckpts/

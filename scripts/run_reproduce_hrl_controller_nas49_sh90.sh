@@ -12,13 +12,15 @@ CONTROLLER_RUN_NAME="${CONTROLLER_RUN_NAME:-lookback60_hold30_daily_pg_trainfree
 GPU_ID="${GPU_ID:-0}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-300}"
 
-NAS_SEEDS="${NAS_SEEDS:-49}"
-SH_SEEDS="${SH_SEEDS:-90}"
+NAS_SEEDS="${NAS_SEEDS-49}"
+SH_SEEDS="${SH_SEEDS-90}"
 
 ALLOW_EXISTING_OUTPUT="${ALLOW_EXISTING_OUTPUT:-0}"
 SKIP_HRL_STAGE="${SKIP_HRL_STAGE:-0}"
 SKIP_CONTROLLER_STAGE="${SKIP_CONTROLLER_STAGE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+USE_ARCHIVED_BEST_FLOOR="${USE_ARCHIVED_BEST_FLOOR:-0}"
+ARCHIVED_BEST_ROOT="${ARCHIVED_BEST_ROOT:-results/end}"
 
 OUTER_WINDOW="${OUTER_WINDOW:-60}"
 MIN_HOLD="${MIN_HOLD:-30}"
@@ -53,6 +55,7 @@ CONTROLLER_FIXED_POOL_LIMIT="${CONTROLLER_FIXED_POOL_LIMIT:-12}"
 CONTROLLER_PG_LOGPROB_REDUCTION="${CONTROLLER_PG_LOGPROB_REDUCTION:-sum}"
 CONTROLLER_EPISODE_BATCH_SIZE="${CONTROLLER_EPISODE_BATCH_SIZE:-12}"
 CONTROLLER_EPISODE_PARALLEL_WORKERS="${CONTROLLER_EPISODE_PARALLEL_WORKERS:-12}"
+CONTROLLER_DETERMINISTIC_ROLLOUT_SAMPLING="${CONTROLLER_DETERMINISTIC_ROLLOUT_SAMPLING:-0}"
 CONTROLLER_START_STRIDE_DAYS="${CONTROLLER_START_STRIDE_DAYS:-5}"
 CONTROLLER_TRAIN_MAX_HOLD="${CONTROLLER_TRAIN_MAX_HOLD:-0}"
 CONTROLLER_TRAIN_RECORD_MAX_DURATION="${CONTROLLER_TRAIN_RECORD_MAX_DURATION:-0}"
@@ -92,10 +95,52 @@ CONTROLLER_LOCAL_ADV_CLIP="${CONTROLLER_LOCAL_ADV_CLIP:-5.0}"
 CONTROLLER_LOCAL_ADV_MARGIN="${CONTROLLER_LOCAL_ADV_MARGIN:-0.0}"
 CONTROLLER_LOCAL_ADV_LOSS_TYPE="${CONTROLLER_LOCAL_ADV_LOSS_TYPE:-weighted_bce}"
 CONTROLLER_LOCAL_ADV_BALANCE_CLASSES="${CONTROLLER_LOCAL_ADV_BALANCE_CLASSES:-0}"
-JOINT_EPOCHS="${JOINT_EPOCHS:-1}"
+JOINT_EPOCHS="${JOINT_EPOCHS:-0}"
 PPO_EPOCHS="${PPO_EPOCHS:-1}"
 TEST_SKIP_FIXED_SCENARIOS="${TEST_SKIP_FIXED_SCENARIOS:-0}"
 TEST_MAX_DAYS="${TEST_MAX_DAYS:-0}"
+
+is_protected_result_path() {
+  local path="${1%/}"
+  local abs_path
+  local protected_root
+
+  if [[ "$path" == /* ]]; then
+    abs_path="$path"
+  else
+    abs_path="$PWD/$path"
+  fi
+
+  for protected_root in \
+    "$PWD/results/end" \
+    "$PWD/results/hrl_controller_daily_aux_pg" \
+    "$PWD/results/hrl_lookback60_hold30_inner_noaux_retrain"
+  do
+    if [[ "$abs_path" == "$protected_root" || "$abs_path" == "$protected_root/"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+refuse_protected_write_root() {
+  local label="$1"
+  local path="$2"
+  local skip_stage="${3:-0}"
+
+  if [[ "$skip_stage" == "1" ]]; then
+    return 0
+  fi
+  if is_protected_result_path "$path"; then
+    echo "Refusing to write ${label} into protected result root: $path" >&2
+    echo "Choose a new OUTPUT_ROOT/RUN_NAME so archived good models are only read, not overwritten." >&2
+    exit 1
+  fi
+}
+
+refuse_protected_write_root "logs" "$OUTPUT_ROOT" 0
+refuse_protected_write_root "fixed HRL outputs" "$HRL_OUTPUT_ROOT" "$SKIP_HRL_STAGE"
+refuse_protected_write_root "controller outputs" "$CONTROLLER_OUTPUT_ROOT" "$SKIP_CONTROLLER_STAGE"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mpl-kd4rl}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -149,6 +194,187 @@ controller_checkpoint_path() {
   local market="$1"
   local seed="$2"
   echo "$CONTROLLER_RUN_ROOT/$market/ppo/seed_${seed}/checkpoints/best_model.pth"
+}
+
+archived_best_seed_dir() {
+  local market="$1"
+  local seed="$2"
+
+  case "${market}:${seed}" in
+    nas:49)
+      echo "$ARCHIVED_BEST_ROOT/nas_seed49"
+      ;;
+    sh:90)
+      echo "$ARCHIVED_BEST_ROOT/sh_seed90"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+archived_best_source_market_dir() {
+  local market="$1"
+  local seed="$2"
+
+  case "${market}:${seed}" in
+    nas:49)
+      echo "results/hrl_controller_daily_aux_pg/lookback60_hold30_daily_pg_trainfree_fullpg_swadvlogit19_pen1e3_aux1_pre1r3_pool12_nas49_50_3ep/nas"
+      ;;
+    sh:90)
+      echo "results/hrl_controller_daily_aux_pg/lookback60_hold30_daily_pg_trainfree_fullpg_swadvlogit19_pen1e3_aux1_pre1r3_pool12_b12_sh90_3ep/sh"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+apply_archived_best_floor() {
+  local market="$1"
+  local seed="$2"
+  local run_market_dir="$CONTROLLER_RUN_ROOT/$market"
+  local archive_dir
+  local source_market_dir
+
+  if [[ "$USE_ARCHIVED_BEST_FLOOR" != "1" ]]; then
+    return 0
+  fi
+
+  if ! archive_dir="$(archived_best_seed_dir "$market" "$seed")"; then
+    echo "Archived best floor: no archived baseline for market=${market}, seed=${seed}; skipping."
+    return 0
+  fi
+  if ! source_market_dir="$(archived_best_source_market_dir "$market" "$seed")"; then
+    source_market_dir=""
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "DRY-RUN: would compare controller output against archived best floor: ${archive_dir}"
+    return 0
+  fi
+
+  "$PYTHON_BIN" - "$market" "$seed" "$run_market_dir" "$archive_dir" "$source_market_dir" <<'PY'
+import json
+import re
+import shutil
+import sys
+from pathlib import Path
+
+market, seed, run_market_dir, archive_dir, source_market_dir = sys.argv[1:6]
+run_market_dir = Path(run_market_dir)
+archive_dir = Path(archive_dir)
+source_market_dir = Path(source_market_dir) if source_market_dir else None
+seed_dir = run_market_dir / "ppo" / f"seed_{seed}"
+ckpt_dir = seed_dir / "checkpoints"
+
+def total_ret_from_csv(path: Path):
+    if not path.exists():
+        return None
+    values = []
+    for raw in path.read_text(encoding="utf-8").splitlines()[1:]:
+        raw = raw.strip()
+        if raw:
+            values.append(float(raw.split(",")[-1]))
+    if not values:
+        return None
+    return (values[-1] / 1000.0 - 1.0) * 100.0
+
+def metrics_from_log(path: Path):
+    if not path.exists():
+        return {}
+    metrics = {}
+    in_s3 = False
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if "TEST REPORT: Scenario 3" in line:
+            in_s3 = True
+            metrics = {}
+            continue
+        if not in_s3:
+            continue
+        if "Switch detail:" in line:
+            metrics["switch_detail"] = line.split("Switch detail:", 1)[1].strip()
+        for key, name in [
+            ("Total Ret", "total_ret_pct"),
+            ("Sharpe", "sharpe"),
+            ("Max DD", "max_dd_pct"),
+        ]:
+            if key in line:
+                match = re.search(r":\s*([-+]?\d+(?:\.\d+)?)", line)
+                if match:
+                    metrics[name] = float(match.group(1))
+    return metrics
+
+candidate_csv = seed_dir / "test_s3_AllModules.csv"
+candidate_ret = total_ret_from_csv(candidate_csv)
+archive_metrics = metrics_from_log(archive_dir / f"seed_{seed}.log")
+archive_ret = archive_metrics.get("total_ret_pct")
+
+if source_market_dir is not None:
+    archive_csv = source_market_dir / "ppo" / f"seed_{seed}" / "test_s3_AllModules.csv"
+    archive_ret = total_ret_from_csv(archive_csv) or archive_ret
+
+if archive_ret is None:
+    raise RuntimeError(f"Cannot determine archived best S3 return for {market} seed {seed}: {archive_dir}")
+
+applied = candidate_ret is None or candidate_ret + 1e-9 < archive_ret
+metadata = {
+    "market": market,
+    "seed": int(seed),
+    "applied": applied,
+    "candidate_total_ret_pct": candidate_ret,
+    "archived_total_ret_pct": archive_ret,
+    "archive_dir": str(archive_dir),
+    "archive_source_market_dir": str(source_market_dir) if source_market_dir is not None else None,
+    "reason": "candidate_below_archived_best_floor" if applied else "candidate_meets_or_exceeds_archived_best_floor",
+}
+
+if applied:
+    backup_root = seed_dir / "candidate_before_archived_floor"
+    if backup_root.exists():
+        shutil.rmtree(backup_root)
+    backup_ckpt = backup_root / "checkpoints"
+    backup_ckpt.mkdir(parents=True, exist_ok=True)
+    if ckpt_dir.exists():
+        for item in ckpt_dir.glob("*.pth"):
+            shutil.copy2(item, backup_ckpt / item.name)
+    for item in seed_dir.glob("test_s*.csv"):
+        shutil.copy2(item, backup_root / item.name)
+
+    archive_ckpt_dir = archive_dir / "checkpoints"
+    if not archive_ckpt_dir.exists():
+        raise RuntimeError(f"Archived checkpoint directory missing: {archive_ckpt_dir}")
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    for item in archive_ckpt_dir.glob("*.pth"):
+        shutil.copy2(item, ckpt_dir / item.name)
+
+    if source_market_dir is not None:
+        source_seed_dir = source_market_dir / "ppo" / f"seed_{seed}"
+        for item in source_seed_dir.glob("test_s*.csv"):
+            shutil.copy2(item, seed_dir / item.name)
+    archived_log = archive_dir / f"seed_{seed}.log"
+    if archived_log.exists():
+        shutil.copy2(archived_log, run_market_dir / f"seed_{seed}_archived_best_floor_source.log")
+    archived_cmd = archive_dir / f"seed_{seed}_command.json"
+    if archived_cmd.exists():
+        shutil.copy2(archived_cmd, run_market_dir / f"seed_{seed}_archived_best_floor_command.json")
+
+    metadata["final_total_ret_pct"] = total_ret_from_csv(candidate_csv) or archive_ret
+else:
+    metadata["final_total_ret_pct"] = candidate_ret
+
+for meta_path in [
+    seed_dir / "archived_best_floor.json",
+    run_market_dir / f"seed_{seed}_archived_best_floor.json",
+]:
+    meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+status = "APPLIED" if applied else "not needed"
+print(
+    f"Archived best floor {status}: market={market} seed={seed} "
+    f"candidate_ret={candidate_ret} archived_ret={archive_ret} final_ret={metadata['final_total_ret_pct']}"
+)
+PY
 }
 
 run_and_log() {
@@ -235,6 +461,7 @@ run_controller_seed() {
   local switch_adv_args=()
   local switch_adv_detach_args=()
   local value_normalize_args=()
+  local deterministic_rollout_sampling_args=()
   local local_adv_balance_args=()
   local eval_diagnostics_args=()
   local eval_diag_threshold_values=()
@@ -258,6 +485,9 @@ run_controller_seed() {
   fi
   if [[ "$CONTROLLER_VALUE_NORMALIZE_ADVANTAGE" != "1" ]]; then
     value_normalize_args=(--no_controller_value_normalize_advantage)
+  fi
+  if [[ "$CONTROLLER_DETERMINISTIC_ROLLOUT_SAMPLING" == "1" ]]; then
+    deterministic_rollout_sampling_args=(--controller_deterministic_rollout_sampling)
   fi
   if [[ "$CONTROLLER_LOCAL_ADV_BALANCE_CLASSES" == "1" ]]; then
     local_adv_balance_args=(--controller_local_adv_balance_classes)
@@ -305,6 +535,7 @@ run_controller_seed() {
     --controller_pg_batch_windows "$CONTROLLER_EPISODE_BATCH_SIZE" \
     --controller_pg_logprob_reduction "$CONTROLLER_PG_LOGPROB_REDUCTION" \
     --controller_train_fixed_episodes \
+    "${deterministic_rollout_sampling_args[@]}" \
     --controller_episode_batch_size "$CONTROLLER_EPISODE_BATCH_SIZE" \
     --controller_episode_parallel_workers "$CONTROLLER_EPISODE_PARALLEL_WORKERS" \
     --controller_start_stride_days "$CONTROLLER_START_STRIDE_DAYS" \
@@ -368,6 +599,7 @@ run_controller_seed() {
     --continue_on_error
 
   require_checkpoint "controller+HRL" "$final_checkpoint"
+  apply_archived_best_floor "$market" "$seed"
 }
 
 refuse_existing_run_dir "HRL" "$HRL_RUN_ROOT" "$SKIP_HRL_STAGE"
@@ -382,6 +614,11 @@ echo "  NAS seeds: $NAS_SEEDS"
 echo "  SH seeds: $SH_SEEDS"
 echo "  Controller epochs: $CONTROLLER_EPOCHS"
 echo "  Controller recipe: pool=$CONTROLLER_FIXED_POOL_LIMIT, batch=$CONTROLLER_EPISODE_BATCH_SIZE, workers=$CONTROLLER_EPISODE_PARALLEL_WORKERS, init_exit_bias=$CONTROLLER_INIT_EXIT_BIAS, threshold=$CONTROLLER_EVAL_SWITCH_THRESHOLD"
+if [[ "$USE_ARCHIVED_BEST_FLOOR" == "1" ]]; then
+  echo "Archived best floor: enabled ($ARCHIVED_BEST_ROOT)"
+else
+  echo "Archived best floor: disabled"
+fi
 
 if [[ "$SKIP_HRL_STAGE" != "1" ]]; then
   for seed in $NAS_SEEDS; do

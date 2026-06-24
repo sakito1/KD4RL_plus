@@ -76,6 +76,7 @@ CONTROLLER_LOCAL_ADV_BALANCE_CLASSES="${CONTROLLER_LOCAL_ADV_BALANCE_CLASSES:-0}
 
 CONTROLLER_ONLY="${CONTROLLER_ONLY:-1}"
 JOINT_EPOCHS="${JOINT_EPOCHS:-1}"
+JOINT_LR_MULT="${JOINT_LR_MULT:-0.0001}"
 PPO_EPOCHS="${PPO_EPOCHS:-1}"
 OUTER_PRED_COEF="${OUTER_PRED_COEF:-0.1}"
 INNER_PRED_COEF="${INNER_PRED_COEF:-0.05}"
@@ -113,7 +114,7 @@ echo "Output root: $OUTPUT_ROOT"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo "NAS seeds: $NAS_SEEDS"
 echo "SH seeds: $SH_SEEDS"
-echo "Training mode: mode=$RUN_MODE, joint_epochs=$EFFECTIVE_JOINT_EPOCHS"
+echo "Training mode: mode=$RUN_MODE, joint_epochs=$EFFECTIVE_JOINT_EPOCHS, joint_lr_mult=$JOINT_LR_MULT"
 if [[ "$CONTROLLER_ONLY" == "1" ]]; then
   echo "CONTROLLER-ONLY finetune enabled"
 fi
@@ -255,6 +256,7 @@ run_one_seed() {
     --controller_eval_switch_threshold "$CONTROLLER_EVAL_SWITCH_THRESHOLD" \
     "${CONTROLLER_EVAL_DIAGNOSTICS_ARGS[@]}" \
     --joint_epochs "$EFFECTIVE_JOINT_EPOCHS" \
+    --joint_lr_mult "$JOINT_LR_MULT" \
     --ppo_epochs "$PPO_EPOCHS" \
     --outer_pred_coef "$OUTER_PRED_COEF" \
     --inner_pred_coef "$INNER_PRED_COEF" \

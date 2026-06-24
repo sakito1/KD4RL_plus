@@ -3,6 +3,55 @@ set -euo pipefail
 
 cd /home/tongwenxuan/KD4RL_plus
 
+is_protected_result_path() {
+  local path="${1%/}"
+  local abs_path
+  local protected_root
+
+  if [[ "$path" == /* ]]; then
+    abs_path="$path"
+  else
+    abs_path="$PWD/$path"
+  fi
+
+  for protected_root in \
+    "$PWD/results/end" \
+    "$PWD/results/hrl_controller_daily_aux_pg" \
+    "$PWD/results/hrl_lookback60_hold30_inner_noaux_retrain"
+  do
+    if [[ "$abs_path" == "$protected_root" || "$abs_path" == "$protected_root/"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+refuse_protected_write_root() {
+  local label="$1"
+  local path="$2"
+
+  if is_protected_result_path "$path"; then
+    echo "Refusing to write ${label} into protected result root: $path" >&2
+    echo "Choose a new OUTPUT_ROOT/RUN_NAME so archived good models are only read, not overwritten." >&2
+    exit 1
+  fi
+}
+
+REPRODUCE_BEST_MODE="${REPRODUCE_BEST_MODE:-0}"
+if [[ "$REPRODUCE_BEST_MODE" == "1" ]]; then
+  export PYTHON_BIN="${PYTHON_BIN:-/home/tongwenxuan/conda/envs/xuangu/bin/python}"
+  export OUTPUT_ROOT="${OUTPUT_ROOT:-results/end_to_end_hrl_controller_joint_nas49_sh90_reproduce_good}"
+  export HRL_OUTPUT_ROOT="${HRL_OUTPUT_ROOT:-results/hrl_lookback60_hold30_inner_noaux_retrain}"
+  export HRL_RUN_NAME="${HRL_RUN_NAME:-lookback60_hold30_inner_noaux_retrain}"
+  export CONTROLLER_RUN_NAME="${CONTROLLER_RUN_NAME:-lookback60_hold30_daily_pg_trainfree_fullpg_swadvlogit19_pen1e3_aux1_pre1r3_pool12_nas49_sh90_3ep}"
+  export SKIP_HRL_STAGE="${SKIP_HRL_STAGE:-1}"
+  export CONTROLLER_DETERMINISTIC_ROLLOUT_SAMPLING="${CONTROLLER_DETERMINISTIC_ROLLOUT_SAMPLING:-0}"
+  export USE_ARCHIVED_BEST_FLOOR="${USE_ARCHIVED_BEST_FLOOR:-1}"
+  export ARCHIVED_BEST_ROOT="${ARCHIVED_BEST_ROOT:-results/end}"
+  refuse_protected_write_root "reproduction outputs" "$OUTPUT_ROOT"
+  exec bash scripts/run_reproduce_hrl_controller_nas49_sh90.sh
+fi
+
 PYTHON_BIN="${PYTHON_BIN:-/home/tongwenxuan/conda/envs/xuangu/bin/python}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-results/end_to_end_hrl_controller_joint_nas49_sh90}"
 RUN_NAME="${RUN_NAME:-lookback60_hold30_e2e_hrl_controller_joint_nas49_sh90}"
@@ -83,7 +132,7 @@ CONTROLLER_LOCAL_ADV_LOSS_TYPE="${CONTROLLER_LOCAL_ADV_LOSS_TYPE:-weighted_bce}"
 CONTROLLER_LOCAL_ADV_BALANCE_CLASSES="${CONTROLLER_LOCAL_ADV_BALANCE_CLASSES:-0}"
 
 JOINT_EPOCHS="${JOINT_EPOCHS:-1}"
-JOINT_LR_MULT="${JOINT_LR_MULT:-0.001}"
+JOINT_LR_MULT="${JOINT_LR_MULT:-0.0001}"
 PPO_EPOCHS="${PPO_EPOCHS:-1}"
 OUTER_PRED_COEF="${OUTER_PRED_COEF:-0.1}"
 INNER_PRED_COEF="${INNER_PRED_COEF:-0.05}"
@@ -91,12 +140,7 @@ INNER_PRED_TARGET_SCALE="${INNER_PRED_TARGET_SCALE:-10}"
 TEST_SKIP_FIXED_SCENARIOS="${TEST_SKIP_FIXED_SCENARIOS:-0}"
 TEST_MAX_DAYS="${TEST_MAX_DAYS:-0}"
 
-case "$OUTPUT_ROOT" in
-  results/end|results/end/*|results/hrl_lookback60_hold30_inner_noaux_retrain|results/hrl_controller_daily_aux_pg)
-    echo "Refusing to write end-to-end training outputs into protected result root: $OUTPUT_ROOT" >&2
-    exit 1
-    ;;
-esac
+refuse_protected_write_root "end-to-end training outputs" "$OUTPUT_ROOT"
 
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mpl-kd4rl}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"

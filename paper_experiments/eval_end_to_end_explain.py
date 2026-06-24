@@ -40,14 +40,17 @@ if str(ROOT) not in sys.path:
 SCENARIOS = {
     "fixed_hrl": {"fixed_cycle": "max_hold", "disable_inner": False, "use_controller": False},
     "fixed_hrl_no_inner": {"fixed_cycle": "max_hold", "disable_inner": True, "use_controller": False},
+    "controller_outer": {"fixed_cycle": None, "disable_inner": True, "use_controller": True},
     "full_controller": {"fixed_cycle": None, "disable_inner": False, "use_controller": True},
 }
+
+ABLATION_SCENARIOS = ["fixed_hrl_no_inner", "fixed_hrl", "controller_outer", "full_controller"]
+CONTROLLER_SCENARIOS = ["controller_outer", "full_controller"]
 
 
 STAGE_SPECS = [
     ("Fixed HRL checkpoint", "hrl_fixed_best", "fixed_hrl"),
     ("Controller-PG checkpoint", "controller_best", "full_controller"),
-    ("Final E2E checkpoint", "best_model", "full_controller"),
 ]
 
 
@@ -561,7 +564,7 @@ def run_for_one_seed(run: RunInfo, *, args, paths: Dict[str, Path]) -> Dict[str,
     best_ckpt = run.checkpoints["best_model"]
     if best_ckpt.exists:
         load_checkpoint_into_trainer(trainer, torch_module, best_ckpt.path)
-        for scenario in ["fixed_hrl_no_inner", "fixed_hrl", "full_controller"]:
+        for scenario in ABLATION_SCENARIOS:
             bundle = evaluate_scenario(trainer, run, scenario=scenario, test_max_days=args.test_max_days)
             scenario_bundles[scenario] = bundle
             metrics = trace_metrics(run, scenario, bundle, {"checkpoint_name": "best_model"})
@@ -597,39 +600,46 @@ def aggregate_outputs(paths: Dict[str, Path]):
     stage = all_metrics[all_metrics.get("stage").notna()] if "stage" in all_metrics else pd.DataFrame()
     stage.to_csv(paths["metrics"] / "stage_progression.csv", index=False)
     non_stage = all_metrics[all_metrics.get("stage").isna()] if "stage" in all_metrics else all_metrics
-    ablation = non_stage[non_stage["scenario"].isin(["fixed_hrl_no_inner", "fixed_hrl", "full_controller"])]
+    ablation = non_stage[non_stage["scenario"].isin(ABLATION_SCENARIOS)]
     ablation.to_csv(paths["metrics"] / "inference_ablation.csv", index=False)
     inner_rows = []
     for trace_path in paths["traces"].glob("*_portfolio.csv"):
         if "_stage_" in trace_path.name:
             continue
-        if "_fixed_hrl" not in trace_path.name and "_full_controller" not in trace_path.name:
-            continue
         df = pd.read_csv(trace_path)
         parts = trace_path.stem.replace("_portfolio", "").split("_")
         scenario = "_".join(parts[2:])
+        if scenario not in ABLATION_SCENARIOS:
+            continue
         row = {"market": parts[0], "seed": int(parts[1].replace("seed", "")), "scenario": scenario}
         row.update(summarize_inner_alpha(df))
         inner_rows.append(row)
     pd.DataFrame(inner_rows).to_csv(paths["metrics"] / "inner_alpha_summary.csv", index=False)
     align_rows = []
     event_frames = []
-    for action_path in paths["traces"].glob("*_full_controller_actions.csv"):
+    for action_path in paths["traces"].glob("*_actions.csv"):
         if "_stage_" in action_path.name:
             continue
         df = pd.read_csv(action_path)
         parts = action_path.stem.replace("_actions", "").split("_")
-        row = {"market": parts[0], "seed": int(parts[1].replace("seed", "")), "scenario": "full_controller"}
+        scenario = "_".join(parts[2:])
+        if scenario not in CONTROLLER_SCENARIOS:
+            continue
+        row = {"market": parts[0], "seed": int(parts[1].replace("seed", "")), "scenario": scenario}
         row.update(summarize_controller_alignment(df))
         align_rows.append(row)
-    for event_path in paths["traces"].glob("*_full_controller_switch_events.csv"):
+    for event_path in paths["traces"].glob("*_switch_events.csv"):
         if "_stage_" in event_path.name:
             continue
         df = pd.read_csv(event_path)
         if not df.empty:
             parts = event_path.stem.replace("_switch_events", "").split("_")
+            scenario = "_".join(parts[2:])
+            if scenario not in CONTROLLER_SCENARIOS:
+                continue
             df.insert(0, "market", parts[0])
             df.insert(1, "seed", int(parts[1].replace("seed", "")))
+            df.insert(2, "scenario", scenario)
             event_frames.append(df)
     pd.DataFrame(align_rows).to_csv(paths["metrics"] / "switch_alignment_summary.csv", index=False)
     (pd.concat(event_frames, ignore_index=True) if event_frames else pd.DataFrame()).to_csv(paths["metrics"] / "switch_events.csv", index=False)

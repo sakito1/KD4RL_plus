@@ -8,9 +8,13 @@ import pandas as pd
 METHOD_NAMES = {
     "fixed_hrl_no_inner": "Fixed HRL w/o Inner",
     "fixed_hrl": "Fixed HRL",
-    "full_controller": "Final E2E",
+    "controller_outer": "Controller+Outer",
+    "full_controller": "Full Controller",
     "random_switch_matched_count": "Random Switch",
 }
+
+
+DROP_STAGE_LABELS = {"Final E2E checkpoint"}
 
 
 def _fmt(value, kind="float"):
@@ -45,6 +49,12 @@ def _write_table(df: pd.DataFrame, output_dir: Path, name: str, caption: str):
     (output_dir / f"{name}.tex").write_text(tex, encoding="utf-8")
 
 
+def _filter_display_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "stage" not in df:
+        return df
+    return df[~df["stage"].isin(DROP_STAGE_LABELS)].copy()
+
+
 def main_from_paths(input_dir: Path, output_dir: Path):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -61,6 +71,7 @@ def main_from_paths(input_dir: Path, output_dir: Path):
         if not path.exists():
             continue
         df = pd.read_csv(path)
+        df = _filter_display_rows(df)
         _write_table(_format_table(df), output_dir, target, caption)
 
 
@@ -80,4 +91,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

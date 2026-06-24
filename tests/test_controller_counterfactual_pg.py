@@ -1009,6 +1009,34 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics["local_adv_loss"], 0.5)
         self.assertAlmostEqual(diagnostics["loss"], 0.1)
 
+    def test_controller_pg_deterministic_rollout_sampling_ignores_global_rng_order(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.cfg = SimpleNamespace(
+            seed=49,
+            controller_deterministic_rollout_sampling=True,
+        )
+        stats = {"exit_prob": torch.tensor([0.37])}
+        logits = torch.log(torch.tensor([[0.63, 0.37]]))
+
+        torch.manual_seed(1)
+        action_a, _ = trainer._sample_controller_pg_action(
+            stats,
+            logits,
+            start_idx=1234,
+            step_idx=17,
+            epoch=2,
+        )
+        torch.manual_seed(999)
+        action_b, _ = trainer._sample_controller_pg_action(
+            stats,
+            logits,
+            start_idx=1234,
+            step_idx=17,
+            epoch=2,
+        )
+
+        self.assertTrue(torch.equal(action_a, action_b))
+
     def test_controller_aux_replay_recomputes_losses_for_each_replay_epoch(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
         trainer.cfg = SimpleNamespace(controller_aux_replay_epochs=3)

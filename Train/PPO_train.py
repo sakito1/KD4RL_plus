@@ -75,6 +75,38 @@ class PhaseSpec:
     use_hold_constraints: bool
 
 
+def _prepare_controller_joint_baseline(trainer, controller_best_ckpt, final_best_ckpt, controller_pg_result):
+    """Seed final best with the controller-PG checkpoint before optional joint finetune."""
+    controller_best_path = os.path.join(trainer.model_dir, controller_best_ckpt)
+    final_best_path = os.path.join(trainer.model_dir, final_best_ckpt)
+    baseline_score = -np.inf
+    pg_updates = int((controller_pg_result or {}).get("updates", 0) or 0)
+    if pg_updates > 0:
+        try:
+            baseline_score = float((controller_pg_result or {}).get("best_score", -np.inf))
+        except (TypeError, ValueError):
+            baseline_score = -np.inf
+
+    loaded_controller_best = False
+    if os.path.exists(controller_best_path):
+        loaded_controller_best = bool(trainer._load_model(controller_best_ckpt))
+        if getattr(trainer, "logger", None):
+            trainer.logger.info("   ↺ Loaded best controller before end-to-end joint finetune.")
+    elif os.path.exists(final_best_path):
+        trainer._load_model(final_best_ckpt)
+        if getattr(trainer, "logger", None):
+            trainer.logger.info("   ↺ Loaded current best model before end-to-end joint finetune.")
+
+    if loaded_controller_best and np.isfinite(baseline_score):
+        trainer.save_model(final_best_ckpt)
+        if getattr(trainer, "logger", None):
+            trainer.logger.info(
+                "       (Seeded final best with Controller-PG Best: %.4f)",
+                baseline_score,
+            )
+    return baseline_score
+
+
 # ==============================================================================
 # 2. 网络包装器 (Model Wrapper)
 # ==============================================================================
@@ -1013,6 +1045,26 @@ class HRL_Trainer:
             return True
         return int(duration) < max_duration
 
+    def _sample_controller_pg_action(self, stats, logits, *, start_idx: int, step_idx: int, epoch: int = None):
+        dist = Categorical(logits=logits)
+        if bool(getattr(self.cfg, "controller_deterministic_rollout_sampling", False)):
+            exit_prob = stats["exit_prob"].detach()
+            epoch_val = 0 if epoch is None else int(epoch)
+            base_seed = int(getattr(self.cfg, "seed", 0) or 0)
+            seed = (
+                base_seed * 1_000_003
+                + int(start_idx) * 10_007
+                + int(step_idx) * 101
+                + epoch_val * 1_009
+            ) % (2 ** 63 - 1)
+            generator = torch.Generator(device=exit_prob.device)
+            generator.manual_seed(seed)
+            draw = torch.rand(exit_prob.shape, device=exit_prob.device, generator=generator)
+            act_mon = (draw < exit_prob).long()
+        else:
+            act_mon = dist.sample()
+        return act_mon, dist.entropy().mean()
+
     def _run_controller_pg_window(self, env, start_idx: int, stop_idx: int, fixed_cycle: int, epoch: int = None):
         obs = env.reset_at(start_idx, stop_idx)
         history = [env.portfolio_value.item()]
@@ -1116,9 +1168,13 @@ class HRL_Trainer:
                     )
                     zeros = torch.zeros_like(stats["policy_logit"])
                     logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
-                    dist = Categorical(logits=logits)
-                    act_mon = dist.sample()
-                    entropy = dist.entropy().mean()
+                    act_mon, entropy = self._sample_controller_pg_action(
+                        stats,
+                        logits,
+                        start_idx=start_idx,
+                        step_idx=step_idx,
+                        epoch=epoch,
+                    )
                     free_exit_probs = stats["exit_prob"].detach().view(-1).cpu().numpy().astype(float).tolist()
                 is_switch = bool(act_mon.item() == 1)
                 base_used = torch.where(act_mon.view(-1, 1).bool(), act_out.detach(), obs["base_drift"])
@@ -3577,12 +3633,12 @@ def train_warmup_then_joint_with_monitor(trainer,
         "selection_metric": str(getattr(trainer.cfg, "controller_selection_metric", "risk_return")),
     }
     if run_controller_joint:
-        if os.path.exists(os.path.join(trainer.model_dir, controller_best_ckpt)):
-            trainer._load_model(controller_best_ckpt)
-            trainer.logger.info("   ↺ Loaded best controller before end-to-end joint finetune.")
-        elif os.path.exists(os.path.join(trainer.model_dir, final_best_ckpt)):
-            trainer._load_model(final_best_ckpt)
-            trainer.logger.info("   ↺ Loaded current best model before end-to-end joint finetune.")
+        best_controller_joint_score = _prepare_controller_joint_baseline(
+            trainer,
+            controller_best_ckpt=controller_best_ckpt,
+            final_best_ckpt=final_best_ckpt,
+            controller_pg_result=controller_pg_result,
+        )
 
         trainer.logger.info(
             "### [5/5] END-TO-END CONTROLLER+HRL JOINT FINETUNE: %s epochs, controller active, update_every=%s steps ###",
@@ -3601,7 +3657,6 @@ def train_warmup_then_joint_with_monitor(trainer,
                 joint_lrs.get("inner", 0.0),
             )
 
-        best_controller_joint_score = -np.inf
         joint_update_steps = _rollout_update_steps_for("joint")
         for ep in range(controller_joint_epochs):
             if joint_single_full_episode:
@@ -3836,7 +3891,12 @@ def train_controller_then_joint_finetune(trainer,
         "joint",
         int(getattr(trainer.cfg, "rollout_update_steps", 0) or 0),
     ))
-    best_score = -np.inf
+    best_score = _prepare_controller_joint_baseline(
+        trainer,
+        controller_best_ckpt=controller_best_ckpt,
+        final_best_ckpt=final_best_ckpt,
+        controller_pg_result=controller_pg_result,
+    )
 
     for ep in range(max(0, joint_loop_count)):
         if joint_single_full_episode:

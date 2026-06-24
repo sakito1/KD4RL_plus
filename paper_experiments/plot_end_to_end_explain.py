@@ -1,4 +1,5 @@
 import argparse
+import ast
 from pathlib import Path
 
 import numpy as np
@@ -7,26 +8,357 @@ import pandas as pd
 import matplotlib
 
 matplotlib.use("Agg")
+matplotlib.rcParams.update(
+    {
+        "font.family": "DejaVu Sans",
+        "font.size": 10.5,
+        "axes.titlesize": 12.5,
+        "axes.labelsize": 10.5,
+        "xtick.labelsize": 8.8,
+        "ytick.labelsize": 8.8,
+        "legend.fontsize": 8.8,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "pdf.use14corefonts": False,
+        "axes.unicode_minus": False,
+        "axes.titleweight": "bold",
+        "axes.labelcolor": "#17212B",
+        "axes.edgecolor": "#2C333A",
+        "axes.linewidth": 0.9,
+        "xtick.color": "#17212B",
+        "ytick.color": "#17212B",
+        "savefig.facecolor": "white",
+        "figure.facecolor": "white",
+        "axes.facecolor": "#FBFCFE",
+        "grid.color": "#E5E9EF",
+        "grid.linewidth": 0.72,
+        "legend.handlelength": 2.4,
+        "legend.columnspacing": 1.0,
+        "lines.solid_capstyle": "round",
+        "lines.dash_capstyle": "round",
+    }
+)
 import matplotlib.pyplot as plt
+from PIL import Image
 
 
 COLORS = {
-    "full_controller": "#b53a2f",
-    "fixed_hrl": "#303030",
-    "fixed_hrl_no_inner": "#2f6fbb",
-    "Controller-PG checkpoint": "#d88724",
-    "Final E2E checkpoint": "#b53a2f",
-    "Fixed HRL checkpoint": "#303030",
-    "random": "#b8b8b8",
+    "full_controller": "#D55E00",
+    "controller_outer": "#E69F00",
+    "fixed_hrl": "#2F3A44",
+    "fixed_hrl_no_inner": "#0072B2",
+    "Controller-PG checkpoint": "#E69F00",
+    "Fixed HRL checkpoint": "#2F3A44",
+    "random": "#B9C2CC",
+    "exit": "#009E73",
+    "switch": "#CC79A7",
+    "hold": "#7A7F86",
+    "drawdown_fill": "#56B4E9",
+    "positive_fill": "#F0E442",
+    "negative_fill": "#A6CEE3",
+    "paper_ink": "#17212B",
+    "muted_ink": "#5E6975",
+    "panel": "#F7F9FC",
+    "panel_edge": "#CBD3DD",
+}
+
+ABLATION_SERIES = [
+    ("Fixed HRL w/o Inner", "fixed_hrl_no_inner"),
+    ("Fixed HRL", "fixed_hrl"),
+    ("Controller+Outer", "controller_outer"),
+    ("Full controller", "full_controller"),
+]
+ABLATION_ORDER = [scenario for _, scenario in ABLATION_SERIES]
+MAIN_COMPARISON_SERIES = [
+    ("Fixed HRL", "fixed_hrl"),
+    ("Full controller", "full_controller"),
+]
+MAIN_COMPARISON_ORDER = [scenario for _, scenario in MAIN_COMPARISON_SERIES]
+MAIN_COMPARISON_METRICS = ["total_return", "sharpe"]
+
+FIGURE_GROUPS = {
+    "fig01": "01_stage_progression",
+    "fig02": "01_stage_progression",
+    "fig02b": "01_stage_progression",
+    "fig03": "02_inference_ablation",
+    "fig03b": "02_inference_ablation",
+    "fig03c": "02_inference_ablation",
+    "fig04": "03_inner_alpha",
+    "fig04b": "03_inner_alpha",
+    "fig05": "04_switch_alignment",
+    "fig05b": "04_switch_alignment",
+    "fig06": "05_switch_events",
+    "fig06b": "05_switch_events",
+    "fig07": "06_random_switch",
+    "fig08": "07_case_windows",
+    "fig09": "07_case_windows",
+    "fig10": "07_case_windows",
 }
 
 
-def _save(fig, output_dir: Path, stem: str):
+STYLE_BY_SCENARIO = {
+    "fixed_hrl": {"linestyle": (0, (4, 2)), "linewidth": 2.15, "zorder": 3},
+    "fixed_hrl_no_inner": {"linestyle": (0, (1, 2)), "linewidth": 2.0, "zorder": 2},
+    "controller_outer": {"linestyle": "-", "linewidth": 2.35, "zorder": 4},
+    "full_controller": {"linestyle": "-", "linewidth": 2.75, "zorder": 5},
+    "stage_hrl_fixed_best_fixed_hrl": {"linestyle": (0, (4, 2)), "linewidth": 2.2, "zorder": 3},
+    "stage_controller_best_full_controller": {"linestyle": "-", "linewidth": 2.45, "zorder": 4},
+}
+
+DISPLAY_LABELS = {
+    "Fixed HRL w/o Inner": "No Inner Fixed",
+    "Fixed HRL": "Fixed HRL",
+    "Controller+Outer": "Controller + Outer",
+    "Full controller": "Full Controller",
+    "Fixed HRL checkpoint": "Fixed HRL",
+    "Controller-PG checkpoint": "Controller-PG",
+}
+
+DROP_STAGE_LABELS = {"Final E2E checkpoint"}
+
+
+CASE_WINDOWS = {
+    ("nas", 49): [
+        {
+            "stem": "fig08_case_window_nas_2020_07_switch_cluster",
+            "title": "NASDAQ Market: Switch Cluster Suppresses Drawdown",
+            "start_step": 52,
+            "length": 30,
+            "key_step": 52,
+        },
+        {
+            "stem": "fig09_case_window_nas_2021_04_negative_hold",
+            "title": "NASDAQ Market: Switch Avoids a Negative Hold Path",
+            "start_step": 232,
+            "length": 30,
+            "key_step": 248,
+        },
+    ],
+    ("sh", 90): [
+        {
+            "stem": "fig10_case_window_sh_2021_07_large_avoidance",
+            "title": "SH Market: Switch Avoids a Large Hold Loss",
+            "start_step": 348,
+            "length": 30,
+            "key_step": 365,
+        },
+    ],
+}
+
+
+def _market_label(market: str) -> str:
+    labels = {"sh": "SH Market", "nas": "NASDAQ Market"}
+    return labels.get(str(market).lower(), str(market).upper())
+
+
+def _paper_title(title: str, market: str) -> str:
+    return f"{title}: {_market_label(market)}"
+
+
+def _style_axis(ax, *, grid_axis="y"):
+    ax.set_axisbelow(True)
+    ax.grid(axis=grid_axis, alpha=0.72)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#2C333A")
+    ax.spines["bottom"].set_color("#2C333A")
+    ax.tick_params(length=3.5, width=0.8)
+
+
+def _display_label(label: str) -> str:
+    return DISPLAY_LABELS.get(str(label), str(label))
+
+
+def _line_style_for(scenario: str, label: str) -> dict:
+    style = STYLE_BY_SCENARIO.get(str(scenario), {}).copy()
+    if not style and ("Fixed HRL" in str(label) or str(scenario) == "fixed_hrl"):
+        style = {"linestyle": (0, (4, 2)), "linewidth": 2.1, "zorder": 3}
+    style.setdefault("linestyle", "-")
+    style.setdefault("linewidth", 2.35)
+    style.setdefault("zorder", 3)
+    return style
+
+
+def _series_color(scenario: str, label: str):
+    return COLORS.get(str(scenario), COLORS.get(str(label), None))
+
+
+def _fmt_pct(value, digits=1, signed=False):
+    if not np.isfinite(value):
+        return "n/a"
+    prefix = "+" if signed and value > 0 else ""
+    return f"{prefix}{value:.{digits}f}%"
+
+
+def _portfolio_summary(df: pd.DataFrame, *, normalized=False) -> dict:
+    if df.empty or "portfolio_value" not in df:
+        return {}
+    values = pd.to_numeric(df["portfolio_value"], errors="coerce").dropna()
+    if values.empty:
+        return {}
+    if normalized:
+        total_return = (float(values.iloc[-1]) / max(float(values.iloc[0]), 1e-12) - 1.0) * 100.0
+    else:
+        total_return = float(pd.to_numeric(df.get("cumulative_return"), errors="coerce").dropna().iloc[-1] * 100.0) if "cumulative_return" in df and pd.to_numeric(df.get("cumulative_return"), errors="coerce").notna().any() else (float(values.iloc[-1]) / max(float(values.iloc[0]), 1e-12) - 1.0) * 100.0
+    if "drawdown" in df:
+        dd = pd.to_numeric(df["drawdown"], errors="coerce").max() * 100.0
+    else:
+        dd = _max_drawdown(values) * 100.0
+    switch_count = int(pd.to_numeric(df.get("is_switch", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "is_switch" in df else None
+    free_switch_count = int(pd.to_numeric(df.get("is_free_switch", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "is_free_switch" in df else None
+    return {
+        "return_pct": total_return,
+        "mdd_pct": float(dd),
+        "switch_count": switch_count,
+        "free_switch_count": free_switch_count,
+    }
+
+
+def _add_metric_box(ax, lines, *, loc="upper left"):
+    if not lines:
+        return None
+    anchors = {
+        "upper left": (0.018, 0.965, "left", "top"),
+        "upper right": (0.982, 0.965, "right", "top"),
+        "lower left": (0.018, 0.035, "left", "bottom"),
+        "lower right": (0.982, 0.035, "right", "bottom"),
+    }
+    x, y, ha, va = anchors.get(loc, anchors["upper left"])
+    return ax.text(
+        x,
+        y,
+        "\n".join(str(line) for line in lines if str(line)),
+        transform=ax.transAxes,
+        ha=ha,
+        va=va,
+        fontsize=8.4,
+        linespacing=1.26,
+        color=COLORS["paper_ink"],
+        bbox={
+            "boxstyle": "round,pad=0.38,rounding_size=0.08",
+            "facecolor": "white",
+            "alpha": 0.94,
+            "edgecolor": COLORS["panel_edge"],
+            "linewidth": 0.75,
+        },
+        zorder=10,
+    )
+
+
+def _annotate_endpoint(ax, line, label: str):
+    xdata = np.asarray(line.get_xdata(), dtype=object)
+    ydata = np.asarray(line.get_ydata(), dtype=float)
+    finite = np.where(np.isfinite(ydata))[0]
+    if len(finite) == 0:
+        return None
+    idx = int(finite[-1])
+    return ax.annotate(
+        _display_label(label),
+        (xdata[idx], ydata[idx]),
+        xytext=(7, 0),
+        textcoords="offset points",
+        ha="left",
+        va="center",
+        fontsize=8.2,
+        color=line.get_color(),
+        fontweight="bold",
+        clip_on=False,
+        zorder=10,
+    )
+
+
+def _annotate_bar(ax, bar, text, *, color=None):
+    y = bar.get_height()
+    va = "bottom" if y >= 0 else "top"
+    offset = 3 if y >= 0 else -3
+    ax.annotate(
+        text,
+        (bar.get_x() + bar.get_width() / 2, y),
+        xytext=(0, offset),
+        textcoords="offset points",
+        ha="center",
+        va=va,
+        fontsize=8.1,
+        color=color or COLORS["paper_ink"],
+        fontweight="bold" if color else "normal",
+    )
+
+
+def _figure_group_for_stem(stem: str) -> str:
+    first = str(stem).split("_", 1)[0]
+    if "case_window" in str(stem):
+        return "07_case_windows"
+    return FIGURE_GROUPS.get(first, "99_misc")
+
+
+def _clear_generated_figures(output_dir: Path):
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
-    fig.savefig(output_dir / f"{stem}.png", dpi=320, bbox_inches="tight")
-    fig.savefig(output_dir / f"{stem}.pdf", bbox_inches="tight")
+    for path in output_dir.glob("*.png"):
+        path.unlink()
+    for path in output_dir.glob("*.pdf"):
+        path.unlink()
+    for group in sorted(set(FIGURE_GROUPS.values()) | {"99_misc"}):
+        group_dir = output_dir / group
+        if not group_dir.exists():
+            continue
+        for path in group_dir.glob("*.png"):
+            path.unlink()
+        for path in group_dir.glob("*.pdf"):
+            path.unlink()
+
+
+EXPORT_DPI = 450
+
+
+def _flatten_png_to_pdf(png_path: Path, pdf_path: Path, *, dpi: int = EXPORT_DPI):
+    with Image.open(png_path) as img:
+        if img.mode in ("RGBA", "LA"):
+            background = Image.new("RGB", img.size, "white")
+            background.paste(img, mask=img.getchannel("A"))
+            rgb = background
+        else:
+            rgb = img.convert("RGB")
+        rgb.save(pdf_path, "PDF", resolution=float(dpi))
+
+
+def _save(fig, output_dir: Path, stem: str, tight=True):
+    target_dir = Path(output_dir) / _figure_group_for_stem(stem)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if tight:
+        fig.tight_layout()
+    png_path = target_dir / f"{stem}.png"
+    pdf_path = target_dir / f"{stem}.pdf"
+    editable_pdf_path = target_dir / f"{stem}_editable.pdf"
+    fig.savefig(png_path, dpi=EXPORT_DPI, bbox_inches="tight")
+    fig.savefig(editable_pdf_path, bbox_inches="tight")
+    _flatten_png_to_pdf(png_path, pdf_path, dpi=EXPORT_DPI)
     plt.close(fig)
+
+
+def _drawdown_series(values):
+    values = pd.to_numeric(values, errors="coerce").astype(float)
+    peak = np.maximum.accumulate(np.maximum(values, 1e-12))
+    return (peak - values) / np.maximum(peak, 1e-12)
+
+
+def _max_drawdown(values):
+    dd = _drawdown_series(values)
+    return float(np.nanmax(dd)) if len(dd) else np.nan
+
+
+def _parse_curve(value):
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return np.array([])
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return np.asarray(value, dtype=float)
+    try:
+        parsed = ast.literal_eval(str(value))
+    except (SyntaxError, ValueError):
+        return np.array([])
+    if not isinstance(parsed, (list, tuple)):
+        return np.array([])
+    return np.asarray(parsed, dtype=float)
 
 
 def _load_trace(input_dir: Path, market: str, seed: int, scenario: str):
@@ -36,8 +368,31 @@ def _load_trace(input_dir: Path, market: str, seed: int, scenario: str):
     return pd.read_csv(path)
 
 
+def _prepare_ablation_rows(group: pd.DataFrame) -> pd.DataFrame:
+    if group.empty or "scenario" not in group:
+        return pd.DataFrame()
+    rows = group.copy()
+    if "stage" in rows:
+        rows = rows[rows["stage"].isna()]
+    rows = rows[rows["scenario"].isin(ABLATION_ORDER)].copy()
+    rows["scenario"] = pd.Categorical(rows["scenario"], categories=ABLATION_ORDER, ordered=True)
+    return rows.sort_values("scenario").reset_index(drop=True)
+
+
+def _prepare_main_comparison_rows(group: pd.DataFrame) -> pd.DataFrame:
+    if group.empty or "scenario" not in group:
+        return pd.DataFrame()
+    rows = group.copy()
+    if "stage" in rows:
+        rows = rows[rows["stage"].isna()]
+    rows = rows[rows["scenario"].isin(MAIN_COMPARISON_ORDER)].copy()
+    rows["scenario"] = pd.Categorical(rows["scenario"], categories=MAIN_COMPARISON_ORDER, ordered=True)
+    return rows.sort_values("scenario").reset_index(drop=True)
+
+
 def _plot_curves(input_dir: Path, output_dir: Path, market: str, seed: int, scenarios, stem: str, title: str, drawdown=False):
-    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    fig, ax = plt.subplots(figsize=(7.75, 4.55))
+    plotted = []
     for label, scenario in scenarios:
         df = _load_trace(input_dir, market, seed, scenario)
         if df.empty:
@@ -48,86 +403,181 @@ def _plot_curves(input_dir: Path, output_dir: Path, market: str, seed: int, scen
         else:
             values = pd.to_numeric(df["portfolio_value"], errors="coerce")
             y = values / max(float(values.iloc[0]), 1e-12)
-        ax.plot(x, y, label=label, linewidth=2.0, color=COLORS.get(scenario, COLORS.get(label, None)))
-    ax.set_title(title, fontsize=14, fontweight="bold")
-    ax.set_xlabel("Date", fontsize=12)
-    ax.set_ylabel("Drawdown (%)" if drawdown else "Normalized portfolio value", fontsize=12)
-    ax.grid(axis="y", alpha=0.22)
-    ax.legend(frameon=False, fontsize=10)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+        style = _line_style_for(scenario, label)
+        line = ax.plot(
+            x,
+            y,
+            label=_display_label(label),
+            color=_series_color(scenario, label),
+            **style,
+        )[0]
+        plotted.append((label, scenario, df, x, y, line))
+
+    if not drawdown and len(plotted) >= 2:
+        fixed = next((item for item in plotted if "Fixed HRL" in str(item[0]) or item[1] == "fixed_hrl"), None)
+        full = next((item for item in plotted if "Final" in str(item[0]) or item[1] == "full_controller"), None)
+        if fixed is not None and full is not None and len(fixed[3]) == len(full[3]):
+            ax.fill_between(
+                full[3],
+                full[4],
+                fixed[4],
+                where=np.asarray(full[4]) >= np.asarray(fixed[4]),
+                color=COLORS["positive_fill"],
+                alpha=0.16,
+                linewidth=0,
+                zorder=1,
+            )
+            ax.fill_between(
+                full[3],
+                full[4],
+                fixed[4],
+                where=np.asarray(full[4]) < np.asarray(fixed[4]),
+                color=COLORS["negative_fill"],
+                alpha=0.16,
+                linewidth=0,
+                zorder=1,
+            )
+
+    for label, scenario, df, _x, _y, line in plotted:
+        if scenario in {"full_controller", "stage_best_model_full_controller"} or "Final" in str(label):
+            _annotate_endpoint(ax, line, label)
+
+    ax.set_title(title, pad=10)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Drawdown (%)" if drawdown else "Normalized portfolio value")
+    if drawdown:
+        ax.invert_yaxis()
+    _style_axis(ax)
+    ax.legend(frameon=False, loc="best", ncol=1)
     _save(fig, output_dir, stem)
 
 
-def _plot_bar(df: pd.DataFrame, output_dir: Path, market: str, seed: int, stem: str, title: str):
+def _plot_bar(df: pd.DataFrame, output_dir: Path, market: str, seed: int, stem: str, title: str, metrics=None):
     if df.empty:
         return
-    metrics = ["total_return", "sharpe", "max_drawdown", "switch_count"]
-    fig, axes = plt.subplots(1, len(metrics), figsize=(12, 3.6))
-    methods = df["scenario"].astype(str).tolist()
+    metrics = list(metrics or ["total_return", "sharpe", "max_drawdown", "switch_count"])
+    metric_titles = {
+        "total_return": "Total Return (%)",
+        "sharpe": "Sharpe",
+        "max_drawdown": "Max Drawdown (%)",
+        "switch_count": "Switch Count",
+    }
+    fig_width = 6.8 if len(metrics) <= 2 else 12.6
+    fig, axes = plt.subplots(1, len(metrics), figsize=(fig_width, 4.15))
+    axes = np.atleast_1d(axes)
+    scenario_names = df["scenario"].astype(str).tolist()
+    labels = {
+        "fixed_hrl_no_inner": "No Inner\nFixed",
+        "fixed_hrl": "Fixed\nHRL",
+        "controller_outer": "Controller\n+ Outer",
+        "full_controller": "Full\nController",
+    }
+    methods = [labels.get(name, name) for name in scenario_names]
     for ax, metric in zip(axes, metrics):
         vals = pd.to_numeric(df.get(metric), errors="coerce")
         scale = 100.0 if metric in {"total_return", "max_drawdown"} else 1.0
-        bars = ax.bar(np.arange(len(vals)), vals * scale, color=["#2f6fbb", "#303030", "#b53a2f"][: len(vals)])
-        ax.set_title(metric.replace("_", " ").title(), fontsize=11)
+        colors = [COLORS.get(name, "#808080") for name in scenario_names]
+        plot_vals = vals * scale
+        bars = ax.bar(np.arange(len(vals)), plot_vals, color=colors, width=0.68, edgecolor="white", linewidth=1.0)
+        ax.set_title(metric_titles.get(metric, metric.replace("_", " ").title()), pad=8)
         ax.set_xticks(np.arange(len(vals)))
-        ax.set_xticklabels(methods, rotation=25, ha="right", fontsize=8)
-        ax.grid(axis="y", alpha=0.18)
-        for bar, val in zip(bars, vals * scale):
+        ax.set_xticklabels(methods, rotation=0, ha="center")
+        _style_axis(ax)
+        finite = plot_vals[np.isfinite(plot_vals)]
+        if len(finite):
+            low = min(0.0, float(finite.min()))
+            high = float(finite.max())
+            pad = max((high - low) * 0.14, high * 0.08 if high > 0 else 0.5, 0.5)
+            ax.set_ylim(low - pad * 0.15, high + pad)
+        finite_vals = [float(v) for v in plot_vals if np.isfinite(v)]
+        best_idx = None
+        if finite_vals and metric != "switch_count":
+            if metric == "max_drawdown":
+                best_val = min(finite_vals)
+                best_idx = int(np.nanargmin(plot_vals))
+            else:
+                best_val = max(finite_vals)
+                best_idx = int(np.nanargmax(plot_vals))
+        for idx, (bar, val) in enumerate(zip(bars, plot_vals)):
             if np.isfinite(val):
-                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{val:.2f}", ha="center", va="bottom", fontsize=8)
-    fig.suptitle(title, fontsize=14, fontweight="bold")
+                if idx == best_idx:
+                    bar.set_edgecolor(COLORS["paper_ink"])
+                    bar.set_linewidth(1.3)
+                    _annotate_bar(ax, bar, f"{val:.2f}", color=COLORS["paper_ink"])
+                else:
+                    _annotate_bar(ax, bar, f"{val:.2f}", color=COLORS["muted_ink"])
+    fig.suptitle(title, fontsize=15, fontweight="bold", y=0.995)
     _save(fig, output_dir, stem)
 
 
 def _plot_stage_bar(group: pd.DataFrame, output_dir: Path, market: str, seed: int):
     stage = group[group.get("stage").notna()].copy() if "stage" in group else pd.DataFrame()
+    if "stage" in stage:
+        stage = stage[~stage["stage"].isin(DROP_STAGE_LABELS)].copy()
     if stage.empty:
         return
-    stage["method"] = stage["stage"].astype(str)
+    stage["method"] = stage["stage"].astype(str).map(_display_label)
     metrics = ["total_return", "sharpe", "max_drawdown", "switch_count"]
-    fig, axes = plt.subplots(1, len(metrics), figsize=(12, 3.7))
+    fig, axes = plt.subplots(1, len(metrics), figsize=(12.6, 4.1))
     for ax, metric in zip(axes, metrics):
         vals = pd.to_numeric(stage.get(metric), errors="coerce")
         scale = 100.0 if metric in {"total_return", "max_drawdown"} else 1.0
         colors = [COLORS.get(x, "#808080") for x in stage["stage"]]
-        bars = ax.bar(np.arange(len(vals)), vals * scale, color=colors)
-        ax.set_title(metric.replace("_", " ").title(), fontsize=11)
+        plot_vals = vals * scale
+        bars = ax.bar(np.arange(len(vals)), plot_vals, color=colors, edgecolor="white", linewidth=1.0)
+        ax.set_title(metric.replace("_", " ").title(), pad=8)
         ax.set_xticks(np.arange(len(vals)))
-        ax.set_xticklabels(stage["method"], rotation=25, ha="right", fontsize=8)
-        ax.grid(axis="y", alpha=0.18)
-        for bar, val in zip(bars, vals * scale):
+        ax.set_xticklabels(stage["method"], rotation=18, ha="right", fontsize=8)
+        _style_axis(ax)
+        finite_vals = [float(v) for v in plot_vals if np.isfinite(v)]
+        best_idx = None
+        if finite_vals and metric != "switch_count":
+            best_idx = int(np.nanargmin(plot_vals)) if metric == "max_drawdown" else int(np.nanargmax(plot_vals))
+        for idx, (bar, val) in enumerate(zip(bars, plot_vals)):
             if np.isfinite(val):
-                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{val:.2f}", ha="center", va="bottom", fontsize=8)
-    fig.suptitle(f"Stage progression metrics ({market.upper()} seed {seed})", fontsize=14, fontweight="bold")
+                if idx == best_idx:
+                    bar.set_edgecolor(COLORS["paper_ink"])
+                    bar.set_linewidth(1.3)
+                _annotate_bar(ax, bar, f"{val:.2f}", color=COLORS["paper_ink"] if idx == best_idx else COLORS["muted_ink"])
+    fig.suptitle(_paper_title("Stage Progression Metrics", market), fontsize=15, fontweight="bold", y=0.995)
     _save(fig, output_dir, f"fig02b_stage_progression_bar_{market}_seed{seed}")
 
 
 def plot_inner_alpha(input_dir: Path, output_dir: Path, market: str, seed: int):
-    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    fig, ax = plt.subplots(figsize=(7.55, 4.6))
+    plotted = []
     for scenario in ["fixed_hrl", "full_controller"]:
         df = _load_trace(input_dir, market, seed, scenario)
         if df.empty or "inner_alpha" not in df:
             continue
-        ax.plot(pd.to_datetime(df["date"]), pd.to_numeric(df["inner_alpha"], errors="coerce").fillna(0).cumsum(), label=scenario, linewidth=2.0, color=COLORS.get(scenario))
-    ax.axhline(0, color="#202020", linewidth=0.8)
-    ax.set_title(f"Cumulative inner alpha ({market.upper()} seed {seed})", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Date", fontsize=12)
-    ax.set_ylabel("Cumulative log alpha", fontsize=12)
-    ax.grid(axis="y", alpha=0.22)
+        label = "Full controller" if scenario == "full_controller" else "Fixed HRL"
+        y = pd.to_numeric(df["inner_alpha"], errors="coerce").fillna(0).cumsum()
+        style = _line_style_for(scenario, label)
+        line = ax.plot(pd.to_datetime(df["date"]), y, label=_display_label(label), color=COLORS.get(scenario), **style)[0]
+        plotted.append((label, y, line))
+    ax.axhline(0, color=COLORS["paper_ink"], linewidth=0.8)
+    ax.set_title(_paper_title("Cumulative Inner Alpha", market), pad=10)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Cumulative log alpha")
+    for label, _y, line in plotted:
+        if "Full" in label:
+            _annotate_endpoint(ax, line, label)
+    _style_axis(ax)
     ax.legend(frameon=False)
     _save(fig, output_dir, f"fig04_cumulative_inner_alpha_{market}_seed{seed}")
 
     df = _load_trace(input_dir, market, seed, "full_controller")
     if not df.empty:
-        fig, ax = plt.subplots(figsize=(7.5, 4.6))
+        fig, ax = plt.subplots(figsize=(7.45, 4.55))
         alpha = pd.to_numeric(df.get("inner_alpha"), errors="coerce").dropna()
-        ax.hist(alpha, bins=40, color="#2f6fbb", alpha=0.72)
-        ax.axvline(0, color="#202020", linewidth=1.0)
-        ax.axvline(alpha.mean(), color="#b53a2f", linewidth=1.6, label=f"mean={alpha.mean():.4f}")
-        ax.set_title(f"Daily inner alpha distribution ({market.upper()} seed {seed})", fontsize=14, fontweight="bold")
-        ax.set_xlabel("Daily inner alpha", fontsize=12)
-        ax.set_ylabel("Frequency", fontsize=12)
+        ax.hist(alpha, bins=42, color=COLORS["fixed_hrl_no_inner"], alpha=0.82, edgecolor="white", linewidth=0.4)
+        ax.axvline(0, color=COLORS["paper_ink"], linewidth=1.0)
+        if len(alpha):
+            ax.axvline(alpha.mean(), color=COLORS["full_controller"], linewidth=2.0, label=f"mean={alpha.mean():.4f}")
+        ax.set_title(_paper_title("Daily Inner Alpha Distribution", market), pad=10)
+        ax.set_xlabel("Daily inner alpha")
+        ax.set_ylabel("Frequency")
+        _style_axis(ax)
         ax.legend(frameon=False)
         _save(fig, output_dir, f"fig04b_inner_alpha_distribution_{market}_seed{seed}")
 
@@ -142,27 +592,49 @@ def plot_alignment(input_dir: Path, output_dir: Path, market: str, seed: int):
         return
     free["exit_prob"] = pd.to_numeric(free["exit_prob"], errors="coerce")
     free["controller_switch_advantage"] = pd.to_numeric(free["controller_switch_advantage"], errors="coerce")
-    free["bin"] = pd.cut(free["exit_prob"], bins=np.linspace(0, 1, 11), include_lowest=True)
+    bin_edges = np.linspace(0, 1, 11)
+    bin_labels = [f"{lo:.1f}-{hi:.1f}" for lo, hi in zip(bin_edges[:-1], bin_edges[1:])]
+    free["bin"] = pd.cut(free["exit_prob"], bins=bin_edges, labels=bin_labels, include_lowest=True)
     grouped = free.groupby("bin", observed=False)["controller_switch_advantage"].agg(["mean", "count"]).reset_index()
-    fig, ax = plt.subplots(figsize=(7.5, 4.6))
-    ax.bar(np.arange(len(grouped)), grouped["mean"], color="#b53a2f", alpha=0.75)
-    ax.axhline(0, color="#202020", linewidth=0.8)
+    grouped = grouped[grouped["count"] > 0].reset_index(drop=True)
+    fig, ax = plt.subplots(figsize=(7.55, 4.65))
+    means = pd.to_numeric(grouped["mean"], errors="coerce")
+    bar_colors = [COLORS["full_controller"] if val >= 0 else COLORS["fixed_hrl_no_inner"] for val in means]
+    bars = ax.bar(np.arange(len(grouped)), means, color=bar_colors, alpha=0.9, edgecolor="white", linewidth=0.7)
+    ax.axhline(0, color=COLORS["paper_ink"], linewidth=0.8)
+    for bar, count in zip(bars, grouped["count"]):
+        if int(count) > 0:
+            _annotate_bar(ax, bar, f"n={int(count)}", color=COLORS["muted_ink"])
     ax.set_xticks(np.arange(len(grouped)))
-    ax.set_xticklabels([str(x) for x in grouped["bin"]], rotation=35, ha="right", fontsize=8)
-    ax.set_title(f"Exit probability calibration ({market.upper()} seed {seed}, n={len(free)})", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Exit probability bin", fontsize=12)
-    ax.set_ylabel("Average switch advantage", fontsize=12)
+    ax.set_xticklabels([str(x) for x in grouped["bin"]], rotation=0, ha="center", fontsize=8.4)
+    ax.set_title(_paper_title("Exit Probability Calibration", market), pad=10)
+    ax.set_xlabel("Exit probability bin")
+    ax.set_ylabel("Average switch advantage")
+    _style_axis(ax)
     _save(fig, output_dir, f"fig05_exit_prob_calibration_{market}_seed{seed}")
 
-    fig, ax = plt.subplots(figsize=(7.0, 4.5))
+    fig, ax = plt.subplots(figsize=(7.05, 4.55))
     data = [
         free.loc[free["is_switch"] == 0, "controller_switch_advantage"].dropna(),
         free.loc[free["is_switch"] == 1, "controller_switch_advantage"].dropna(),
     ]
-    ax.boxplot(data, labels=["Held", "Switched"], showfliers=False)
-    ax.axhline(0, color="#202020", linewidth=0.8)
-    ax.set_title(f"Switch advantage: held vs switched ({market.upper()} seed {seed})", fontsize=14, fontweight="bold")
-    ax.set_ylabel("Switch advantage", fontsize=12)
+    box = ax.boxplot(
+        data,
+        tick_labels=["Held", "Switched"],
+        showfliers=False,
+        patch_artist=True,
+        medianprops={"color": COLORS["paper_ink"], "linewidth": 1.4},
+        boxprops={"linewidth": 1.0, "color": COLORS["panel_edge"]},
+        whiskerprops={"color": COLORS["panel_edge"]},
+        capprops={"color": COLORS["panel_edge"]},
+    )
+    for patch, color in zip(box["boxes"], [COLORS["hold"], COLORS["switch"]]):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.72)
+    ax.axhline(0, color=COLORS["paper_ink"], linewidth=0.8)
+    ax.set_title(_paper_title("Switch Advantage: Held vs. Switched", market), pad=10)
+    ax.set_ylabel("Switch advantage")
+    _style_axis(ax)
     _save(fig, output_dir, f"fig05b_switch_advantage_switched_vs_held_{market}_seed{seed}")
 
 
@@ -179,29 +651,47 @@ def plot_switch_events(input_dir: Path, output_dir: Path, market: str, seed: int
         ("post_hold_return_20", "Continue-hold counterfactual"),
         ("post_switch_return_20", "Switch counterfactual"),
     ]
-    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    fig, ax = plt.subplots(figsize=(7.65, 4.65))
     means = [pd.to_numeric(df[col], errors="coerce").mean() * 100.0 for col, _ in metrics]
-    bars = ax.bar(np.arange(len(metrics)), means, color=["#1b4d5c", "#b53a2f", "#7b8187", "#d88724"])
-    ax.axhline(0, color="#202020", linewidth=0.8)
+    bars = ax.bar(
+        np.arange(len(metrics)),
+        means,
+        color=[COLORS["exit"], COLORS["full_controller"], COLORS["hold"], COLORS["controller_outer"]],
+        edgecolor="white",
+        linewidth=1.0,
+    )
+    ax.axhline(0, color=COLORS["paper_ink"], linewidth=0.8)
     ax.set_xticks(np.arange(len(metrics)))
     ax.set_xticklabels([label for _, label in metrics], rotation=20, ha="right", fontsize=9)
-    ax.set_ylabel("Mean 20-day log return (%)", fontsize=12)
-    ax.set_title(f"Switch event study summary ({market.upper()} seed {seed}, n={len(df)})", fontsize=14, fontweight="bold")
-    for bar, val in zip(bars, means):
+    ax.set_ylabel("Mean 20-day log return (%)")
+    ax.set_title(_paper_title("Switch Event Study", market), pad=10)
+    best_idx = int(np.nanargmax(means)) if any(np.isfinite(means)) else None
+    for idx, (bar, val) in enumerate(zip(bars, means)):
         if np.isfinite(val):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{val:.2f}", ha="center", va="bottom", fontsize=8)
-    ax.grid(axis="y", alpha=0.18)
+            if idx == best_idx:
+                bar.set_edgecolor(COLORS["paper_ink"])
+                bar.set_linewidth(1.3)
+            _annotate_bar(ax, bar, f"{val:.2f}", color=COLORS["paper_ink"] if idx == best_idx else COLORS["muted_ink"])
+    avoided = pd.to_numeric(df.get("avoided_loss_20"), errors="coerce").dropna()
+    _style_axis(ax)
     _save(fig, output_dir, f"fig06_switch_event_study_{market}_seed{seed}")
 
-    fig, ax = plt.subplots(figsize=(7.2, 4.4))
-    avoided = pd.to_numeric(df.get("avoided_loss_20"), errors="coerce").dropna()
-    ax.hist(avoided * 100.0, bins=min(30, max(5, len(avoided))), color="#b53a2f", alpha=0.72)
-    ax.axvline(0, color="#202020", linewidth=0.9)
+    fig, ax = plt.subplots(figsize=(7.35, 4.45))
+    ax.hist(
+        avoided * 100.0,
+        bins=min(34, max(6, len(avoided))),
+        color=COLORS["full_controller"],
+        alpha=0.82,
+        edgecolor="white",
+        linewidth=0.45,
+    )
+    ax.axvline(0, color=COLORS["paper_ink"], linewidth=0.9)
     if len(avoided):
-        ax.axvline(avoided.mean() * 100.0, color="#1b4d5c", linewidth=1.6, label=f"mean={avoided.mean()*100:.2f}%")
-    ax.set_title(f"Avoided-loss distribution ({market.upper()} seed {seed})", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Switch advantage / avoided loss (%)", fontsize=12)
-    ax.set_ylabel("Event count", fontsize=12)
+        ax.axvline(avoided.mean() * 100.0, color=COLORS["exit"], linewidth=2.0, label=f"mean={avoided.mean()*100:.2f}%")
+    ax.set_title(_paper_title("Avoided-Loss Distribution", market), pad=10)
+    ax.set_xlabel("Switch advantage / avoided loss (%)")
+    ax.set_ylabel("Event count")
+    _style_axis(ax)
     ax.legend(frameon=False)
     _save(fig, output_dir, f"fig06b_switch_avoided_loss_distribution_{market}_seed{seed}")
 
@@ -212,22 +702,224 @@ def plot_random(input_dir: Path, output_dir: Path, market: str, seed: int):
     random_paths = sorted((input_dir / "traces").glob(f"{market}_seed{seed}_random_switch_matched_count_*_portfolio.csv"))
     if full.empty or not random_paths:
         return
-    fig, ax = plt.subplots(figsize=(7.8, 4.8))
+    fig, ax = plt.subplots(figsize=(7.9, 4.85))
+    random_final = []
     for path in random_paths:
         df = pd.read_csv(path)
         values = pd.to_numeric(df["portfolio_value"], errors="coerce")
-        ax.plot(pd.to_datetime(df["date"]), values / max(values.iloc[0], 1e-12), color="#b8b8b8", alpha=0.35, linewidth=0.8)
-    for df, label, color, lw, ls in [(fixed, "Fixed HRL", "#303030", 1.6, "--"), (full, "Full controller", "#b53a2f", 2.4, "-")]:
+        y = values / max(values.iloc[0], 1e-12)
+        random_final.append(float(y.iloc[-1]))
+        ax.plot(pd.to_datetime(df["date"]), y, color=COLORS["random"], alpha=0.22, linewidth=0.78, zorder=1)
+    for df, label, color, lw, ls in [(fixed, "Fixed HRL", COLORS["fixed_hrl"], 1.9, "--"), (full, "Full controller", COLORS["full_controller"], 2.5, "-")]:
         if df.empty:
             continue
         values = pd.to_numeric(df["portfolio_value"], errors="coerce")
-        ax.plot(pd.to_datetime(df["date"]), values / max(values.iloc[0], 1e-12), label=label, color=color, linewidth=lw, linestyle=ls)
-    ax.set_title(f"Random switch matched-count comparison ({market.upper()} seed {seed})", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Date", fontsize=12)
-    ax.set_ylabel("Normalized portfolio value", fontsize=12)
+        line = ax.plot(pd.to_datetime(df["date"]), values / max(values.iloc[0], 1e-12), label=label, color=color, linewidth=lw, linestyle=ls, zorder=4 if "Full" in label else 3)[0]
+        if "Full" in label:
+            _annotate_endpoint(ax, line, label)
+    ax.set_title(_paper_title("Random Switch Matched-Count Comparison", market), pad=10)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Normalized portfolio value")
     ax.legend(frameon=False)
-    ax.grid(axis="y", alpha=0.22)
+    _style_axis(ax)
     _save(fig, output_dir, f"fig07_random_switch_comparison_{market}_seed{seed}")
+
+
+def plot_case_windows(input_dir: Path, output_dir: Path, market: str, seed: int):
+    cases = CASE_WINDOWS.get((market, seed), [])
+    if not cases:
+        return
+    full = _load_trace(input_dir, market, seed, "full_controller")
+    fixed = _load_trace(input_dir, market, seed, "fixed_hrl")
+    actions_path = input_dir / "traces" / f"{market}_seed{seed}_full_controller_actions.csv"
+    events_path = input_dir / "traces" / f"{market}_seed{seed}_full_controller_switch_events.csv"
+    if full.empty or fixed.empty or not actions_path.exists() or not events_path.exists():
+        return
+    actions = pd.read_csv(actions_path)
+    events = pd.read_csv(events_path)
+    for df in (full, fixed, actions, events):
+        if "date" in df:
+            df["date"] = pd.to_datetime(df["date"])
+        if "step" in df:
+            df["step"] = pd.to_numeric(df["step"], errors="coerce")
+
+    for case in cases:
+        start_step = int(case["start_step"])
+        length = int(case.get("length", 30))
+        end_step = start_step + length - 1
+        full_window = full[(full["step"] >= start_step) & (full["step"] <= end_step)].copy()
+        fixed_window = fixed[(fixed["step"] >= start_step) & (fixed["step"] <= end_step)].copy()
+        if len(full_window) < 8 or len(fixed_window) < 8:
+            continue
+        merged = full_window[["date", "step", "portfolio_value"]].rename(columns={"portfolio_value": "full_value"})
+        merged = merged.merge(
+            fixed_window[["date", "portfolio_value"]].rename(columns={"portfolio_value": "fixed_value"}),
+            on="date",
+            how="inner",
+        )
+        if merged.empty:
+            continue
+        merged["full_norm"] = pd.to_numeric(merged["full_value"], errors="coerce") / max(float(merged["full_value"].iloc[0]), 1e-12)
+        merged["fixed_norm"] = pd.to_numeric(merged["fixed_value"], errors="coerce") / max(float(merged["fixed_value"].iloc[0]), 1e-12)
+        merged["full_return_pct"] = (merged["full_norm"] - 1.0) * 100.0
+        merged["fixed_return_pct"] = (merged["fixed_norm"] - 1.0) * 100.0
+        merged["full_dd_pct"] = _drawdown_series(merged["full_norm"]) * 100.0
+        merged["fixed_dd_pct"] = _drawdown_series(merged["fixed_norm"]) * 100.0
+
+        start_date = merged["date"].iloc[0]
+        end_date = merged["date"].iloc[-1]
+        switch_rows = actions[
+            (actions["date"] >= start_date)
+            & (actions["date"] <= end_date)
+            & (pd.to_numeric(actions.get("is_free_switch"), errors="coerce").fillna(0) > 0)
+        ].copy()
+        switch_rows = switch_rows.merge(merged[["date", "full_return_pct"]], on="date", how="left")
+        key_step = int(case["key_step"])
+        key_action = actions[(actions["step"] == key_step) & (pd.to_numeric(actions.get("is_switch"), errors="coerce").fillna(0) > 0)].head(1)
+        key_event = events[events["step"] == key_step].head(1)
+
+        full_ret = float(merged["full_norm"].iloc[-1] - 1.0)
+        fixed_ret = float(merged["fixed_norm"].iloc[-1] - 1.0)
+        full_mdd = _max_drawdown(merged["full_norm"])
+        fixed_mdd = _max_drawdown(merged["fixed_norm"])
+
+        fig = plt.figure(figsize=(11.0, 8.15))
+        grid = fig.add_gridspec(4, 1, height_ratios=[2.15, 1.2, 1.2, 1.65], hspace=0.18)
+        ax_ret = fig.add_subplot(grid[0])
+        ax_dd = fig.add_subplot(grid[1], sharex=ax_ret)
+        ax_exit = fig.add_subplot(grid[2], sharex=ax_ret)
+        ax_cf = fig.add_subplot(grid[3])
+
+        ax_ret.plot(merged["date"], merged["full_return_pct"], label="Full controller", color=COLORS["full_controller"], linewidth=2.85, zorder=4)
+        ax_ret.plot(merged["date"], merged["fixed_return_pct"], label="Fixed HRL", color=COLORS["fixed_hrl"], linewidth=2.05, linestyle=(0, (4, 2)), zorder=3)
+        ax_ret.fill_between(
+            merged["date"],
+            merged["full_return_pct"],
+            merged["fixed_return_pct"],
+            where=merged["full_return_pct"] >= merged["fixed_return_pct"],
+            color=COLORS["positive_fill"],
+            alpha=0.18,
+            linewidth=0,
+            zorder=1,
+        )
+        ax_ret.fill_between(
+            merged["date"],
+            merged["full_return_pct"],
+            merged["fixed_return_pct"],
+            where=merged["full_return_pct"] < merged["fixed_return_pct"],
+            color=COLORS["negative_fill"],
+            alpha=0.18,
+            linewidth=0,
+            zorder=1,
+        )
+        if not switch_rows.empty:
+            ax_ret.scatter(
+                switch_rows["date"],
+                switch_rows["full_return_pct"],
+                marker="v",
+                s=42,
+                color=COLORS["switch"],
+                edgecolor="white",
+                linewidth=0.8,
+                zorder=4,
+                label="Controller switch",
+            )
+            for idx, date in enumerate(switch_rows["date"], start=1):
+                ax_ret.axvline(date, color=COLORS["switch"], alpha=0.14, linewidth=0.9, zorder=0)
+                if idx <= 5:
+                    y_val = float(switch_rows.loc[switch_rows["date"] == date, "full_return_pct"].iloc[0])
+                    ax_ret.annotate(f"S{idx}", (date, y_val), xytext=(0, 9), textcoords="offset points", ha="center", fontsize=7.2, color=COLORS["switch"], fontweight="bold")
+        ax_ret.axhline(0, color=COLORS["paper_ink"], linewidth=0.8, alpha=0.7)
+        ax_ret.set_ylabel("Window return (%)")
+        _style_axis(ax_ret)
+        ax_ret.legend(frameon=False, ncol=3, fontsize=9, loc="upper left")
+
+        ax_dd.plot(merged["date"], merged["full_dd_pct"], color=COLORS["full_controller"], linewidth=2.2, label="Full controller")
+        ax_dd.plot(merged["date"], merged["fixed_dd_pct"], color=COLORS["fixed_hrl"], linewidth=1.8, linestyle=(0, (4, 2)), label="Fixed HRL")
+        ax_dd.fill_between(merged["date"], merged["full_dd_pct"], merged["fixed_dd_pct"], where=merged["fixed_dd_pct"] >= merged["full_dd_pct"], color=COLORS["drawdown_fill"], alpha=0.28)
+        ax_dd.set_ylabel("Drawdown (%)")
+        _style_axis(ax_dd)
+
+        free = actions[(actions["date"] >= start_date) & (actions["date"] <= end_date) & (actions["decision_type"] == "free_decision")].copy()
+        free["exit_prob"] = pd.to_numeric(free.get("exit_prob"), errors="coerce")
+        ax_exit.plot(free["date"], free["exit_prob"], color=COLORS["exit"], linewidth=2.15, label="Exit probability")
+        ax_exit.axhline(0.5, color=COLORS["paper_ink"], linewidth=1.0, linestyle=":", alpha=0.85)
+        ax_exit.text(
+            0.99,
+            0.51,
+            "threshold=0.5",
+            transform=ax_exit.get_yaxis_transform(),
+            ha="right",
+            va="bottom",
+            fontsize=7.5,
+            color=COLORS["muted_ink"],
+        )
+        if not switch_rows.empty:
+            switch_probs = switch_rows[["date", "exit_prob"]].copy()
+            switch_probs["exit_prob"] = pd.to_numeric(switch_probs["exit_prob"], errors="coerce")
+            ax_exit.scatter(switch_probs["date"], switch_probs["exit_prob"], color=COLORS["switch"], marker="v", s=46, zorder=4)
+            for idx, row in enumerate(switch_probs.itertuples(index=False), start=1):
+                if np.isfinite(row.exit_prob):
+                    ax_exit.annotate(f"S{idx}", (row.date, row.exit_prob), xytext=(0, 6), textcoords="offset points", ha="center", fontsize=6.7, color=COLORS["switch"], fontweight="bold")
+        ax_exit.set_ylim(-0.02, 1.02)
+        ax_exit.set_ylabel("Exit prob.")
+        _style_axis(ax_exit)
+        ax_exit.set_xlabel("Date")
+
+        plotted_cf = False
+        if not key_action.empty:
+            row = key_action.iloc[0]
+            hold_curve = _parse_curve(row.get("hold_curve_20"))
+            switch_curve = _parse_curve(row.get("switch_curve_20"))
+            horizon = np.arange(max(len(hold_curve), len(switch_curve)))
+            if len(hold_curve):
+                ax_cf.plot(np.arange(len(hold_curve)), (hold_curve - 1.0) * 100.0, label="Continue-hold counterfactual", color=COLORS["hold"], linewidth=2.05, linestyle=(0, (4, 2)))
+                plotted_cf = True
+            if len(switch_curve):
+                ax_cf.plot(np.arange(len(switch_curve)), (switch_curve - 1.0) * 100.0, label="Switch counterfactual", color=COLORS["controller_outer"], linewidth=2.35)
+                plotted_cf = True
+            if len(horizon):
+                actual = full[(full["step"] >= key_step) & (full["step"] < key_step + len(horizon))].copy()
+                if len(actual) >= 2:
+                    actual_norm = pd.to_numeric(actual["portfolio_value"], errors="coerce") / max(float(actual["portfolio_value"].iloc[0]), 1e-12)
+                    ax_cf.plot(np.arange(len(actual_norm)), (actual_norm - 1.0) * 100.0, label="Actual controller path", color=COLORS["full_controller"], linewidth=2.15)
+                    plotted_cf = True
+        if not key_event.empty:
+            ev = key_event.iloc[0]
+            info = (
+                f"Key switch: hold {ev['post_hold_return_20'] * 100:.1f}% vs "
+                f"switch {ev['post_switch_return_20'] * 100:.1f}%"
+            )
+            ax_cf.text(
+                0.01,
+                0.05,
+                info,
+                transform=ax_cf.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=8.5,
+                color=COLORS["muted_ink"],
+            )
+        if plotted_cf:
+            ax_cf.axhline(0, color=COLORS["paper_ink"], linewidth=0.8, alpha=0.7)
+            ax_cf.legend(frameon=False, ncol=3, fontsize=9, loc="upper left")
+        ax_cf.set_xlabel("Trading days after key switch")
+        ax_cf.set_ylabel("20-day path (%)")
+        _style_axis(ax_cf)
+
+        fig.suptitle(
+            f"{case['title']} ({start_date.date()} to {end_date.date()})",
+            fontsize=15,
+            fontweight="bold",
+            y=0.97,
+        )
+        for ax in [ax_ret, ax_dd, ax_exit, ax_cf]:
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+        for label in ax_ret.get_xticklabels() + ax_dd.get_xticklabels():
+            label.set_visible(False)
+        fig.subplots_adjust(left=0.075, right=0.985, top=0.91, bottom=0.08, hspace=0.28)
+        _save(fig, output_dir, case["stem"], tight=False)
 
 
 def main_from_paths(input_dir: Path, output_dir: Path):
@@ -236,6 +928,7 @@ def main_from_paths(input_dir: Path, output_dir: Path):
     metrics = input_dir / "metrics" / "all_metrics.csv"
     if not metrics.exists():
         return
+    _clear_generated_figures(output_dir)
     all_metrics = pd.read_csv(metrics)
     for (market, seed), group in all_metrics.groupby(["market", "seed"]):
         market = str(market)
@@ -248,10 +941,9 @@ def main_from_paths(input_dir: Path, output_dir: Path):
             [
                 ("Fixed HRL checkpoint", "stage_hrl_fixed_best_fixed_hrl"),
                 ("Controller-PG checkpoint", "stage_controller_best_full_controller"),
-                ("Final E2E checkpoint", "stage_best_model_full_controller"),
             ],
             f"fig01_stage_progression_cumulative_{market}_seed{seed}",
-            f"Stage progression cumulative return ({market.upper()} seed {seed})",
+            _paper_title("Stage Progression: Cumulative Return", market),
             drawdown=False,
         )
         _plot_curves(
@@ -262,22 +954,21 @@ def main_from_paths(input_dir: Path, output_dir: Path):
             [
                 ("Fixed HRL checkpoint", "stage_hrl_fixed_best_fixed_hrl"),
                 ("Controller-PG checkpoint", "stage_controller_best_full_controller"),
-                ("Final E2E checkpoint", "stage_best_model_full_controller"),
             ],
             f"fig02_stage_progression_drawdown_{market}_seed{seed}",
-            f"Stage progression drawdown ({market.upper()} seed {seed})",
+            _paper_title("Stage Progression: Drawdown", market),
             drawdown=True,
         )
         _plot_stage_bar(group, output_dir, market, seed)
-        ablation = group[group["scenario"].isin(["fixed_hrl_no_inner", "fixed_hrl", "full_controller"])]
+        main_comparison = _prepare_main_comparison_rows(group)
         _plot_curves(
             input_dir,
             output_dir,
             market,
             seed,
-            [("Fixed HRL w/o Inner", "fixed_hrl_no_inner"), ("Fixed HRL", "fixed_hrl"), ("Full controller", "full_controller")],
-            f"fig03_inference_ablation_cumulative_{market}_seed{seed}",
-            f"Inference ablation cumulative return ({market.upper()} seed {seed})",
+            MAIN_COMPARISON_SERIES,
+            f"fig03_main_comparison_cumulative_{market}_seed{seed}",
+            _paper_title("Main Comparison: Cumulative Return", market),
             drawdown=False,
         )
         _plot_curves(
@@ -285,16 +976,25 @@ def main_from_paths(input_dir: Path, output_dir: Path):
             output_dir,
             market,
             seed,
-            [("Fixed HRL w/o Inner", "fixed_hrl_no_inner"), ("Fixed HRL", "fixed_hrl"), ("Full controller", "full_controller")],
-            f"fig03b_inference_ablation_drawdown_{market}_seed{seed}",
-            f"Inference ablation drawdown ({market.upper()} seed {seed})",
+            MAIN_COMPARISON_SERIES,
+            f"fig03b_main_comparison_drawdown_{market}_seed{seed}",
+            _paper_title("Main Comparison: Drawdown", market),
             drawdown=True,
         )
-        _plot_bar(ablation, output_dir, market, seed, f"fig03c_inference_ablation_bar_{market}_seed{seed}", f"Inference ablation metrics ({market.upper()} seed {seed})")
+        _plot_bar(
+            main_comparison,
+            output_dir,
+            market,
+            seed,
+            f"fig03c_main_comparison_bar_{market}_seed{seed}",
+            _paper_title("Main Comparison Metrics", market),
+            metrics=MAIN_COMPARISON_METRICS,
+        )
         plot_inner_alpha(input_dir, output_dir, market, seed)
         plot_alignment(input_dir, output_dir, market, seed)
         plot_switch_events(input_dir, output_dir, market, seed)
         plot_random(input_dir, output_dir, market, seed)
+        plot_case_windows(input_dir, output_dir, market, seed)
 
 
 def parse_args():

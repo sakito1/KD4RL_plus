@@ -46,10 +46,63 @@ class EndToEndHrlControllerJointScriptTests(unittest.TestCase):
         self.assertIn("--controller_fixed_pool_limit 12", result.stdout)
         self.assertIn("--controller_switch_adv_logit_coef 1.9", result.stdout)
         self.assertIn("--controller_eval_switch_threshold 0.5", result.stdout)
+        self.assertIn("--joint_lr_mult 0.0001", result.stdout)
         self.assertNotIn("--frozen_hrl_checkpoint", result.stdout)
         self.assertNotIn("SOURCE_ROOT", result.stdout)
         self.assertNotIn("results/end ", result.stdout)
         self.assertNotIn("results/hrl_lookback60_hold30_inner_noaux_retrain", result.stdout)
+
+    def test_reproduce_best_mode_delegates_to_two_stage_reproduction_script(self):
+        env = os.environ.copy()
+        env.update({
+            "REPRODUCE_BEST_MODE": "1",
+            "DRY_RUN": "1",
+            "PYTHON_BIN": "/bin/echo",
+            "OUTPUT_ROOT": "results/e2e-reproduce-test",
+        })
+
+        result = subprocess.run(
+            ["bash", str(SCRIPT)],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stdout)
+        self.assertIn("Full reproduction run", result.stdout)
+        self.assertIn(
+            "HRL output:        results/hrl_lookback60_hold30_inner_noaux_retrain/lookback60_hold30_inner_noaux_retrain",
+            result.stdout,
+        )
+        self.assertIn("--frozen_hrl_checkpoint", result.stdout)
+        self.assertIn("--controller_only_finetune", result.stdout)
+        self.assertIn("Archived best floor: enabled", result.stdout)
+
+    def test_reproduce_best_mode_refuses_to_write_into_archived_good_models(self):
+        env = os.environ.copy()
+        env.update({
+            "REPRODUCE_BEST_MODE": "1",
+            "DRY_RUN": "1",
+            "PYTHON_BIN": "/bin/echo",
+            "OUTPUT_ROOT": "results/end",
+        })
+
+        result = subprocess.run(
+            ["bash", str(SCRIPT)],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+
+        self.assertNotEqual(result.returncode, 0, msg=result.stdout)
+        self.assertIn("Refusing to write", result.stdout)
+        self.assertIn("results/end", result.stdout)
 
 
 if __name__ == "__main__":

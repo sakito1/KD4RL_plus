@@ -427,6 +427,11 @@ def parse_args():
     parser.add_argument("--controller_train_fixed_episodes", action="store_true")
     parser.add_argument("--controller_episode_batch_size", type=int, default=4)
     parser.add_argument("--controller_episode_parallel_workers", type=int, default=1)
+    parser.add_argument(
+        "--controller_deterministic_rollout_sampling",
+        action="store_true",
+        help="Sample controller PG rollout actions from per-window deterministic RNG seeds.",
+    )
     parser.add_argument("--controller_start_stride_days", type=int, default=40)
     parser.add_argument("--controller_window", type=int, default=15)
     parser.add_argument("--controller_hidden_dim", type=int, default=32)
@@ -1108,6 +1113,8 @@ def build_child_command(args, market, run_root, seed):
         cmd.append("--controller_no_hold_constraints")
     if args.controller_train_fixed_episodes:
         cmd.append("--controller_train_fixed_episodes")
+    if args.controller_deterministic_rollout_sampling:
+        cmd.append("--controller_deterministic_rollout_sampling")
     if args.frozen_hrl_checkpoint:
         cmd.extend(["--frozen_hrl_checkpoint", str(args.frozen_hrl_checkpoint)])
     if args.controller_first_joint_finetune:
@@ -1229,6 +1236,7 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.controller_train_fixed_episodes = bool(args.controller_train_fixed_episodes)
     runtime_config.controller_episode_batch_size = int(args.controller_episode_batch_size)
     runtime_config.controller_episode_parallel_workers = int(args.controller_episode_parallel_workers)
+    runtime_config.controller_deterministic_rollout_sampling = bool(args.controller_deterministic_rollout_sampling)
     runtime_config.controller_start_stride_days = int(args.controller_start_stride_days)
     runtime_config.controller_train_max_hold = max(-1, int(args.controller_train_max_hold))
     runtime_config.controller_train_record_max_duration = max(0, int(args.controller_train_record_max_duration))
