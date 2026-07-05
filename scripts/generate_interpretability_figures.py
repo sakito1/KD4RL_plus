@@ -28,7 +28,7 @@ def archived_runs(results_end: Path) -> Dict[str, Dict[str, object]]:
     return {
         "sh": {
             "label": "SH seed 90",
-            "market_name": "A-share",
+            "market_name": "CSI-300",
             "run_dir": results_end / "sh_seed90",
             "checkpoint": results_end / "sh_seed90" / "checkpoints" / "best_model.pth",
             "command_json": results_end / "sh_seed90" / "seed_90_command.json",
@@ -36,7 +36,7 @@ def archived_runs(results_end: Path) -> Dict[str, Dict[str, object]]:
         },
         "nas": {
             "label": "NAS seed 49",
-            "market_name": "NAS100",
+            "market_name": "Nasdaq-100",
             "run_dir": results_end / "nas_seed49",
             "checkpoint": results_end / "nas_seed49" / "checkpoints" / "best_model.pth",
             "command_json": results_end / "nas_seed49" / "seed_49_command.json",

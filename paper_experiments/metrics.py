@@ -33,6 +33,11 @@ def compute_financial_metrics(portfolio_trace: pd.DataFrame) -> Dict[str, float]
             "daily_win_rate": np.nan,
         }
     values = _finite_series(portfolio_trace["portfolio_value"])
+    recorded_returns = None
+    if "daily_simple_return" in portfolio_trace:
+        recorded_returns = _finite_series(portfolio_trace["daily_simple_return"])
+    elif "daily_return" in portfolio_trace:
+        recorded_returns = _finite_series(portfolio_trace["daily_return"])
     if len(values) < 2:
         warnings.warn("portfolio trace too short; financial metrics are mostly NaN", RuntimeWarning)
         final = float(values.iloc[-1]) if len(values) else np.nan
@@ -47,8 +52,22 @@ def compute_financial_metrics(portfolio_trace: pd.DataFrame) -> Dict[str, float]
             "final_value": final,
             "daily_win_rate": np.nan,
         }
-    returns = values.pct_change().dropna()
-    total_return = float(values.iloc[-1] / max(values.iloc[0], 1e-12) - 1.0)
+
+    if recorded_returns is not None and len(recorded_returns) >= 1:
+        returns = recorded_returns
+        if "portfolio_value_before" in portfolio_trace:
+            before = _finite_series(portfolio_trace["portfolio_value_before"])
+            initial_value = float(before.iloc[0]) if len(before) else float(values.iloc[0])
+        else:
+            first_return = float(returns.iloc[0])
+            initial_value = float(values.iloc[0]) / max(1.0 + first_return, 1e-12)
+        total_return = float(values.iloc[-1] / max(initial_value, 1e-12) - 1.0)
+        drawdown_values = pd.concat([pd.Series([initial_value], dtype="float64"), values], ignore_index=True)
+    else:
+        returns = values.pct_change().dropna()
+        total_return = float(values.iloc[-1] / max(values.iloc[0], 1e-12) - 1.0)
+        drawdown_values = values
+
     ann_return = float(returns.mean() * 252.0) if len(returns) else np.nan
     ann_vol = float(returns.std(ddof=1) * np.sqrt(252.0)) if len(returns) > 1 else np.nan
     downside = returns[returns < 0.0]
@@ -57,9 +76,9 @@ def compute_financial_metrics(portfolio_trace: pd.DataFrame) -> Dict[str, float]
     sortino = (
         float(ann_return / downside_vol)
         if downside_vol and np.isfinite(downside_vol) and downside_vol > 1e-12
-        else np.nan
+            else np.nan
     )
-    mdd = max_drawdown(values)
+    mdd = max_drawdown(drawdown_values)
     calmar = float(ann_return / mdd) if mdd > 1e-12 and np.isfinite(ann_return) else np.nan
     return {
         "total_return": total_return,
@@ -210,4 +229,3 @@ def summarize_all(portfolio_trace: pd.DataFrame) -> Dict[str, float]:
     metrics.update(compute_trading_metrics(portfolio_trace))
     metrics.update(summarize_inner_alpha(portfolio_trace))
     return metrics
-

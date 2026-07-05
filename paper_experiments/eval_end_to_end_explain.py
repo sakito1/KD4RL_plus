@@ -210,6 +210,11 @@ def _curve_mdd(curve) -> float:
     return float(np.max((peaks - arr) / peaks))
 
 
+def _weights_json(tensor) -> str:
+    arr = tensor.detach().view(-1).cpu().numpy().astype("float64")
+    return json.dumps([round(float(x), 10) for x in arr], ensure_ascii=False)
+
+
 def collect_eval_trace(
     trainer,
     *,
@@ -218,6 +223,7 @@ def collect_eval_trace(
     disable_inner: bool = False,
     test_max_days: int = None,
     random_switch_steps: Sequence[int] = None,
+    counterfactual_horizon: int = 20,
 ) -> Dict[str, pd.DataFrame]:
     import torch
 
@@ -231,6 +237,11 @@ def collect_eval_trace(
         test_window = (test_window[0], min(test_window[0] + int(test_max_days), test_window[1]))
     obs = env.reset_at(*test_window) if test_window is not None else env.reset()
     spec = trainer._get_phase_spec("joint")
+    try:
+        asset_names = env._load_stock_list(env.dataset["stocks_path"])
+    except Exception:
+        asset_names = [f"asset_{i}" for i in range(int(getattr(env, "num_stocks", 0)))]
+    asset_names_json = json.dumps(list(asset_names), ensure_ascii=False)
     portfolio_rows = []
     action_rows = []
     step_idx = 0
@@ -240,6 +251,7 @@ def collect_eval_trace(
     forced_switch_count = 0
     forced_hold_count = 0
     random_switch_steps = set(int(x) for x in (random_switch_steps or []))
+    counterfactual_horizon = max(1, int(counterfactual_horizon))
     with torch.no_grad():
         while True:
             duration = step_idx - last_switch_step
@@ -308,18 +320,37 @@ def collect_eval_trace(
             switch_advantage_20 = np.nan
             hold_curve_20 = ""
             switch_curve_20 = ""
+            extra_counterfactual_fields = {}
             if free_eligible:
                 hold_exec = trainer._deterministic_inner_exec(obs, obs["base_drift"].detach(), weights_drift)
                 switch_exec = trainer._deterministic_inner_exec(obs, out["act_out"].detach(), weights_drift)
-                hold_curve = _future_curve(env, hold_exec, horizon=20, current_weights=weights_drift)
-                switch_curve = _future_curve(env, switch_exec, horizon=20, current_weights=weights_drift)
-                hold_future_return_20 = float(np.log(max(hold_curve[-1], 1e-12)))
-                switch_future_return_20 = float(np.log(max(switch_curve[-1], 1e-12)))
-                hold_future_mdd_20 = _curve_mdd(hold_curve)
-                switch_future_mdd_20 = _curve_mdd(switch_curve)
+                horizon = max(20, counterfactual_horizon)
+                hold_curve = _future_curve(env, hold_exec, horizon=horizon, current_weights=weights_drift)
+                switch_curve = _future_curve(env, switch_exec, horizon=horizon, current_weights=weights_drift)
+                idx20 = min(20, len(hold_curve) - 1, len(switch_curve) - 1)
+                hold_curve_for_20 = hold_curve[: idx20 + 1]
+                switch_curve_for_20 = switch_curve[: idx20 + 1]
+                hold_future_return_20 = float(np.log(max(hold_curve_for_20[-1], 1e-12)))
+                switch_future_return_20 = float(np.log(max(switch_curve_for_20[-1], 1e-12)))
+                hold_future_mdd_20 = _curve_mdd(hold_curve_for_20)
+                switch_future_mdd_20 = _curve_mdd(switch_curve_for_20)
                 switch_advantage_20 = switch_future_return_20 - hold_future_return_20
-                hold_curve_20 = json.dumps([float(x) for x in hold_curve], ensure_ascii=False)
-                switch_curve_20 = json.dumps([float(x) for x in switch_curve], ensure_ascii=False)
+                hold_curve_20 = json.dumps([float(x) for x in hold_curve_for_20], ensure_ascii=False)
+                switch_curve_20 = json.dumps([float(x) for x in switch_curve_for_20], ensure_ascii=False)
+                if counterfactual_horizon != 20:
+                    idx_h = min(counterfactual_horizon, len(hold_curve) - 1, len(switch_curve) - 1)
+                    hold_curve_h = hold_curve[: idx_h + 1]
+                    switch_curve_h = switch_curve[: idx_h + 1]
+                    extra_counterfactual_fields = {
+                        f"hold_future_return_{counterfactual_horizon}": float(np.log(max(hold_curve_h[-1], 1e-12))),
+                        f"switch_future_return_{counterfactual_horizon}": float(np.log(max(switch_curve_h[-1], 1e-12))),
+                        f"hold_future_mdd_{counterfactual_horizon}": _curve_mdd(hold_curve_h),
+                        f"switch_future_mdd_{counterfactual_horizon}": _curve_mdd(switch_curve_h),
+                        f"switch_advantage_{counterfactual_horizon}": float(np.log(max(switch_curve_h[-1], 1e-12)))
+                        - float(np.log(max(hold_curve_h[-1], 1e-12))),
+                        f"hold_curve_{counterfactual_horizon}": json.dumps([float(x) for x in hold_curve_h], ensure_ascii=False),
+                        f"switch_curve_{counterfactual_horizon}": json.dumps([float(x) for x in switch_curve_h], ensure_ascii=False),
+                    }
             next_obs, _, done, info = env.step(
                 weights_exec,
                 base_used,
@@ -367,8 +398,7 @@ def collect_eval_trace(
                     "free_switch_count": free_switch_count,
                 }
             )
-            action_rows.append(
-                {
+            action_row = {
                     "date": date_value,
                     "step": step_idx,
                     "duration_before_decision": duration,
@@ -397,8 +427,13 @@ def collect_eval_trace(
                     "inner_alpha": inner_alpha,
                     "turnover": turnover,
                     "cost_rate": cost_rate,
+                    "asset_names_json": asset_names_json,
+                    "base_weights_json": _weights_json(base_used),
+                    "exec_weights_json": _weights_json(weights_exec),
+                    "inner_tilt_json": _weights_json(weights_exec - base_used),
                 }
-            )
+            action_row.update(extra_counterfactual_fields)
+            action_rows.append(action_row)
             if done:
                 break
             obs = next_obs

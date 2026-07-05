@@ -1,0 +1,773 @@
+%File: anonymous-submission-latex-2026.tex
+\documentclass[letterpaper]{article} % DO NOT CHANGE THIS
+\usepackage[submission]{aaai2026}  % DO NOT CHANGE THIS
+\usepackage{times}  % DO NOT CHANGE THIS
+\usepackage{helvet}  % DO NOT CHANGE THIS
+\usepackage{courier}  % DO NOT CHANGE THIS
+\usepackage[hyphens]{url}  % DO NOT CHANGE THIS
+\usepackage{graphicx} % DO NOT CHANGE THIS
+\urlstyle{rm} % DO NOT CHANGE THIS
+\def\UrlFont{\rm}  % DO NOT CHANGE THIS
+\usepackage{natbib}  % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\usepackage{caption} % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\frenchspacing  % DO NOT CHANGE THIS
+\setlength{\pdfpagewidth}{8.5in} % DO NOT CHANGE THIS
+\setlength{\pdfpageheight}{11in} % DO NOT CHANGE THIS
+%
+% These are recommended to typeset algorithms but not required. See the subsubsection on algorithms. Remove them if you don't have algorithms in your paper.
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+%
+% These are are recommended to typeset listings but not required. See the subsubsection on listing. Remove this block if you don't have listings in your paper.
+\usepackage{newfloat}
+\usepackage{listings}
+\DeclareCaptionStyle{ruled}{labelfont=normalfont,labelsep=colon,strut=off} % DO NOT CHANGE THIS
+\lstset{%
+	basicstyle={\footnotesize\ttfamily},% footnotesize acceptable for monospace
+	numbers=left,numberstyle=\footnotesize,xleftmargin=2em,% show line numbers, remove this entire line if you don't want the numbers.
+	aboveskip=0pt,belowskip=0pt,%
+	showstringspaces=false,tabsize=2,breaklines=true}
+\floatstyle{ruled}
+\newfloat{listing}{tb}{lst}{}
+\floatname{listing}{Listing}
+%
+% Keep the \pdfinfo as shown here. There's no need
+% for you to add the /Title and /Author tags.
+\pdfinfo{
+/TemplateVersion (2026.1)
+}
+
+% DISALLOWED PACKAGES
+% \usepackage{authblk} -- This package is specifically forbidden
+% \usepackage{balance} -- This package is specifically forbidden
+% \usepackage{color (if used in text)
+% \usepackage{CJK} -- This package is specifically forbidden
+% \usepackage{float} -- This package is specifically forbidden
+% \usepackage{flushend} -- This package is specifically forbidden
+% \usepackage{fontenc} -- This package is specifically forbidden
+% \usepackage{fullpage} -- This package is specifically forbidden
+% \usepackage{geometry} -- This package is specifically forbidden
+% \usepackage{grffile} -- This package is specifically forbidden
+% \usepackage{hyperref} -- This package is specifically forbidden
+% \usepackage{navigator} -- This package is specifically forbidden
+% (or any other package that embeds links such as navigator or hyperref)
+% \indentfirst} -- This package is specifically forbidden
+% \layout} -- This package is specifically forbidden
+% \multicol} -- This package is specifically forbidden
+% \nameref} -- This package is specifically forbidden
+% \usepackage{savetrees} -- This package is specifically forbidden
+% \usepackage{setspace} -- This package is specifically forbidden
+% \usepackage{stfloats} -- This package is specifically forbidden
+% \usepackage{tabu} -- This package is specifically forbidden
+% \usepackage{titlesec} -- This package is specifically forbidden
+% \usepackage{tocbibind} -- This package is specifically forbidden
+% \usepackage{ulem} -- This package is specifically forbidden
+% \usepackage{wrapfig} -- This package is specifically forbidden
+% DISALLOWED COMMANDS
+% \nocopyright -- Your paper will not be published if you use this command
+% \addtolength -- This command may not be used
+% \balance -- This command may not be used
+% \baselinestretch -- Your paper will not be published if you use this command
+% \clearpage -- No page breaks of any kind may be used for the final version of your paper
+% \columnsep -- This command may not be used
+% \newpage -- No page breaks of any kind may be used for the final version of your paper
+% \pagebreak -- No page breaks of any kind may be used for the final version of your paperr
+% \pagestyle -- This command may not be used
+% \tiny -- This is not an acceptable font size.
+% \vspace{- -- No negative value may be used in proximity of a caption, figure, table, section, subsection, subsubsection, or reference
+% \vskip{- -- No negative value may be used to alter spacing above or below a caption, figure, table, section, subsection, subsubsection, or reference
+
+\usepackage{amsmath}    % 提供equation/align等数学环境，支持下标、上标、向量、分段公式
+\usepackage{amssymb}    % 补充数学符号（如实数集\mathbb{R}、花体\mathcal）
+% 可选增强包（推荐）
+\usepackage{mathtools}  % 基于amsmath的扩展，优化公式排版（如更灵活的括号、符号对齐）
+\usepackage{amsfonts}   % 配套amssymb，提供更多字体（如mathbb）
+\usepackage{booktabs}   % for \toprule \midrule \bottomrule
+\usepackage{multirow}
+\usepackage{array}
+\newcommand{\algbreak}{\allowbreak} % safe break point in long math
+% --- AAAI-style algorithmic cosmetics (safe) ---
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
+\newcommand{\algsmall}{\footnotesize}
+\newcommand{\one}{\mathbf{1}}
+\setcounter{secnumdepth}{0} %May be changed to 1 or 2 if section numbers are desired.
+
+% The file aaai2026.sty is the style file for AAAI Press
+% proceedings, working notes, and technical reports.
+%
+
+% Title
+
+% Your title must be in mixed case, not sentence case.
+% That means all verbs (including short verbs like be, is, using,and go),
+% nouns, adverbs, adjectives should be capitalized, including both words in hyphenated terms, while
+% articles, conjunctions, and prepositions are lower case unless they
+% directly follow a colon or long dash
+\title{\textbf{DeskFlow}: Hierarchical Portfolio Management with Strategic Switching and Daily Refinement}
+\author{
+    %Authors
+    % All authors must be in the same font size and format.
+    Written by AAAI Press Staff\textsuperscript{\rm 1}\thanks{With help from the AAAI Publications Committee.}\\
+    AAAI Style Contributions by Pater Patel Schneider,
+    Sunil Issar,\\
+    J. Scott Penberthy,
+    George Ferguson,
+    Hans Guesgen,
+    Francisco Cruz\equalcontrib,
+    Marc Pujol-Gonzalez\equalcontrib
+}
+\affiliations{
+    %Afiliations
+    \textsuperscript{\rm 1}Association for the Advancement of Artificial Intelligence\\
+    % If you have multiple authors and multiple affiliations
+    % use superscripts in text and roman font to identify them.
+    % For example,
+
+    % Sunil Issar\textsuperscript{\rm 2},
+    % J. Scott Penberthy\textsuperscript{\rm 3},
+    % George Ferguson\textsuperscript{\rm 4},
+    % Hans Guesgen\textsuperscript{\rm 5}
+    % Note that the comma should be placed after the superscript
+
+    1101 Pennsylvania Ave, NW Suite 300\\
+    Washington, DC 20004 USA\\
+    % email address must be in roman text type, not monospace or sans serif
+    proceedings-questions@aaai.org
+%
+% See more examples next
+}
+
+%Example, Single Author, ->> remove \iffalse,\fi and place them surrounding AAAI title to use it
+\iffalse
+\title{My Publication Title --- Single Author}
+\author {
+    Author Name
+}
+\affiliations{
+    Affiliation\\
+    Affiliation Line 2\\
+    name@example.com
+}
+\fi
+
+\iffalse
+%Example, Multiple Authors, ->> remove \iffalse,\fi and place them surrounding AAAI title to use it
+\title{My Publication Title --- Multiple Authors}
+\author {
+    % Authors
+    First Author Name\textsuperscript{\rm 1},
+    Second Author Name\textsuperscript{\rm 2},
+    Third Author Name\textsuperscript{\rm 1}
+}
+\affiliations {
+    % Affiliations
+    \textsuperscript{\rm 1}Affiliation 1\\
+    \textsuperscript{\rm 2}Affiliation 2\\
+    firstAuthor@affiliation1.com, secondAuthor@affilation2.com, thirdAuthor@affiliation1.com
+}
+\fi
+
+
+% REMOVE THIS: bibentry
+% This is only needed to show inline citations in the guidelines document. You should not need it and can safely delete it.
+\usepackage{bibentry}
+% END REMOVE bibentry
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Financial markets are non-stationary and market-state dependent, making portfolio management a challenging sequential decision problem. Classical portfolio theories and heuristic rebalancing rules provide important foundations for asset allocation, but they typically rely on static assumptions or manually specified schedules, limiting adaptability under evolving market conditions. Reinforcement learning offers a natural framework for portfolio management by directly optimizing long-horizon portfolio objectives through interaction with the market environment. However, most existing RL-based methods still rely on fixed rebalancing schedules or unified decision policies, making it difficult to coordinate structural revision, segment-level base portfolio, and day-level execution refinement within a single framework.To address this issue, we propose \textit{\textbf{DeskFlow}}, a hierarchical portfolio management framework organized around three coordinated roles: a controller, a manager, and a trader. The controller determines when the current base portfolio should be revised, the manager constructs a low-frequency base portfolio at update points, and the trader performs constrained daily refinement around the active base portfolio. By explicitly decomposing \emph{when to revise}, \emph{what base portfolio to hold}, and \emph{how to refine daily execution}, \textbf{DeskFlow} reduces cross-scale interference and improves the balance between portfolio stability and market responsiveness in non-stationary markets. Experiments on Nasdaq-100 and CSI-300 show that \textbf{DeskFlow} consistently outperforms representative traditional portfolio strategies and RL baselines in terms of risk-adjusted return and downside-risk control.
+\end{abstract}
+
+% Uncomment the following to link to your code, datasets, an extended version or similar.
+% You must keep this block between (not within) the abstract and the main body of the paper.
+% \begin{links}
+%     \link{Code}{https://aaai.org/example/code}
+%     \link{Datasets}{https://aaai.org/example/datasets}
+%     \link{Extended version}{https://aaai.org/example/extended-version}
+% \end{links}
+
+\section{Introduction}
+
+Portfolio management (PM) aims to allocate capital across assets under uncertainty and trading constraints so as to maximize long-horizon risk-adjusted return. Classical approaches, such as mean--variance optimization \citep{MVO} and the Capital Asset Pricing Model \citep{CAMP}, laid the foundation of modern asset allocation. In practice, heuristic rebalancing rules and threshold-based adjustment strategies are also widely used to control portfolio deviation, turnover, and risk exposure. However, these methods typically rely on static distributional assumptions, single-period optimization, or manually specified rebalancing schedules. When markets exhibit non-stationarity, structural breaks, and time-varying risk, such assumptions often become unreliable, leading to delayed adaptation and persistent mismatch between portfolio exposure and market conditions \citep{Perold1988DynamicSF}.
+
+From a sequential decision-making perspective, portfolio management can be viewed as a dynamic process in which an agent repeatedly adjusts portfolio weights based on evolving market information, incurs transaction costs through reallocation, and realizes long-horizon portfolio performance through future asset returns. This formulation makes reinforcement learning (RL) a natural framework for portfolio management, since it enables direct optimization of long-horizon investment objectives through interaction with the market environment. In recent years, RL-based methods have provided end-to-end solutions for portfolio decision-making \citep{4,5,6}, while cross-asset dependency modeling and interpretability have also received increasing attention \citep{alphastock,8}.
+
+Despite this progress, existing RL-based portfolio management methods still face a structural limitation. In practice, portfolio decisions evolve at multiple time scales: a system must determine whether the current portfolio structure should be revised, decide what base portfolio to hold over the next horizon, and adjust execution at the daily level in response to short-term fluctuations. However, most existing methods handle these decisions either through fixed rebalancing schedules or through unified decision policies. Fixed schedules ignore the fact that structural revision should depend on evolving market conditions rather than calendar time, while unified policies entangle medium-horizon base portfolio and day-level adjustment in a single decision process. As a result, such methods often struggle to balance portfolio stability against market responsiveness in non-stationary markets.
+
+We therefore argue that effective portfolio management should be organized as a structurally decomposed decision framework. Rather than asking a single policy to absorb all portfolio decisions, the system should explicitly separate \emph{when structural revision is needed}, \emph{what base portfolio to hold}, and \emph{how to refine daily execution}. This decomposition is closely aligned with the logic of portfolio management under market-state changes: structural revision should be invoked only when the current base portfolio is no longer sufficiently supported, base portfolio should focus on segment-level stable exposure, and daily adjustment should remain constrained around that base portfolio.
+
+Based on this principle, we propose \textit{\textbf{DeskFlow}}, a hierarchical portfolio management framework organized around three coordinated roles: a \emph{controller}, a \emph{manager}, and a \emph{trader}. The controller governs the timing of structural revision, the manager constructs a low-frequency base portfolio at segment boundaries, and the trader performs constrained daily refinement around the active base portfolio within each holding segment. In this way, \textbf{DeskFlow} transforms sequential portfolio optimization from a single-scale or weakly structured problem into an explicitly coordinated multi-scale decision process.
+
+We summarize our contributions as follows:
+\begin{itemize}
+    \item We formulate portfolio management in non-stationary markets as a multi-scale sequential decision problem and show that effective control requires explicit separation of structural revision, base portfolio, and daily execution refinement.
+    \item We propose \textit{\textbf{DeskFlow}}, a hierarchical portfolio management framework organized around a controller, a manager, and a trader, which explicitly coordinates update timing, segment-level base portfolio, and day-level refinement within a unified decision architecture.
+    \item Experiments on \textit{Nasdaq-100} and \textit{CSI-300} show that \textit{\textbf{DeskFlow}} consistently outperforms representative traditional portfolio strategies, RL baselines, and hierarchical ablations in terms of risk-adjusted return and downside-risk control.
+\end{itemize}
+
+\section{Related Work}
+\subsection{Classical Portfolio Optimization and Heuristic Rebalancing}
+Modern portfolio theory is rooted in the mean--variance optimization framework\citep{MVO}, while the Capital Asset Pricing Model (CAPM) provides an equilibrium-based interpretation of risk pricing\citep{CAMP}. These classical approaches typically rely on distributional stationarity or single-period assumptions, which limit their applicability under non-stationary financial time series with structural market state shifts. As a result, heuristic rebalancing rules are frequently adopted in practice.
+Research on dynamic asset allocation has shown that fixed rebalancing rules may lead to risk exposure mismatch when market conditions change\citep{Perold1988DynamicSF}. Opportunistic rebalancing further introduces condition-triggered paradigms, emphasizing optimal trade-offs between deviation thresholds and transaction costs to avoid unnecessary turnover\citep{9}. Meanwhile, transaction costs play a critical role in portfolio optimization and must be incorporated into the decision process in a robust manner\citep{10}.
+
+\subsection{Reinforcement Learning for Portfolio Management}
+Reinforcement learning (RL) provides a sequential decision-making framework for portfolio management. Early works such as PGPortfolio demonstrate the feasibility of end-to-end weight generation via policy gradient methods\citep{4}, while FinRL systematizes RL-based trading and portfolio management into a reusable toolkit\citep{5}.
+In terms of risk control and cost modeling, several studies incorporate maximum drawdown and other downside risk measures into the learning objective\citep{11}, and systematically investigate the joint modeling of transaction costs and risk control\citep{23}. Cost-sensitive deep RL frameworks have also been proposed to explicitly account for trading frictions in portfolio learning\citep{24}.
+From a structural perspective, DeepTrader enhances robustness under extreme market conditions by embedding market state representations\citep{6}, while methods such as HADAPS explore hierarchical and multi-asset adaptive portfolio learning architectures\citep{25}. Regarding interpretability and cross-asset relationship modeling, AlphaStock integrates cross-asset attention with interpretability analysis to capture relative strength relationships\citep{alphastock}. In terms of knowledge integration and exploration, Investor-Imitator enhances policy learning via imitation learning and knowledge extraction mechanisms\citep{8}.
+
+\section{Problem Formulation}
+\subsection{Portfolio Management Setup}
+
+We consider portfolio management over a finite investment horizon of $T$ trading days, indexed by $t=0,1,\dots,T-1$. Let the candidate stock universe contain $M$ tradable assets indexed by $i\in\{1,\dots,M\}$. For each asset $i$, let $c_{i,t}$ denote its closing price on trading day $t$.
+
+At the end of each trading day $t$, the investor determines a portfolio weight vector
+\[
+\mathbf{w}_t = (w_{1,t},\dots,w_{M,t})^\top \in \mathbb{R}^M,
+\]
+where $w_{i,t}\ge 0$ denotes the fraction of total capital allocated to asset $i$. If $w_{i,t}=0$, then asset $i$ is not held at trading day $t$. We consider fully invested long-only portfolios, and therefore require
+\[
+\mathbf{1}^\top \mathbf{w}_t = 1,\qquad \mathbf{w}_t \ge 0.
+\]
+
+We assume that at $t=0$, the investor starts with an initial capital and allocates it across the candidate assets according to the initial portfolio decision. This initial capital is denoted by $V_0$. More generally, let $V_t$ denote the total portfolio value immediately after the portfolio decision made at trading day $t$. Accordingly, the capital allocated to asset $i$ at time $t$ is $w_{i,t}V_t$, and the total invested capital equals $V_t$.
+
+For each trading day $t$, we define the close-to-close price-relative vector as
+\[
+\mathbf{y}_t
+=
+\left(
+\frac{c_{1,t+1}}{c_{1,t}},
+\dots,
+\frac{c_{M,t+1}}{c_{M,t}}
+\right)^\top.
+\]
+Given the portfolio decision $\mathbf{w}_t$, the portfolio value evolves according to
+\[
+V_{t+1} = V_t\, \mathbf{y}_t^\top \mathbf{w}_t.
+\]
+That is, starting from the initial capital $V_0$, the portfolio value over day $t$ to $t+1$ is determined by the weighted combination of the asset-wise close-to-close price relatives under the current portfolio weights.
+
+Under the above formulation, portfolio management amounts to finding a sequence of feasible portfolio decisions $\{\mathbf{w}_t\}_{t=0}^{T-1}$ over the investment horizon that maximizes the terminal portfolio value. Formally, the global objective is defined as
+\[
+\{\mathbf{w}_t^*\}_{t=0}^{T-1}
+=
+\arg\max_{\{\mathbf{w}_t\}_{t=0}^{T-1}}
+V_T
+\]
+
+\section{Methodology}
+\subsection{\textbf{DeskFlow} Overview}
+
+\textbf{DeskFlow} addresses sequential portfolio optimization through a hierarchical decision architecture that separates \emph{when to revise} the current base portfolio from \emph{how to allocate} capital within each holding segment. The framework consists of three coordinated components: a controller that determines when the current base portfolio should be updated, a manager that generates a low-frequency base portfolio at update points, and a trader that performs daily refinement within each segment. As illustrated in Figure~\ref{fig1}, these three roles jointly coordinate structural revision, segment-level base portfolio construction, and day-level execution refinement.
+
+Let the investment horizon be partitioned by a sequence of segment boundaries
+\[
+0=\tau_0<\tau_1<\cdots<\tau_K\le T.
+\]
+The \(k\)-th holding segment is defined as \([\tau_k,\tau_{k+1})\). At each boundary \(t=\tau_k\), the manager is invoked once to generate a base portfolio \(w_t^{\mathrm{mgr}}\) for the subsequent segment. Within the segment, the trader acts at every trading day to refine the current base portfolio.
+
+Let \(\mathcal{T}^{\mathrm{mgr}}=\{\tau_k\}_{k=0}^{K}\) denote the set of manager decision points. At a revision point, the manager constructs a new base portfolio. Between two consecutive revision points, however, this base portfolio is not re-optimized daily; instead, it is passively carried forward under market movements. To describe such passive evolution, we define the drift operator
+\[
+\mathcal{D}(w,y)=\frac{y\odot w}{y^\top w}.
+\]
+Accordingly, the drifted executed portfolio is
+\[
+\tilde w_t=\mathcal{D}(w_{t-1},y_{t-1}),
+\]
+and we define the base portfolio used by the trader at day \(t\) as
+\[
+w_t^{\mathrm{base}}=
+\begin{cases}
+w_t^{\mathrm{mgr}}, & t\in\mathcal{T}^{\mathrm{mgr}},\\[4pt]
+\mathcal{D}(w_{t-1}^{\mathrm{base}},y_{t-1}), & t\notin\mathcal{T}^{\mathrm{mgr}}.
+\end{cases}
+\]
+In other words, at a revision point \(t=\tau_k\), the manager generates a new base portfolio \(w_t^{\mathrm{mgr}}\); otherwise, the current base portfolio is simply given by its drifted version from the previous day.
+
+At each trading day \(t\), the trader outputs a refinement portfolio \(w_t^{\mathrm{trd}}\), and the final executed portfolio is constructed as
+\[
+w_t=(1-\alpha)\,w_t^{\mathrm{base}}+\alpha\,w_t^{\mathrm{trd}},
+\]
+where \(\alpha\in[0,1]\) controls the refinement strength. This formulation makes explicit that the manager determines the segment-level base portfolio, while the trader performs daily refinement around the current base.
+
+The length of a holding segment should not be fixed in advance, since the effectiveness of a base portfolio is market-dependent and may deteriorate unevenly over time. A fixed holding period may fail to revise the base portfolio before its validity weakens, leaving the strategy exposed to an outdated allocation. \textbf{DeskFlow} therefore determines segment boundaries adaptively according to the current state of the held portfolio: when revision is triggered, a new base portfolio is constructed and a new segment begins; otherwise, the current base portfolio is simply drifted forward. In this way, segment boundaries become state-dependent rather than pre-specified.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=1.5\columnwidth]{AnonymousSubmission/LaTeX/SentinelAlpha.PDF} % Reduce the figure size so that it is slightly narrower than the column. Don't use precise values for figure width.This setup will avoid overfull boxes.
+\caption{\textbf{\textbf{DeskFlow} framework.} The manager generates a segment-level base portfolio, the controller determines whether to \textit{Switch} or \textit{Hold} the current base portfolio using TPSM-based held-trend support, and the trader performs constrained daily refinement around the active base portfolio. The final executed portfolio is obtained by combining structural revision, base portfolio, and daily execution refinement within a unified hierarchical framework.}
+\label{fig1}
+\end{figure*}
+
+\subsection{Hierarchical Allocation and Refinement}
+%%开头意图
+Given the segment boundaries determined by the controller, \textbf{DeskFlow} constructs portfolios through two coordinated decision layers operating at different time scales. The manager is responsible for segment-level base portfolio at update points, while the trader performs daily refinement around the current base portfolio within each segment. This hierarchical design allows long-horizon portfolio structure and short-horizon adjustment to be optimized separately but executed jointly.
+
+%%说明MDP过程，一方面说明MDP是怎么构成的，另外一方面说明网络架构是怎么设计的
+\paragraph{Manager.}
+
+The manager is responsible for low-frequency base portfolio construction at segment boundaries. We formulate it as a segment-level Markov decision process
+\[
+\mathcal{M}^{\mathrm{mgr}}
+=
+\bigl(
+\mathcal{S}^{\mathrm{mgr}},
+\mathcal{A}^{\mathrm{mgr}},
+\mathcal{R}^{\mathrm{mgr}},
+\gamma^{\mathrm{mgr}},
+\pi^{\mathrm{mgr}}
+\bigr),
+\]
+where \(\mathcal{S}^{\mathrm{mgr}}\), \(\mathcal{A}^{\mathrm{mgr}}\), and \(\mathcal{R}^{\mathrm{mgr}}\) denote the state, action, and reward spaces, \(\gamma^{\mathrm{mgr}}\) is the discount factor, and \(\pi^{\mathrm{mgr}}\) is the manager policy.
+
+At each segment boundary \(t=\tau_k\), the manager observes the strategic state
+\[
+s_t^{\mathrm{mgr}}=\{X_t^{\mathrm{mgr}},\tilde w_t\},
+\]
+where \(X_t^{\mathrm{mgr}}\in\mathbb{R}^{M\times\tau^{\mathrm{mgr}}\times F}\) denotes the long-horizon multi-asset observation tensor up to day \(t\), and \(\tilde w_t\) provides the current portfolio context through the drifted executed portfolio.
+
+
+The manager policy \(\pi^{\mathrm{mgr}}\) maps \(s_t^{\mathrm{mgr}}\) to a base portfolio \(w_t^{\mathrm{mgr}}\) for the subsequent holding segment. In our implementation, the manager is parameterized by a base portfolio network consisting of an LSTM-HA temporal encoder, a cross-asset attention module (CAAN)\citep{alphastock}, and an MLP stochastic allocation head.
+
+Given the state \(s_t^{\mathrm{mgr}}=\{X_t^{\mathrm{mgr}},\tilde w_t\}\), the manager policy \(\pi^{\mathrm{mgr}}\) outputs a segment-level portfolio action \(w_t^{\mathrm{mgr}}\), which serves as the strategic base allocation for the subsequent holding interval. Concretely, the policy is instantiated by a strategic allocation network that maps the long-horizon market observation and current drifted portfolio context to a sparse long-only portfolio over the candidate assets.
+
+The LSTM-HA encoder is first applied asset-wise over the manager lookback window to extract temporal representations
+\[
+H_t^{\mathrm{mgr}}=\mathrm{LSTM\mbox{-}HA}(X_t^{\mathrm{mgr}}),
+\]
+where \(H_t^{\mathrm{mgr}}\in\mathbb{R}^{M\times d_{\mathrm{mgr}}}\). Let \(x_t^{\mathrm{last}}\in\mathbb{R}^{M\times F}\) denote the most recent cross-sectional feature matrix. CAAN then takes \(H_t^{\mathrm{mgr}}\), \(x_t^{\mathrm{last}}\), and \(\tilde w_t\) as input to model cross-asset dependency under the current portfolio context:
+\[
+C_t^{\mathrm{mgr}}
+=
+\mathrm{CAAN}\!\left(
+H_t^{\mathrm{mgr}},
+x_t^{\mathrm{last}},
+\tilde w_t
+\right),
+\]
+where \(C_t^{\mathrm{mgr}}\in\mathbb{R}^{M\times d_{\mathrm{mgr}}}\) is the resulting contextual representation.
+
+Based on \(C_t^{\mathrm{mgr}}\), the policy head parameterizes an asset-wise Gaussian action distribution,
+\[
+\mu_t^{\mathrm{mgr}},\log\sigma_t^{\mathrm{mgr}}
+=
+\mathrm{MLP}^{\mathrm{mgr}}(C_t^{\mathrm{mgr}}).
+\]
+A raw allocation score is then sampled and transformed into bounded preference scores:
+\[
+\hat q_t^{\mathrm{mgr}}
+\sim
+\mathcal{N}\!\left(
+\mu_t^{\mathrm{mgr}},
+\mathrm{diag}\bigl((\sigma_t^{\mathrm{mgr}})^2\bigr)
+\right),
+\quad
+q_t^{\mathrm{mgr}}=\tanh(\hat q_t^{\mathrm{mgr}}).
+\]
+Here, \(q_t^{\mathrm{mgr}}\) represents the manager's asset-wise strategic preference under the current state. The final base portfolio is obtained by retaining the top-\(K\) assets and normalizing their scores:
+\[
+w_{t,i}^{\mathrm{mgr}}=
+\begin{cases}
+\dfrac{\exp(q_{t,i}^{\mathrm{mgr}})}
+{\sum_{j\in\mathrm{TopK}(q_t^{\mathrm{mgr}},K)}\exp(q_{t,j}^{\mathrm{mgr}})},
+& i\in\mathrm{TopK}(q_t^{\mathrm{mgr}}),\\[10pt]
+0, & \text{otherwise}.
+\end{cases}
+\]
+
+The manager reward is defined at the segment level. For a base portfolio \(w_{\tau_k}^{\mathrm{mgr}}\) generated at boundary \(\tau_k\), its quality is evaluated over the subsequent segment \([\tau_k,\tau_{k+1})\) by
+\[
+r_{\tau_k}^{\mathrm{mgr}}
+=
+J\!\left(w_{\tau_k}^{\mathrm{mgr}}\right)
+-
+J\!\left(w^{\mathrm{ew}}\right),
+\]
+where \(J(\cdot)\) denotes the Sharpe ratio over the corresponding segment and \(w^{\mathrm{ew}}\) is the equal-weight portfolio. This relative reward encourages robust strategic allocation under varying market conditions.
+
+\paragraph{Trader.}
+The trader is responsible for day-level refinement around the current base portfolio. We formulate it as a daily Markov decision process
+\[
+\mathcal{M}^{\mathrm{trd}}
+=
+\bigl(
+\mathcal{S}^{\mathrm{trd}},
+\mathcal{A}^{\mathrm{trd}},
+\mathcal{R}^{\mathrm{trd}},
+\gamma^{\mathrm{trd}},
+\pi^{\mathrm{trd}}
+\bigr),
+\]
+where \(\mathcal{S}^{\mathrm{trd}}\), \(\mathcal{A}^{\mathrm{trd}}\), and \(\mathcal{R}^{\mathrm{trd}}\) denote the state, action, and reward spaces, \(\gamma^{\mathrm{trd}}\) is the discount factor, and \(\pi^{\mathrm{trd}}\) is the trader policy.
+
+At each trading day \(t\), the trader observes the refinement state
+\[
+s_t^{\mathrm{trd}}=\bigl\{X_t^{\mathrm{trd}},\tilde w_t, w_t^{base}\bigr\},
+\]
+where \(X_t^{\mathrm{trd}}\) encodes the short-horizon market observation up to day \(t\). This state combines recent market dynamics, the current executed portfolio, and the drifted strategic base, so that the trader can perform daily refinement with awareness of short-term fluctuations, existing positions, and transaction-cost-sensitive deviations from the strategic allocation. The trader policy \(\pi^{\mathrm{trd}}\) maps \(s_t^{\mathrm{trd}}\) to a day-level refinement action. Specifically, the trader is parameterized by a causal dilated temporal convolution(TCN) \citep{TCN} encoder and an MLP policy head. The temporal encoder first extracts a short-horizon asset-wise representation,
+$H_t^{\mathrm{trd}}=\mathrm{TCN}(X_t^{\mathrm{trd}})$, which is then combined with \(\tilde w_t\) and \(w_t^{base}\), an asset-wise Gaussian policy.
+\[
+\mu_t^{\mathrm{trd}},\,\log\sigma_t^{\mathrm{trd}}
+=
+\mathrm{MLP}(H_t^{\mathrm{trd}},\tilde w_t,w_t^{base}),
+\]
+A raw refinement score is then sampled as
+\[
+q_t^{\mathrm{trd}}\sim
+\mathcal{N}\!\left(
+\mu_t^{\mathrm{trd}},
+\mathrm{diag}\bigl((\sigma_t^{\mathrm{trd}})^2\bigr)
+\right).
+\]
+To preserve the structural decision made by the manager, the trader is restricted to refine only the support of the active base portfolio.
+
+\[
+w_{i,t}^{\mathrm{trd}}
+=
+\frac{
+\mathbf{1}[w_{i,t}^{base}>0]\exp\!\bigl(\tanh(q_{i,t}^{\mathrm{trd}})\bigr)
+}{
+\sum_{j=1}^{M}\mathbf{1}[w_{j,t}^{base}>0]\exp\!\bigl(\tanh(q_{j,t}^{\mathrm{trd}})\bigr)
+}.
+\]
+The final executed portfolio is then obtained using the convex combination defined in the overview.
+
+The trader reward measures the incremental contribution of daily refinement relative to the current base portfolio:
+\[
+r_t^{\mathrm{trd}}
+=
+\log\!\left(
+\frac{y_t^\top w_t}{y_t^\top w_t^{\mathrm{base}}}
+\right)
+-
+\lambda \|w_t-\tilde w_t\|_1,
+\]
+where \(\lambda\) is the transaction cost coefficient. By comparing the executed portfolio against the base portfolio at the daily level, this reward encourages the trader to learn short-term return opportunities arising from day-level market fluctuations relative to the current strategic base.
+
+\subsubsection{Training Procedure}
+
+To stabilize hierarchical optimization, \textbf{DeskFlow} is trained in a stage-wise manner. During training, segment length are constructed with a fixed length 
+\(H\), i.e.,
+\[
+\tau_k-\tau_{k-1}=H,\qquad k=1,\dots,K.
+\]
+This fixed-length segmentation is adopted only for training stability. Although the deployment-time execution of \textbf{DeskFlow} does not rely on fixed segment boundaries, using a consistent holding horizon during training provides the manager with a stable learning target over a future investment period. 
+
+The training procedure consists of three stages. In the first stage, we train the manager alone to learn a stable segment-level base portfolio policy. In the second stage, we fix the pretrained manager and train the trader on top of the resulting base portfolio, so that the trader learns short-horizon refinement under a stable allocation anchor. In the third stage, we jointly optimize the manager and trader to improve cross-layer coordination between segment-level allocation and daily refinement.
+
+Both layers are optimized with clipped proximal policy optimization (Clip-PPO)\citep{clip-ppo}. This stage-wise scheme first establishes a reliable strategic allocator, then learns a refinement policy around that anchor, and finally aligns the two layers through joint optimization.
+
+
+%%说明最后的构成，我觉得这部分应该说明是怎么训练的
+% 小节1：Controller Objective and Probability-Based Risk Assessment
+% 写什么：
+% controller 的职责；
+% 为什么 strategic revision 需要显式 timing mechanism；
+% 为什么必须引入 asset-wise uptrend probability；
+% 为什么组合风险评估应当是 exposure-aware 的；
+% 给出p 的定义或至少提前埋伏笔。
+% 这一节的核心是：先把问题定义清楚。
+
+% 小节2：Soft Probabilistic Supervision
+% 写什么：
+% 传统 0/1 标签的问题；
+% 你的 soft label 设计动机；
+% 标签构造流程概述；
+% 相比 hard label 的优势。
+% 这一节的核心是：解释为什么 TPSM 应该学概率而不是硬分类。
+
+% 小节3：TPSM for Asset-Wise Trend Probability Estimation
+% 写什么：
+% 模型输入输出；
+% 模型结构主干；
+% prior / emission fusion 逻辑；
+% 损失函数类别；
+% 三阶段训练策略。
+% 这一节的核心是：解释概率流如何被可靠学出来。
+
+% 小节4：Controller Rule and Segment Boundary Determination
+% 写什么：
+% 从 pi,t到 ptheld；从 ptheld到 weak-signal detection；
+% 从 weak-signal detection 到 gt；
+% 从 gt到 τk；
+% 与 manager / trader 的交互。
+% 这一节的核心是：解释 controller 如何把概率流转成结构更新决策。
+\subsection{Controller-Guided Strategic Update Process}
+
+Beyond portfolio construction itself, hierarchical portfolio management also requires a mechanism to determine when the current base portfolio should be revised. \textbf{DeskFlow} addresses this through a controller that governs the timing of strategic updates. Rather than constructing portfolios directly, the controller evaluates whether the current base portfolio still retains sufficient trend support and triggers a new manager decision only when persistent deterioration is detected.
+
+To support this decision, \textbf{DeskFlow} introduces asset-wise uptrend probabilities as portfolio-relevant risk signals. These probabilities are first estimated by a trend probability state-space model (TPSM), then aggregated under the current portfolio exposure to assess the health of the held portfolio, and finally converted into switch-or-hold decisions through a rule-based trigger mechanism. In this way, the controller explicitly separates the problem of when to revise the base portfolio from the downstream problem of how to allocate capital within each segment.
+
+\subsubsection{Probability-Based Portfolio Risk Signal and TPSM Learning}
+
+To determine whether the current base portfolio should be maintained or revised, the controller must assess the structural risk of the currently held portfolio. Since the deterioration of a base portfolio is usually gradual rather than instantaneous, this assessment cannot be reliably reduced to a fixed rebalancing schedule, a single-day return, or a hard regime indicator. We therefore introduce an asset-wise uptrend probability \(p_{i,t}\in[0,1]\), where a larger value indicates that asset \(i\) is more likely to remain in an upward-trend regime at trading day \(t\). Based on these probabilities, the controller evaluates the current portfolio under the drifted executed portfolio \(\tilde w_t\) through the held-trend support score
+\[
+p_t^{\mathrm{held}}=\sum_{i=1}^{M}\tilde w_{i,t}\,p_{i,t},
+\]
+where a high value indicates that the current base portfolio remains concentrated in assets with strong upward support, while a low value suggests weakening portfolio-level trend support and a potential need for revision.
+
+A key challenge is then how to learn \(p_{i,t}\) reliably. Direct binary labels are inadequate because they collapse strong trends, weak trends, and transition regions into the same discrete target, thereby introducing substantial supervision noise near turning points. We therefore construct soft probabilistic labels directly from historical price trajectories so that the supervision preserves both graded trend strength and transition continuity. Specifically, for each asset \(i\), we transform the closing-price series into log-price space as \(\ell_{i,t}=\log(c_{i,t}+\epsilon)\), smooth it under a label-generation configuration \(u=(\mathrm{span}^{(u)},L_{\min}^{(u)},\delta_{\mathrm{slope}}^{(u)},\delta_{\mathrm{shape}}^{(u)},\kappa^{(u)})\in\mathcal U\) via \(\bar{\ell}_{i,t}^{(u)}=\alpha^{(u)}\ell_{i,t}+(1-\alpha^{(u)})\bar{\ell}_{i,t-1}^{(u)}\) with \(\alpha^{(u)}=\frac{2}{\mathrm{span}^{(u)}+1}\), and use sign changes in the first-order difference of \(\bar{\ell}_{i,t}^{(u)}\) to obtain primitive turning points and initial segments. Because this initial segmentation can be overly fragmented, we iteratively merge adjacent segments: short segments with length \(L_s=r_s-l_s<L_{\min}^{(u)}\) are merged directly, and neighboring segments are also merged when their average slopes \(\rho_{i,s}^{(u)}=\frac{\bar{\ell}_{i,r_s}^{(u)}-\bar{\ell}_{i,l_s}^{(u)}}{r_s-l_s}\) and shapes are sufficiently similar, i.e., \(|\rho_{i,s_a}^{(u)}-\rho_{i,s_b}^{(u)}|\le\delta_{\mathrm{slope}}^{(u)}\) and \(d(s_a,s_b)\le\delta_{\mathrm{shape}}^{(u)}\). Each refined segment is then assigned a continuous uptrend probability by robust slope normalization,
+\[
+\pi_{i,s}^{(u)}
+=
+\sigma\!\left(
+\kappa^{(u)}
+\frac{\rho_{i,s}^{(u)}-\mathrm{median}(\{\rho_{i,s}^{(u)}\})}
+{\mathrm{MAD}(\{\rho_{i,s}^{(u)}\})+\epsilon}
+\right),
+\]
+and expanded back to the timeline to form a piecewise-constant soft label sequence \(y_{i,t}^{(u)}\). Repeating this procedure over multiple \(u\in\mathcal U\) yields the main supervision target
+\[
+y_{i,t}^{\mathrm{main}}
+=
+\mathrm{clip}\!\left(
+\frac{1}{|\mathcal U|}\sum_{u\in\mathcal U}y_{i,t}^{(u)},
+\,0,\,1
+\right),
+\]
+while a more short-horizon-sensitive auxiliary label \(y_{i,t}^{\mathrm{aux}}\) is constructed using lighter smoothing and less restrictive segmentation constraints. Together, \(y_{i,t}^{\mathrm{main}}\) and \(y_{i,t}^{\mathrm{aux}}\) provide complementary supervision for stable trend support and local reversal sensitivity.
+
+We then learn \(p_{i,t}\) using a \emph{trend probability state-space model} (TPSM), which combines local observation encoding with latent state propagation. For each asset \(i\), let \(X_{i,t}^{\mathrm{tpsm}}\in\mathbb{R}^{W\times F}\) denote the causal feature window up to trading day \(t\). TPSM first extracts a local representation \(z_{i,t}=f_{\mathrm{enc}}(X_{i,t}^{\mathrm{tpsm}})\), where \(f_{\mathrm{enc}}\) is implemented as a causal multi-scale temporal convolutional network (TCN) with dilated convolutions to capture short-horizon local dynamics and reversal cues at different temporal resolutions. It then combines \(z_{i,t}\) with an asset embedding \(e_i\) to update a latent hidden state through \(h_{i,t}=\mathrm{GRU}(h_{i,t-1},[z_{i,t},e_i])\) \citep{Chung2014EmpiricalEO}. Based on the latent state and current observation, a transition module \(f_{\mathrm{trans}}\), implemented as a simple linear network, predicts two regime-switching probabilities \((q_{i,t}^{\mathrm{bear}},q_{i,t}^{\mathrm{bull}})=f_{\mathrm{trans}}(h_{i,t-1},z_{i,t},e_i)\), which induce the propagated prior
+\[
+p_{i,t}^{\mathrm{prior}}
+=
+p_{i,t-1}(1-q_{i,t}^{\mathrm{bear}})
++
+(1-p_{i,t-1})q_{i,t}^{\mathrm{bull}}.
+\]
+This propagated prior summarizes persistent trend context over time and filters out high-frequency local noise. To improve sensitivity to abrupt local reversals, TPSM further introduces an observation branch \(o_{i,t}=f_{\mathrm{emit}}(z_{i,t},e_i)\), where \(f_{\mathrm{emit}}\) is implemented as a simple linear network. The role of \(o_{i,t}\) is to capture strong reversal evidence from current local observations, so that the final probability can respond more quickly when abrupt signals appear. The final uptrend probability is obtained by fusing the propagated prior and the observation signal in logit space,
+\[
+p_{i,t}
+=
+\sigma\!\left(
+\mathrm{logit}(p_{i,t}^{\mathrm{prior}})+\beta_i o_{i,t}
+\right),
+\]
+where \(\beta_i>0\) is an asset-specific fusion coefficient. In this way, TPSM preserves temporal continuity through state evolution while remaining responsive to strong local signals.
+
+The TPSM objective follows the same design logic: the fused probability \(p_{i,t}\) is fitted to the main soft label \(y_{i,t}^{\mathrm{main}}\), the observation branch \(\sigma(o_{i,t})\) is fitted to the auxiliary label \(y_{i,t}^{\mathrm{aux}}\), and two regularizers are used to control temporal variation,
+\[
+\mathcal{L}_{\mathrm{fuse}} = \mathbb{E}_{i,t}\!\left[ w_{i,t}^{\mathrm{trend}} \ell\!\left(p_{i,t},y_{i,t}^{\mathrm{main}}\right) \right],
+\]
+\[
+\mathcal{L}_{\mathrm{emit}} = \mathbb{E}_{i,t}\!\left[ \ell\!\left(\sigma(o_{i,t}),y_{i,t}^{\mathrm{aux}}\right) \right],
+\]
+\[
+\mathcal{L}_{\mathrm{deriv}} = \mathbb{E}_{i,t}\!\left[ \left| (p_{i,t}-p_{i,t-1})-(y_{i,t}^{\mathrm{main}}-y_{i,t-1}^{\mathrm{main}}) \right| \right],
+\]
+\[
+\mathcal{L}_{\mathrm{tv}} = \mathbb{E}_{i,t}\!\left[ |p_{i,t}-p_{i,t-1}| \right],
+\]
+where \(\mathcal{L}_{\mathrm{deriv}}\) encourages the temporal variation rate of the predicted probability to follow that of the main soft label, and \(\mathcal{L}_{\mathrm{tv}}\) suppresses overly frequent fluctuations within a trend segment. The overall objective is
+\[
+\mathcal{L}^{\mathrm{TPSM}}
+=
+\lambda_{\mathrm{fuse}}\mathcal{L}_{\mathrm{fuse}}
++
+\lambda_{\mathrm{emit}}\mathcal{L}_{\mathrm{emit}}
++
+\lambda_{\mathrm{deriv}}\mathcal{L}_{\mathrm{deriv}}
++
+\lambda_{\mathrm{tv}}\mathcal{L}_{\mathrm{tv}}.
+\]
+The final TPSM output is the asset-wise probability vector \(p_t=(p_{1,t},\dots,p_{M,t})^\top\), which serves as the controller input for strategic update assessment.
+
+
+\subsubsection{Controller Rule and Segment Boundary Determination}
+
+Given the asset-wise uptrend probabilities \(p_{i,t}\) estimated by TPSM, the controller determines whether the current base portfolio should be maintained or revised through the portfolio-level support score \(p_t^{\mathrm{held}}=\sum_{i=1}^{M}\tilde w_{i,t}p_{i,t}\). To avoid reacting to transient noise, this score is combined with holding-time constraints to produce a binary trigger \(g_t\in\{0,1\}\), where \(g_t=1\) indicates that a new strategic update should be invoked. Let \(d_t\) denote the number of trading days elapsed since the current base portfolio was adopted, and let \(Down_t\) denote the number of consecutive days for which \(p_t^{\mathrm{held}}<\eta\). We define
+\[
+g_t
+=
+\mathbf{1}\!\left[
+d_t\ge H_{\max}
+\;\;\vee\;\;
+\bigl(d_t\ge H_{\min}\ \wedge\ Down_t\ge K_{\mathrm{weak}}\bigr)
+\right].
+\]
+Here, \(H_{\min}\) prevents overly frequent strategic revision, \(H_{\max}\) bounds the maximum holding horizon, and \(K_{\mathrm{weak}}\) specifies how long weak held-trend support must persist before a switch is confirmed. Once \(g_t=1\), the next holding-segment boundary is determined by
+\[
+\tau_{k+1}=\min\{t>\tau_k:\ g_t=1\}.
+\]
+At \(t=\tau_{k+1}\), the manager generates a new base portfolio for the next segment; otherwise, the current base portfolio continues to drift and is only refined by the trader. In this way, the controller converts persistent weakening of held-trend support into adaptive segment boundaries.
+
+\section{Experiments}
+\subsection{Datasets and Experimental Setup}
+
+We evaluate \textbf{\textbf{DeskFlow}} on historical constituents of Nasdaq-100 and CSI 300, with chronological train/test splits summarized in Table~\ref{tab:dataset}. All data are obtained via the Wind API, and only stocks with continuous records over the full sample period are retained to ensure cross-sectional stability.
+
+All experiments follow the $c_{t-1}$ to $c_{t}$ protocol with long-only, fully invested portfolios and proportional transaction costs. Market inputs are constructed from historical features and normalized causally using only past observations. The same model framework, training pipeline, and evaluation protocol are used for both markets. Since the Chinese A-share market exhibits stronger short-horizon noise than the U.S. market, several market-level hyper-parameters are set separately for the two markets to maintain comparable robustness. The detailed settings are summarized in Table~\ref{tab:hyperparam}.
+
+During training, fixed-length holding segments are used to stabilize manager learning, while during testing segment boundaries are determined adaptively by the controller. Both the manager and trader are optimized with Clip-PPO under the same stage-wise training procedure.
+
+\begin{table}[t]
+\centering
+\caption{Key market-specific hyper-parameter settings for \textbf{DeskFlow}.}
+\label{tab:hyperparam}
+\small
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{lcc}
+\hline
+\textbf{Hyper-parameter} & \textbf{Nasdaq-100} & \textbf{CSI 300} \\
+\hline
+Transaction cost rate & $5e^{-5}$ & $5e^{-5}$ \\
+Manager lookback window \(\tau^{\mathrm{mgr}}\) & 240 & 120 \\
+Trader lookback window \(\tau^{\mathrm{trd}}\) & 10 & 10 \\
+TPSM window \(W\) & 63 & 63 \\
+Top-\(K\) selection & 10 & 10 \\
+Refinement weight \(\alpha\) & 0.6 & 0.8 \\
+Fixed training segment length \(H\) & 60 & 30 \\
+Minimum holding horizon \(H_{\min}\) & 5 & 1 \\
+Maximum holding horizon \(H_{\max}\) & 60 & 30 \\
+Weak-signal threshold \(K_{\mathrm{weak}}\) & 3 & 3 \\
+Held-support threshold \(\eta\) & 0.5 & 0.65 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Dataset Summary and Data Splits}
+\label{tab:dataset}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l c c c}
+\hline
+\textbf{Market} & \textbf{\#Stocks} & \textbf{Train} & \textbf{Test} \\
+\hline
+Nasdaq-100 (US) 
+& 39 
+& \begin{tabular}[c]{@{}c@{}}2000-04-07\\2023-12-31\end{tabular}
+& \begin{tabular}[c]{@{}c@{}}2024-01-01\\2025-10-03\end{tabular} \\
+\hline
+CSI 300 (China) 
+& 53 
+& \begin{tabular}[c]{@{}c@{}}2000-04-07\\2021-12-31\end{tabular}
+& \begin{tabular}[c]{@{}c@{}}2022-01-01\\2025-02-28\end{tabular} \\
+\hline
+\end{tabular}
+\end{table}
+
+
+\subsection{Baseline Methods}
+
+We compare \textbf{DeskFlow} with three groups of baselines:
+(i) traditional and online portfolio selection,
+(ii) deep reinforcement learning (DRL),
+and (iii) structural ablations.
+
+Traditional and online methods include
+Buy\&Hold, Markowitz\citep{MVO}, UCRP\citep{UCRP}, Anticor\citep{ANTICOR},
+OLMAR\citep{OLMAR}, and WMAMR\citep{WMAMR},
+covering passive exposure,
+mean--variance optimization,
+online rebalancing,
+and mean-reversion paradigms.
+DRL baselines include
+AlphaStock and DeepTrader. \citep{alphastock, 6}
+We further evaluate two ablations:
+Manager-only,
+Manager\&Trader.
+
+\subsection{Evaluation Metrics}
+
+Let \(\{V_t\}_{t=0}^{T}\) denote the portfolio value sequence, and define the daily return as$
+r_t=\frac{V_t-V_{t-1}}{V_{t-1}}.
+$
+Based on the daily return series \(\{r_t\}_{t=1}^{T}\), we report Total Return (TR), Annualized Return (ARR), Annualized Volatility (AVOL), Maximum Drawdown (MDD), Annualized Sharpe Ratio (ASR), and Calmar Ratio (CR). All annualized metrics are computed from daily returns using a standard annualization factor \(D\), where \(D=252\) trading days per year.
+
+Specifically, Total Return is defined as \(\mathrm{TR}=V_T/V_0-1\). Annualized Return is computed from the cumulative return implied by the daily return sequence, i.e.,
+$
+\mathrm{ARR}
+=
+\left(\prod_{t=1}^{T}(1+r_t)\right)^{D/T}-1.
+$
+Annualized Volatility is the annualized standard deviation of daily returns,
+$
+\mathrm{AVOL}
+=
+\mathrm{Std}(r_t)\sqrt{D}.
+$
+Annualized Sharpe Ratio is computed from the annualized return and annualized volatility as
+$
+\mathrm{ASR}=\frac{\mathrm{ARR}}{\mathrm{AVOL}},
+$
+where the risk-free rate is set to zero. Maximum Drawdown measures the largest peak-to-trough loss over the test period, and Calmar Ratio is defined as
+$
+\mathrm{CR}=\frac{\mathrm{ARR}}{\mathrm{MDD}}.
+$
+Sharpe evaluates return per unit volatility, while Calmar evaluates return relative to extreme downside risk.
+
+\subsection{Main Results}
+\begin{table*}[t]
+\centering
+\caption{Main results on NASDAQ-100 and CSI 300.Outer-only and Outer\&Inner correspond to the manager-only and manager–trader ablations, respectively. $\uparrow$ indicates higher is better, and $\downarrow$ indicates lower is better. Best results are shown in \textbf{bold}, and second-best results are \underline{underlined}.}
+\label{tab:main}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{|>{\centering\arraybackslash}m{1.8cm}|c||c|c|c|c|c|c||c|c|c|c|c|c|}
+\hline
+\multirow{2}{*}{Type} & \multirow{2}{*}{Model} 
+& \multicolumn{6}{c||}{NASDAQ-100} 
+& \multicolumn{6}{c|}{CSI 300} \\
+\cline{3-14}
+& 
+& TR$\uparrow$ & AR$\uparrow$ & Vol$\downarrow$ & Sharpe$\uparrow$ & MDD$\downarrow$ & CR$\uparrow$
+& TR$\uparrow$ & AR$\uparrow$ & Vol$\downarrow$ & Sharpe$\uparrow$ & MDD$\downarrow$ & CR$\uparrow$ \\
+\hline
+
+\multirow{6}{*}{Traditional}
+& Anticor   & 259.97 & \underline{29.85} & 35.45 & 0.84 & 44.59 & 0.669 & 123.82 & 23.73 & 38.82 & 0.61 & 43.33 & 0.548 \\
+& Buy\&Hold & 160.64 & 19.80 & 20.88 & 0.95 & 29.79 & 0.665 & 54.37 & 10.87 & \underline{20.51} & 0.53 & 29.86 & 0.364 \\
+& Markowitz & 57.76 & 9.88 & \textbf{17.25} & 0.57 & 24.73 & 0.400 & 50.53 & 11.39 & 25.03 & 0.45 & 36.11 & 0.315 \\
+& OLMAR     & 157.77 & 25.48 & 40.14 & 0.63 & 45.48 & 0.560 & 180.46 & \textbf{30.22} & 43.60 & 0.69 & 45.34 & 0.667 \\
+& UCRP      & 170.39 & 20.27 & \underline{19.77} & 1.02 & 26.63 & 0.761 & 72.58 & 12.94 & \textbf{19.54} & 0.66 & \underline{23.56} & 0.549 \\
+& WMAMR     & \underline{264.39} & \textbf{29.95} & 35.32 & 0.85 & 33.88 & 0.884 & 117.12 & 24.68 & 42.75 & 0.58 & 50.52 & 0.489 \\
+\hline
+
+\multirow{2}{*}{Deep RL}
+& AlphaStock & 185.35 & 21.55 & 21.07 & 1.02 & \textbf{21.90} & \underline{0.984} & 128.39 & 19.11 & 21.87 & 0.87 & 36.37 & 0.525 \\
+& DeepTrader & 196.52 & 23.07 & 25.60 & 0.90 & \underline{24.54} & 0.940 & \underline{212.81} & \underline{26.35} & 25.58 & \underline{1.03} & 31.86 & \underline{0.827} \\
+\hline
+
+\multirow{3}{*}{Ours}
+& Manager-only    & 207.52 & 23.00 & 21.54 & 1.07 & 33.11 & 0.695 & 108.48 & 17.53 & 23.14 & 0.76 & 24.79 & 0.707 \\
+& Manager\&trader  & 221.30 & 23.84 & 21.70 & \underline{1.10} & 32.82 & 0.726 & 110.00 & 17.71 & 23.29 & 0.76 & 25.40 & 0.697 \\
+& \textbf{DeskFlow} & \textbf{303.84} & 28.06 & 21.73 & \textbf{1.29} & 26.11 & \textbf{1.075} & \textbf{216.56} & 26.18 & 24.02 & \textbf{1.09} & \textbf{22.38} & \textbf{1.170} \\
+\hline
+\end{tabular}
+}
+\end{table*}
+
+Table~\ref{tab:main} reports the overall comparison on both markets. Overall, \textbf{\textbf{DeskFlow}} delivers the strongest and most consistent performance among all compared methods. Across the two markets, it achieves the best overall risk-adjusted profile, ranking first on the most important criteria such as Sharpe ratio and Calmar ratio, while also maintaining competitive returns and strong downside-risk control.
+
+Compared with traditional methods, \textbf{DeskFlow} provides a substantially better balance between return generation and risk containment. Traditional baselines may perform well on one individual metric, such as annualized return or volatility, but they usually fail to maintain uniformly strong results across return, volatility, and drawdown at the same time. This suggests that static allocation rules and heuristic online updates are insufficient for handling long-horizon non-stationarity and market state dependent risk.
+
+Compared with deep RL baselines, the advantage of \textbf{DeskFlow} is more structural. Existing deep RL methods improve adaptability through end-to-end policy learning, but they still entangle medium-horizon portfolio construction and short-horizon execution adjustment within a relatively unified policy. In contrast, our framework explicitly separates structural control, base portfolio construction, and daily execution refinement, thereby reducing cross-scale interference and improving the trade-off between responsiveness and stability.
+
+The ablation results further validate this design. Moving from \textit{Manager-only} to \textit{Manager\&Trader} yields moderate improvement, showing that the trader enhances local execution quality beyond base portfolio alone. More importantly, the full model further improves upon both ablations, especially on risk-adjusted metrics, which indicates that the \textbf{controller} contributes essential value beyond the manager--trader hierarchy itself. The gain therefore comes not merely from adding another policy layer, but from introducing an explicit structural boundary that governs when strategic revision should occur.
+
+The two markets also exhibit a consistent but informative contrast. On NASDAQ-100, \textbf{DeskFlow} achieves the strongest overall risk--return trade-off against both high-return traditional baselines and competitive RL methods. On CSI 300, the advantage becomes even more pronounced in downside-risk control and return stability, suggesting that the proposed decomposition is particularly beneficial in markets with stronger market state shifts, noisier short-term fluctuations, and less stable cross-sectional dynamics.
+
+Overall, these findings support the central hypothesis of this work: explicitly decoupling \emph{when to structurally revise}, \emph{what base portfolio to hold}, and \emph{how to refine daily execution} leads to more robust portfolio management than relying on a single-layer or weakly structured decision policy.
+
+
+\section{Conclusions}
+
+This paper proposes \textit{\textbf{DeskFlow}}, a hierarchical portfolio management framework for non-stationary financial markets. The framework is organized around three coordinated roles: a controller, a manager, and a trader. The controller determines when structural portfolio revision is needed, the manager constructs the base portfolio, and the trader performs constrained daily refinement around that base portfolio. By explicitly separating structural revision, base portfolio, and execution refinement, \textbf{DeskFlow} provides a decision architecture that better matches the multi-scale nature of portfolio management.
+
+Experiments on U.S. and Chinese equity markets show that \textbf{DeskFlow} achieves stronger and more robust performance than traditional methods, representative RL baselines, and hierarchical ablations. In particular, it consistently improves risk-adjusted return and downside-risk control, indicating that the proposed decomposition enhances both portfolio stability and return quality.
+
+The ablation results further suggest that the effectiveness of \textbf{DeskFlow} comes not merely from adding policy layers, but from introducing an explicit structural boundary for strategic revision. Overall, \textbf{DeskFlow} shows that explicitly decomposing \emph{when to revise}, \emph{what to hold}, and \emph{how to refine execution} provides an effective framework for robust portfolio management in non-stationary markets. Future work will explore more flexible structural-control mechanisms, more realistic transaction cost and market impact modeling, and validation on broader markets and longer horizons.
+
+\bibliography{aaai2026}
+
+% Check whether the conference requires a reproducibility checklist to be included in the paper.
+% If so, you can uncomment the following line and ajust the path to include it.
+% \input{../../ReproducibilityChecklist/LaTeX/ReproducibilityChecklist.tex}
+
+\end{document}

@@ -1,0 +1,1114 @@
+%File: anonymous-submission-latex-2026.tex
+\documentclass[letterpaper]{article} % DO NOT CHANGE THIS
+\usepackage[submission]{aaai2026}  % DO NOT CHANGE THIS
+\usepackage{times}  % DO NOT CHANGE THIS
+\usepackage{helvet}  % DO NOT CHANGE THIS
+\usepackage{courier}  % DO NOT CHANGE THIS
+\usepackage[hyphens]{url}  % DO NOT CHANGE THIS
+\usepackage{graphicx} % DO NOT CHANGE THIS
+\urlstyle{rm} % DO NOT CHANGE THIS
+\def\UrlFont{\rm}  % DO NOT CHANGE THIS
+\usepackage{natbib}  % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\usepackage{caption} % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\frenchspacing  % DO NOT CHANGE THIS
+\setlength{\pdfpagewidth}{8.5in} % DO NOT CHANGE THIS
+\setlength{\pdfpageheight}{11in} % DO NOT CHANGE THIS
+%
+% These are recommended to typeset algorithms but not required. See the subsubsection on algorithms. Remove them if you don't have algorithms in your paper.
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+%
+% These are are recommended to typeset listings but not required. See the subsubsection on listing. Remove this block if you don't have listings in your paper.
+\usepackage{newfloat}
+\usepackage{listings}
+\DeclareCaptionStyle{ruled}{labelfont=normalfont,labelsep=colon,strut=off} % DO NOT CHANGE THIS
+\lstset{%
+	basicstyle={\footnotesize\ttfamily},% footnotesize acceptable for monospace
+	numbers=left,numberstyle=\footnotesize,xleftmargin=2em,% show line numbers, remove this entire line if you don't want the numbers.
+	aboveskip=0pt,belowskip=0pt,%
+	showstringspaces=false,tabsize=2,breaklines=true}
+\floatstyle{ruled}
+\newfloat{listing}{tb}{lst}{}
+\floatname{listing}{Listing}
+%
+% Keep the \pdfinfo as shown here. There's no need
+% for you to add the /Title and /Author tags.
+\pdfinfo{
+/TemplateVersion (2026.1)
+}
+
+% DISALLOWED PACKAGES
+% \usepackage{authblk} -- This package is specifically forbidden
+% \usepackage{balance} -- This package is specifically forbidden
+% \usepackage{color (if used in text)
+% \usepackage{CJK} -- This package is specifically forbidden
+% \usepackage{float} -- This package is specifically forbidden
+% \usepackage{flushend} -- This package is specifically forbidden
+% \usepackage{fontenc} -- This package is specifically forbidden
+% \usepackage{fullpage} -- This package is specifically forbidden
+% \usepackage{geometry} -- This package is specifically forbidden
+% \usepackage{grffile} -- This package is specifically forbidden
+% \usepackage{hyperref} -- This package is specifically forbidden
+% \usepackage{navigator} -- This package is specifically forbidden
+% (or any other package that embeds links such as navigator or hyperref)
+% \indentfirst} -- This package is specifically forbidden
+% \layout} -- This package is specifically forbidden
+% \multicol} -- This package is specifically forbidden
+% \nameref} -- This package is specifically forbidden
+% \usepackage{savetrees} -- This package is specifically forbidden
+% \usepackage{setspace} -- This package is specifically forbidden
+% \usepackage{stfloats} -- This package is specifically forbidden
+% \usepackage{tabu} -- This package is specifically forbidden
+% \usepackage{titlesec} -- This package is specifically forbidden
+% \usepackage{tocbibind} -- This package is specifically forbidden
+% \usepackage{ulem} -- This package is specifically forbidden
+% \usepackage{wrapfig} -- This package is specifically forbidden
+% DISALLOWED COMMANDS
+% \nocopyright -- Your paper will not be published if you use this command
+% \addtolength -- This command may not be used
+% \balance -- This command may not be used
+% \baselinestretch -- Your paper will not be published if you use this command
+% \clearpage -- No page breaks of any kind may be used for the final version of your paper
+% \columnsep -- This command may not be used
+% \newpage -- No page breaks of any kind may be used for the final version of your paper
+% \pagebreak -- No page breaks of any kind may be used for the final version of your paperr
+% \pagestyle -- This command may not be used
+% \tiny -- This is not an acceptable font size.
+% \vspace{- -- No negative value may be used in proximity of a caption, figure, table, section, subsection, subsubsection, or reference
+% \vskip{- -- No negative value may be used to alter spacing above or below a caption, figure, table, section, subsection, subsubsection, or reference
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{amsfonts}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{placeins}
+\newcommand{\algbreak}{\allowbreak} % safe break point in long math
+% --- AAAI-style algorithmic cosmetics (safe) ---
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
+\newcommand{\algsmall}{\footnotesize}
+\newcommand{\one}{\mathbf{1}}
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\second}[1]{\underline{#1}}
+\makeatletter
+\let\cmtflowoldthebibliography\thebibliography
+\let\cmtflowoldendthebibliography\endthebibliography
+\renewenvironment{thebibliography}[1]{%
+  \cmtflowoldthebibliography{#1}%
+  \small
+  \setlength{\itemsep}{0pt}%
+  \setlength{\parsep}{0pt}%
+  \setlength{\parskip}{0pt}%
+}{\cmtflowoldendthebibliography}
+\makeatother
+\setcounter{secnumdepth}{0} %May be changed to 1 or 2 if section numbers are desired.
+
+% The file aaai2026.sty is the style file for AAAI Press
+% proceedings, working notes, and technical reports.
+%
+
+% Title
+
+% Your title must be in mixed case, not sentence case.
+% That means all verbs (including short verbs like be, is, using,and go),
+% nouns, adverbs, adjectives should be capitalized, including both words in hyphenated terms, while
+% articles, conjunctions, and prepositions are lower case unless they
+% directly follow a colon or long dash
+\title{\textit{CMTFlow}: Hierarchical Portfolio Management with Controller-Guided Base Revision and Daily Refinement}
+\author{
+    Anonymous Authors
+}
+\affiliations{
+    Anonymous Affiliation
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Portfolio management in non-stationary financial markets requires decisions at multiple temporal scales: a strategy must decide when an existing holding state has become stale, which base portfolio should anchor the next holding segment, and how daily weights should be refined around that base. Existing reinforcement learning methods usually compress these roles into a unified daily allocation policy or impose a fixed rebalancing schedule, which makes the policy either noisy or slow to react. We propose \textit{CMTFlow}, a hierarchical portfolio management framework that couples an outer actor, an inner actor, and a trainable controller. The outer actor constructs a sparse segment-level base portfolio, the inner actor performs support-constrained daily weight refinement around this base, and the controller learns a hold/switch policy that terminates the current base when the current holding state and the candidate replacement justify revision. Training follows the actual end-to-end path used in our experiments: a fixed-segment HRL warmup stabilizes the outer/inner backbone, counterfactual policy-gradient rollouts train the controller from realized investment consequences, and a final controller-active joint finetune updates the controller, outer actor, and inner actor under the daily decision protocol used at evaluation. Experiments on Nasdaq-100 and CSI-300 show that \textit{CMTFlow} achieves a favorable high-return and controlled-drawdown trade-off against matched traditional and deep RL baselines. Additional ablations and interpretability studies show that the controller is the dominant source of adaptive revision behavior, while the inner actor provides local within-holding-period allocation refinement.
+\end{abstract}
+
+% Uncomment the following to link to your code, datasets, an extended version or similar.
+% You must keep this block between (not within) the abstract and the main body of the paper.
+% \begin{links}
+%     \link{Code}{https://aaai.org/example/code}
+%     \link{Datasets}{https://aaai.org/example/datasets}
+%     \link{Extended version}{https://aaai.org/example/extended-version}
+% \end{links}
+\section{Introduction}
+
+Portfolio management (PM) aims to allocate capital across assets under uncertainty and trading constraints to maximize long-horizon risk-adjusted returns. Classical approaches, such as mean--variance optimization \citep{MVO} and the Capital Asset Pricing Model \citep{CAMP}, laid the foundation for modern asset allocation, while heuristic rebalancing and threshold-based rebalancing rules remain widely used in practice to control portfolio deviation, turnover, and risk exposure \citep{Perold1988DynamicSF,9}. However, these approaches typically rely on static assumptions, single-period reasoning, or manually specified rebalancing schedules, and thus often adapt too slowly in non-stationary markets where return distributions shift, asset relationships evolve, and portfolio effectiveness may deteriorate unevenly over time.
+
+Recent reinforcement learning (RL) methods provide a promising alternative by formulating PM as a sequential decision problem and directly optimizing long-horizon investment objectives. Existing studies have shown strong potential in end-to-end portfolio construction, cross-asset dependency modeling, market-aware representation learning, and interpretability \citep{4,5,6,8,alphastock}, while hierarchical or adaptive RL has also been explored to improve flexibility in portfolio selection or trading \citep{25}. Despite this progress, current methods still provide limited explicit and unified treatment of several aspects that are central to practical portfolio management. Specifically, unified daily-allocation policies mainly focus on generating portfolio weights at each decision step and thus often compress medium-horizon base-portfolio construction and daily refinement into the same process. Fixed-frequency update schemes improve stability but make portfolio revision timing largely exogenous and therefore less responsive to abrupt market changes or deterioration in the support of the active base portfolio.
+
+These limitations point to a more fundamental challenge in PM: beyond learning better portfolio weights, an effective system must organize portfolio decisions according to their distinct roles and temporal scales. In real investment practice, investors typically construct portfolios according to their expectations of which assets are likely to perform well over the next holding segment; traders then adjust positions based on newly arriving price--volume information and short-term fluctuations; and when the behavior of the active base portfolio changes abruptly, the base portfolio should be revised in time rather than merely fine-tuned at the daily level. This suggests that effective PM should explicitly coordinate three coupled decisions: \emph{when} to revise the active base portfolio, \emph{what} base portfolio to hold over the next holding segment, and \emph{how} to perform daily refinement around that base portfolio.
+
+We propose \textit{CMTFlow}, a hierarchical portfolio management framework where a \emph{controller}, an \emph{outer actor}, and an \emph{inner actor} interact in a coordinated decision flow to determine when to revise the active base portfolio, what base portfolio to hold, and how to refine execution daily. The outer actor constructs a segment-level base portfolio for the next holding segment, the inner actor performs support-constrained daily refinement around the active base portfolio, and the controller decides whether the current base should be held or replaced by the outer actor's candidate portfolio. A key innovation of \textit{CMTFlow} is that portfolio revision is modeled as a trainable hold/switch decision rather than as a fixed calendar schedule. The controller conditions on short-window market features, embeddings of the drifted current holding and the outer candidate portfolio, holding-age, segment-return, and drawdown states, and pairwise action features such as turnover, concentration, and overlap to output an exit probability. By explicitly separating base-portfolio revision, segment-level allocation, and daily refinement, \textit{CMTFlow} reframes PM as a coordinated multi-scale decision process rather than a monolithic daily weighting problem.
+
+Experiments on Nasdaq-100 and CSI-300 show that \textit{CMTFlow} improves the overall risk-return trade-off against representative traditional strategies and deep RL baselines. More specifically, \textit{CMTFlow} achieves the highest matched total return on Nasdaq-100 and the best Sharpe ratio on CSI-300, while keeping maximum drawdown substantially lower than high-return but volatile competitors. The ablation results further show that the controller contributes the dominant improvement over fixed-segment HRL and fixed-window switching variants, indicating that the advantage of \textit{CMTFlow} comes not merely from adding more policy layers, but from explicitly learning \emph{when base-portfolio revision should occur} and coordinating this decision with segment-level allocation and daily refinement.
+
+We summarize our contributions as follows:
+\begin{itemize}
+    \item We identify a mismatch between practical portfolio management and existing formulations, and show that effective control in non-stationary markets requires explicit coordination of base-portfolio revision timing, segment-level base-portfolio construction, and daily refinement.
+    \item We propose \textit{CMTFlow}, a hierarchical portfolio management framework organized around a controller, an outer actor, and an inner actor, which explicitly coordinates \emph{when to revise the active base portfolio}, \emph{what base portfolio to hold}, and \emph{how to perform daily refinement} within one unified decision architecture and a controller-active end-to-end finetuning stage.
+    \item We introduce a trainable hold/switch controller for adaptive base-portfolio revision, and experiments on \textit{Nasdaq-100} and \textit{CSI-300} show that \textit{CMTFlow} improves the high-return/controlled-drawdown trade-off against matched baselines, fixed-window controllers, and architectural ablations.
+\end{itemize}
+
+\section{Related Work}
+\subsection{Classical Portfolio Optimization and Heuristic Rebalancing}
+Modern portfolio theory is rooted in the mean--variance optimization framework \citep{MVO}, while the Capital Asset Pricing Model (CAPM) provides an equilibrium-based interpretation of asset pricing and risk compensation \citep{CAMP}. These classical approaches typically rely on distributional stationarity or single-period assumptions, which limit their applicability under non-stationary financial time series with evolving market regimes. As a result, heuristic rebalancing rules remain an important practical mechanism for portfolio adjustment.
+
+Research on dynamic asset allocation suggests that fixed rebalancing rules can become misaligned with changing market conditions \citep{Perold1988DynamicSF}. Opportunistic rebalancing discusses condition-triggered adjustment ideas and the trade-off between deviation thresholds and transaction costs for reducing unnecessary turnover \citep{9}. Meanwhile, transaction costs play a critical role in portfolio optimization and must be modeled explicitly in the decision process \citep{10}.
+
+\subsection{Reinforcement Learning for Portfolio Management}
+Reinforcement learning (RL) provides a sequential decision-making framework for portfolio management. Early works such as PGPortfolio demonstrated the feasibility of end-to-end portfolio weight generation via policy gradient methods \citep{4}, while FinRL systematized RL-based trading and portfolio management into a reusable toolkit \citep{5}.
+
+In terms of risk control and cost modeling, some studies incorporate maximum drawdown and other downside-risk measures into the learning objective \citep{11}, while others explore RL formulations that account for transaction costs and related portfolio constraints \citep{23}. Cost-sensitive deep RL frameworks have also been proposed to explicitly account for trading frictions in portfolio learning \citep{24}.
+
+From the perspective of model architecture, DeepTrader incorporates market-condition representations into portfolio learning \citep{6}, while methods such as HADAPS explore hierarchical and adaptive architectures for multi-asset portfolio learning \citep{25}. Regarding interpretability and cross-asset relationship modeling, AlphaStock integrates cross-asset attention with interpretability analysis to model relative-strength relationships across assets \citep{alphastock}. In terms of knowledge integration and exploration, Investor-Imitator enhances policy learning through imitation learning and knowledge extraction mechanisms \citep{8}.
+
+The closest line of work to \textit{CMTFlow} is adaptive or hierarchical portfolio learning. These methods improve flexibility over a single fixed allocation rule, but they usually do not explicitly maintain the active base portfolio as a persistent memory state that can be held, drifted, or replaced. \textit{CMTFlow} differs by training a controller to decide when this base memory should be replaced by a candidate outer portfolio, while the inner actor is restricted to support-constrained tilting inside the active base. This separates revision timing, segment-level base construction, and daily refinement rather than learning only an adaptive interval or a single daily allocation policy.
+
+\section{Problem Formulation}
+We consider portfolio management over a finite investment horizon of $T$ trading days, indexed by $t=0,1,\dots,T-1$. Let the candidate stock universe consist of $M$ tradable assets indexed by $i\in\{1,\dots,M\}$. For each asset $i$, let $c_{i,t}$ denote its closing price on trading day $t$.
+
+For each trading day $t$, we define the close-to-close price-relative vector as
+\[
+\mathbf{y}_t
+=
+\left(
+\frac{c_{1,t+1}}{c_{1,t}},
+\dots,
+\frac{c_{M,t+1}}{c_{M,t}}
+\right)^\top,
+\]
+where the $i$-th entry represents the gross return of asset $i$ from day $t$ to day $t+1$.
+
+At the end of each trading day $t$, the investor determines a portfolio weight vector
+\[
+\mathbf{w}_t = (w_{1,t},\dots,w_{M,t})^\top \in \mathbb{R}^M,
+\]
+where $w_{i,t}\ge 0$ denotes the fraction of total capital allocated to asset $i$, and $w_{i,t}=0$ indicates that asset $i$ is not held at day $t$. We consider fully invested long-only portfolios, and therefore require
+\[
+\mathbf{1}^\top \mathbf{w}_t = 1,\qquad \mathbf{w}_t \ge 0.
+\]
+
+At $t=0$, the investor starts with initial capital $V_0$ and allocates it according to the initial portfolio decision. More generally, let $V_t$ denote the total portfolio value immediately after the portfolio decision made on trading day $t$.
+
+In practice, the portfolio carried into day $t$ is generally not identical to the portfolio determined at day $t-1$, even if no active reallocation is made, because relative price movements change the exposure of each held asset. To characterize this effect, we introduce the portfolio drift operator
+\[
+\mathcal{D}(\mathbf{w},\mathbf{y})
+=
+\frac{\mathbf{y}\odot \mathbf{w}}{\mathbf{y}^\top \mathbf{w}},
+\]
+where $\odot$ denotes element-wise multiplication. The drifted portfolio carried into day $t$ is therefore written as
+\[
+\tilde{\mathbf{w}}_t
+=
+\mathcal{D}(\mathbf{w}_{t-1},\mathbf{y}_{t-1}).
+\]
+
+At day $t$, the investor may rebalance the drifted portfolio $\tilde{\mathbf{w}}_t$ into a new portfolio decision $\mathbf{w}_t$. Let $\rho\in[0,1)$ denote the transaction fee rate. The corresponding transaction cost factor is defined as
+\[
+\mu_t
+=
+1-\rho\|\mathbf{w}_t-\tilde{\mathbf{w}}_t\|_1,
+\]
+where $\|\mathbf{w}_t-\tilde{\mathbf{w}}_t\|_1$ measures the turnover required to move from the drifted portfolio to the new portfolio decision.
+
+Given the portfolio decision $\mathbf{w}_t$, the portfolio value evolves according to
+\[
+V_{t+1} = V_t\,\mu_t\, \mathbf{y}_t^\top \mathbf{w}_t.
+\]
+That is, the one-step portfolio return is given by the weighted average of the asset-wise close-to-close price relatives under $\mathbf{w}_t$, adjusted by the transaction cost induced by reallocation from the drifted portfolio.
+
+Under the above formulation, portfolio management amounts to finding a feasible sequence of portfolio decisions $\{\mathbf{w}_t\}_{t=0}^{T-1}$ that maximizes the terminal portfolio value. Formally, the optimization objective is
+\[
+\begin{aligned}
+\{\mathbf{w}_t^*\}_{t=0}^{T-1}
+&= \arg\max_{\{\mathbf{w}_t\}_{t=0}^{T-1}} V_T
+\end{aligned}
+\].
+
+\section{Methodology}
+The difficulty of solving for \(\mathbf{w}_t\) lies in the inherently coupled multi-scale nature of portfolio construction: a purely daily policy is easily dominated by short-term noise, a purely low-frequency policy may overlook day-level refinement opportunities, and a fixed holding segment cannot adequately adapt to evolving market conditions. Consequently, effective optimization of \(\mathbf{w}_t\) requires jointly resolving three coupled decisions: when to revise the active base portfolio, what base portfolio to hold over the next segment, and how to perform daily refinement.
+
+To address these challenges, and motivated by the role-decomposition view in active portfolio management \citep{kahn1999active}, \textit{CMTFlow} adopts a hierarchical architecture for sequential portfolio optimization and constructs the executed portfolio sequence \(\{\mathbf{w}_t\}_{t=0}^{T-1}\) to maximize terminal wealth. The environment objective is terminal wealth, while the actor and controller rewards below use risk-adjusted or relative-return signals to stabilize learning under transaction costs. As illustrated in Figure~\ref{fig:framework}, \textit{CMTFlow} organizes this optimization process into three coordinated components: a controller for base-portfolio revision, which determines when the current base portfolio should be replaced; an outer actor for segment-level base-portfolio construction, which generates a sparse low-frequency portfolio to be held as the core allocation over the next holding period; and an inner actor for daily refinement, which performs day-level weight adjustment around the active base portfolio while preserving the selected asset support. The controller is not a post-hoc rule attached to a separately fixed policy stack: after fixed-segment warmup and controller policy-gradient learning, the final checkpoint is obtained through controller-active joint finetuning of all three modules. This structured decomposition better matches the multi-scale nature of portfolio management and improves the balance among trend capture, daily adaptability, and risk control.
+
+For consistency with the implementation notation, we use ``manager'' and ``trader'' in several equations and appendix details; these correspond respectively to the outer actor and inner actor described in the experiments.
+
+Under this formulation, the investment horizon is divided by a sequence of segment boundaries
+\[
+0=\tau_0<\tau_1<\cdots<\tau_K\le T,
+\]
+where the \(k\)-th holding segment is \([\tau_k,\tau_{k+1})\). At each boundary time \(t=\tau_k\), the manager is invoked once to produce a segment-level base portfolio \(\mathbf{w}_{\tau_k}^{\mathrm{mgr}}\in\Delta^M\), where \(w_{i,\tau_k}^{\mathrm{mgr}}>0\) indicates that asset \(i\) is selected, and its value specifies the capital allocation ratio of that asset over the next holding segment. Between two consecutive revision points, this base portfolio is not re-optimized, but instead evolves passively with market returns according to the drift mechanism defined in the problem formulation. The active base portfolio at day \(t\) is therefore defined by
+\[
+\mathbf{w}_t^{\mathrm{base}}=
+\begin{cases}
+\mathbf{w}_t^{\mathrm{mgr}}, & t\in\mathcal{T}^{\mathrm{mgr}},\\[4pt]
+\mathcal{D}(\mathbf{w}_{t-1}^{\mathrm{base}},\mathbf{y}_{t-1}), & t\notin\mathcal{T}^{\mathrm{mgr}},
+\end{cases}
+\]
+where \(\mathcal{T}^{\mathrm{mgr}}=\{\tau_k\}_{k=0}^{K}\) denotes the set of manager decision points. Within an active segment, the trader acts at each trading day to perform daily refinement around \(\mathbf{w}_t^{\mathrm{base}}\), producing a refinement portfolio \(\mathbf{w}_t^{\mathrm{trd}}\). The final executed portfolio is then constructed as
+\[
+\mathbf{w}_t=(1-\alpha)\mathbf{w}_t^{\mathrm{base}}+\alpha\mathbf{w}_t^{\mathrm{trd}},
+\]
+where \(\alpha\in[0,1]\) controls the strength of daily refinement.
+
+A key property of \textit{CMTFlow} is that segment boundaries are determined adaptively rather than fixed in advance. Since the effectiveness of the active base portfolio may deteriorate unevenly over time, base-portfolio revision should be governed by the evolving state of the held base portfolio rather than by calendar time alone. \textit{CMTFlow} therefore updates the segment boundary only when revision is triggered by the controller: once a revision occurs, a new base portfolio is generated and a new segment begins; otherwise, the current base portfolio is carried forward and daily refinement continues within the existing segment.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/cmtflow_three_modules_imagegen.pdf}
+\caption{\textbf{\textit{CMTFlow} decision modules.} The controller, outer actor, and inner actor form three complementary decision modules. The controller fuses recent market sequences, current holding state, candidate replacement state, and candidate action features to output a hold/switch probability; the outer actor encodes market windows to select and allocate a sparse base portfolio; and the inner actor applies support-constrained daily adjustments around the active base portfolio.}
+\label{fig:framework}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/cmtflow_decision_flow_imagegen.pdf}
+\caption{\textbf{\textit{CMTFlow} daily decision flow.} At each evaluation day, the controller decides whether to keep the current base portfolio or switch to a new base generated by the outer actor. The inner actor then refines the active base into the executed portfolio, and realized return/risk feedback updates the next market state.}
+\label{fig:decision_flow}
+\end{figure*}
+
+\subsection{Hierarchical Allocation and Refinement}
+
+Given the segment boundaries determined by the controller, \textit{CMTFlow} constructs portfolios through two coordinated decision layers operating at different temporal resolutions. The key idea is not merely to decompose decisions by frequency, but to separate two functionally distinct roles: \textbf{segment-level base portfolio construction} and \textbf{support-constrained daily refinement}. This separation is important because stable segment-level base allocation and short-horizon daily refinement respond to different signals and should not be optimized under the same objective at the same granularity.
+
+\paragraph{Manager: Segment-Level Base Portfolio Construction.}
+At each segment boundary \(t=\tau_k\), the manager observes a state
+\[
+s^{\mathrm{mgr}}_{\tau_k}
+=
+\bigl\{\mathbf{X}^{\mathrm{mgr}}_{\tau_k},\tilde{\mathbf{w}}_{\tau_k}\bigr\},
+\]
+where \(\mathbf{X}^{\mathrm{mgr}}_{\tau_k}\) summarizes long-horizon multi-asset market information up to \(\tau_k\), and \(\tilde{\mathbf{w}}_{\tau_k}\) is the drifted executed portfolio carried into the current decision point. Based on this state, the manager outputs a new base portfolio \(\mathbf{w}^{\mathrm{mgr}}_{\tau_k}\). The role of the manager is not to react to daily fluctuations, but to construct a stable segment-level allocation that remains meaningful over the subsequent holding segment.
+
+Accordingly, the manager is formulated as a segment-level Markov decision process
+\[
+\mathcal{M}^{\mathrm{mgr}}
+=
+\bigl(
+\mathcal{S}^{\mathrm{mgr}},
+\mathcal{A}^{\mathrm{mgr}},
+\mathcal{R}^{\mathrm{mgr}},
+\gamma^{\mathrm{mgr}},
+\pi^{\mathrm{mgr}}
+\bigr),
+\]
+where \(\mathcal{S}^{\mathrm{mgr}}\), \(\mathcal{A}^{\mathrm{mgr}}\), and \(\mathcal{R}^{\mathrm{mgr}}\) denote the state, action, and reward spaces, \(\gamma^{\mathrm{mgr}}\) is the discount factor, and \(\pi^{\mathrm{mgr}}\) is the manager policy. In implementation, the manager maps the segment-level input
+\[
+s_{\tau_k}^{\mathrm{mgr}}
+=
+\bigl(
+\mathbf{X}_{\tau_k}^{\mathrm{mgr}},
+\tilde{\mathbf{w}}_{\tau_k}
+\bigr)
+\]
+to an asset-wise score vector through
+\[
+\mathbf{q}_{\tau_k}^{\mathrm{mgr}}
+=
+\mathcal{F}_{\mathrm{mgr}}
+\!\left(
+s_{\tau_k}^{\mathrm{mgr}};
+\Theta_{\mathrm{mgr}}
+\right)
+\in\mathbb{R}^{M},
+\]
+where \(\mathcal{F}_{\mathrm{mgr}}(\cdot)\) denotes the manager scoring network, implemented by an \textbf{LSTM-HA} \citep{alphastock} encoder for long-horizon asset-wise temporal modeling, followed by a \textbf{CAAN} \citep{alphastock} module for cross-asset dependency modeling and an \textbf{MLP} policy head for score generation, and \(\Theta_{\mathrm{mgr}}\) collects the corresponding learnable parameters. The output
+\[
+\mathbf{q}_{\tau_k}^{\mathrm{mgr}}
+=
+(q_{1,\tau_k}^{\mathrm{mgr}},\dots,q_{M,\tau_k}^{\mathrm{mgr}})^\top
+\]
+assigns a score to each asset in the stock universe.
+
+To construct a sparse long-only base portfolio, only the Top-\(K\) assets with the largest scores are retained. Let \(\mathcal{I}_{\tau_k}=\mathrm{TopK}(\mathbf{q}^{\mathrm{mgr}}_{\tau_k},K)\) denote the index set of the selected assets. The final base portfolio is then given by
+\[
+w_{i,\tau_k}^{\mathrm{mgr}}
+=
+\begin{cases}
+\dfrac{\exp(q_{i,\tau_k}^{\mathrm{mgr}})}
+{\sum_{j\in\mathcal{I}_{\tau_k}}
+\exp(q_{j,\tau_k}^{\mathrm{mgr}})},
+& i\in\mathcal{I}_{\tau_k},\\[10pt]
+0, & \text{otherwise},
+\end{cases}
+\]
+which converts asset-wise scores into a sparse long-only segment-level base portfolio through score-based selection and normalized capital allocation. In this way, the manager transforms long-horizon market context into a segment-level base portfolio rather than a day-level trading action.
+
+The manager reward is defined at the segment level as
+\[
+r^{\mathrm{mgr}}_{\tau_k}
+=
+J\!\left(\mathbf{w}^{\mathrm{mgr}}_{\tau_k};\tau_k\right)
+-
+J\!\left(\mathbf{w}^{\mathrm{ew}};\tau_k\right),
+\]
+where \(J(\mathbf{w};\tau_k)\) denotes the Sharpe ratio over the holding segment \([\tau_k,\tau_{k+1})\), defined by
+\[
+J(\mathbf{w};\tau_k)
+=
+\frac{
+\mu\!\left(r_{\tau_k:\tau_{k+1}}(\mathbf{w})\right)
+}{
+\sigma\!\left(r_{\tau_k:\tau_{k+1}}(\mathbf{w})\right)+\varepsilon_J
+},
+\quad
+r_t(\mathbf{w})=\mathbf{y}_t^\top\mathbf{w}-1,
+\]
+with \(\mu(\cdot)\) and \(\sigma(\cdot)\) denoting the sample mean and sample standard deviation of the segment return sequence, respectively, and \(\varepsilon_J>0\) a small constant for numerical stability. Here \(\mathbf{w}^{\mathrm{ew}}\) is the equal-weight portfolio with \(w_i^{\mathrm{ew}}=1/M\). By evaluating risk-adjusted improvement over the entire holding segment, the manager is encouraged to produce base portfolios that remain robust under varying market conditions rather than benefiting only from favorable short-term fluctuations. Further implementation details of the manager architecture and base-portfolio construction are deferred to Appendix~\ref{app:hier_manager}.
+
+\paragraph{Trader: Support-Constrained Daily Refinement.}
+Within each active segment, the trader acts at every trading day \(t\) based on a short-horizon refinement state
+\[
+s_t^{\mathrm{trd}}
+=
+\bigl\{\mathbf{X}^{\mathrm{trd}}_t,\tilde{\mathbf{w}}_t,\mathbf{w}^{\mathrm{base}}_t\bigr\},
+\]
+where \(\mathbf{X}^{\mathrm{trd}}_t\) encodes recent market observations, \(\tilde{\mathbf{w}}_t\) is the current drifted executed portfolio, and \(\mathbf{w}^{\mathrm{base}}_t\) is the active base portfolio. Unlike a free-form daily trading policy, the trader is explicitly constrained to refine only within the support set of the active base portfolio. This restriction is crucial: it preserves the manager’s segment-level allocation role while still allowing the trader to exploit short-horizon return asymmetries within the current segment.
+
+Accordingly, the trader is formulated as a daily Markov decision process
+\[
+\mathcal{M}^{\mathrm{trd}}
+=
+\bigl(
+\mathcal{S}^{\mathrm{trd}},
+\mathcal{A}^{\mathrm{trd}},
+\mathcal{R}^{\mathrm{trd}},
+\gamma^{\mathrm{trd}},
+\pi^{\mathrm{trd}}
+\bigr),
+\]
+where \(\mathcal{S}^{\mathrm{trd}}\), \(\mathcal{A}^{\mathrm{trd}}\), and \(\mathcal{R}^{\mathrm{trd}}\) denote the state, action, and reward spaces, \(\gamma^{\mathrm{trd}}\) is the discount factor, and \(\pi^{\mathrm{trd}}\) is the trader policy. In implementation, the trader maps the day-level state \(s_t^{\mathrm{trd}}\) to an asset-wise refinement score vector through
+\[
+\mathbf{q}_t^{\mathrm{trd}}
+=
+\mathcal{F}_{\mathrm{trd}}
+\!\left(
+\mathbf{X}_t^{\mathrm{trd}},\tilde{\mathbf{w}}_t,\mathbf{w}_t^{\mathrm{base}};
+\Theta_{\mathrm{trd}}
+\right)
+\in\mathbb{R}^{M},
+\]
+where \(\mathcal{F}_{\mathrm{trd}}(\cdot)\) denotes the trader refinement network. In the implementation used for the reported experiments, this network is an asset-wise \textbf{LSTM-attention} encoder: a two-layer LSTM encodes each asset's short market window, two temporal attention layers query the sequence using the latest hidden state, and the resulting asset embedding is fused with the active base weight and drifted current weight before the actor head generates refinement scores. The output \(\mathbf{q}_t^{\mathrm{trd}}=(q_{1,t}^{\mathrm{trd}},\dots,q_{M,t}^{\mathrm{trd}})^\top\) assigns a refinement score to each asset at day \(t\).
+
+To preserve the structural role of the manager, the trader is constrained to refine only the support of the active base portfolio. Let
+\[
+m_{i,t}
+=
+\mathbb{I}\!\left(w_{i,t}^{\mathrm{base}}>0\right)
+\]
+be the support mask induced by \(\mathbf{w}_t^{\mathrm{base}}\). The refinement portfolio is then given by
+\[
+w_{i,t}^{\mathrm{trd}}
+=
+\frac{
+m_{i,t}\exp(q_{i,t}^{\mathrm{trd}})
+}{
+\sum_{j=1}^{M} m_{j,t}\exp(q_{j,t}^{\mathrm{trd}})
+},
+\]
+which produces a support-constrained local adjustment around the active base portfolio rather than reconstructing the entire allocation from scratch. The final executed portfolio is obtained through
+\[
+\mathbf{w}_t
+=
+(1-\alpha)\mathbf{w}_t^{\mathrm{base}}
++
+\alpha\mathbf{w}_t^{\mathrm{trd}},
+\]
+where \(\alpha\in[0,1]\) controls the refinement strength. Further implementation details of the trader architecture and refinement construction are deferred to Appendix~\ref{app:hier_trader}.
+
+The trader reward measures the incremental contribution of daily refinement relative to the active base portfolio:
+\[
+r_t^{\mathrm{trd}}
+=
+\log\!\left(
+\frac{\mathbf{y}_t^\top \mathbf{w}_t}
+{\mathbf{y}_t^\top \mathbf{w}_t^{\mathrm{base}}}
+\right)
+-
+\rho \|\mathbf{w}_t-\tilde{\mathbf{w}}_t\|_1,
+\]
+where \(\rho\) is the transaction cost coefficient. By measuring refinement value relative to the current base portfolio rather than in absolute terms, this reward encourages the trader to extract short-horizon incremental gains beyond the existing base portfolio while remaining cost-aware.
+
+
+\subsection{Controller-Guided Strategic Revision}
+
+Beyond deciding \emph{what} base portfolio to hold and \emph{how} to perform daily refinement, \textit{CMTFlow} must also determine \emph{when} the active base portfolio should be revised. Fixed holding periods are inadequate: delayed revision may leave the portfolio tied to an obsolete base, whereas overly frequent revision can undermine base-portfolio stability and increase transaction cost. The controller therefore acts as a trainable event gate: it does not directly allocate capital, but decides whether to keep the current base portfolio or switch to the candidate base portfolio proposed by the outer actor.
+
+\paragraph{Controller State and Exit Probability.}
+At each day \(t\), the controller observes both the current holding state and the candidate replacement state. Let \(\tilde{\mathbf{w}}_t\) denote the drifted executed portfolio and \(\mathbf{w}_t^{\mathrm{cand}}\) denote the candidate base portfolio generated by the outer actor. The controller normalizes them as \(\bar{\mathbf{w}}_t=\mathrm{norm}(\tilde{\mathbf{w}}_t)\) and \(\bar{\mathbf{w}}_t^{\mathrm{cand}}=\mathrm{norm}(\mathbf{w}_t^{\mathrm{cand}})\). It then uses the last \(H_{\mathrm{ctrl}}\) days of a causal market window \(\mathbf{X}_{t}^{\mathrm{ctrl}}\), a compact holding-state vector
+\[
+\mathbf{u}_t
+=
+\begin{bmatrix}
+d_t/H_{\mathrm{ref}},\;1-d_t/H_{\mathrm{ref}},\;
+\tanh(R_t^{\mathrm{seg}}/s_R),\\
+\tanh(D_t^{\mathrm{seg}}/s_D),\;
+\|\bar{\mathbf{w}}_t\|_2^2
+\end{bmatrix},
+\]
+and candidate action features
+\[
+\begin{aligned}
+\mathbf{a}^{\mathrm{ctrl}}_t
+&=
+\bigl[
+\Delta_t^{\mathrm{turn}},\;
+\Delta_t^{\mathrm{conc}},\;
+\Delta_t^{\mathrm{ovlp}}
+\bigr],\\
+\Delta_t^{\mathrm{turn}}
+&=\|\bar{\mathbf{w}}_t^{\mathrm{cand}}-\bar{\mathbf{w}}_t\|_1,\\
+\Delta_t^{\mathrm{conc}}
+&=\|\bar{\mathbf{w}}_t^{\mathrm{cand}}\|_2^2,\\
+\Delta_t^{\mathrm{ovlp}}
+&=\sum_i \min(\bar{w}_{i,t}^{\mathrm{cand}},\bar{w}_{i,t}),
+\end{aligned}
+\]
+which summarize candidate turnover, candidate concentration, and support overlap with the current holding. Here \(d_t\) is the age of the current holding segment, \(H_{\mathrm{ref}}\) is the fixed reference horizon used to normalize holding age, \(R_t^{\mathrm{seg}}\) is the segment return, \(D_t^{\mathrm{seg}}\) is the segment drawdown, and \(s_R,s_D\) are scaling constants.
+
+The candidate state is encoded explicitly rather than treated as an external post-processing option. The controller first applies a one-layer asset-wise LSTM to the recent market window. It then uses two temporal attention blocks: a portfolio-state query extracts context from the whole asset sequence, and a second per-asset attention refines this context before current-holding and candidate summaries are formed as
+\[
+\mathbf{m}^{\mathrm{hold}}_t=\sum_i \bar{w}_{i,t}\mathbf{e}_{i,t},
+\quad
+\mathbf{m}^{\mathrm{cand}}_t=\sum_i \bar{w}_{i,t}^{\mathrm{cand}}\mathbf{e}_{i,t},
+\]
+with analogous attention summaries \(\mathbf{c}^{\mathrm{hold}}_t\) and \(\mathbf{c}^{\mathrm{cand}}_t\). The final controller feature is
+\[
+\begin{aligned}
+\Delta\mathbf{m}_t&=\mathbf{m}^{\mathrm{cand}}_t-\mathbf{m}^{\mathrm{hold}}_t,\\
+\Delta\mathbf{c}_t&=\mathbf{c}^{\mathrm{cand}}_t-\mathbf{c}^{\mathrm{hold}}_t,\\
+\mathbf{v}^{\mathrm{ctrl}}_t
+&=
+\bigl[
+\mathbf{m}^{\mathrm{hold}}_t,\;
+\mathbf{c}^{\mathrm{hold}}_t,\;
+\Delta\mathbf{m}_t,\;
+\Delta\mathbf{c}_t,\;
+\mathbf{u}_t,\;
+\mathbf{a}^{\mathrm{ctrl}}_t
+\bigr].
+\end{aligned}
+\]
+Thus, the controller does not only judge whether the current holding has deteriorated; it also compares that holding with the specific candidate portfolio proposed by the outer actor. A multilayer head maps \(\mathbf{v}^{\mathrm{ctrl}}_t\) to a base exit logit \(e_t^{\mathrm{base}}\) and an auxiliary switch-advantage estimate \(\widehat{A}^{\mathrm{sw}}_t\). In the final configuration, the switch-advantage estimate is used as a bounded logit modulation,
+\[
+e_t
+=
+e_t^{\mathrm{base}}
++\lambda_A\tanh(\widehat{A}^{\mathrm{sw}}_t/s_A),
+\]
+and the switch probability is
+\[
+\pi_t^{\mathrm{exit}}=\sigma(e_t).
+\]
+During stochastic training, the hold/switch action \(g_t\in\{0,1\}\) is sampled from a categorical distribution induced by this logit; during evaluation, the controller switches when \(\pi_t^{\mathrm{exit}}\) exceeds the evaluation threshold under the same daily decision protocol used in the final joint finetuning stage.
+
+\paragraph{Controller Decisions and Segment Boundaries.}
+In the final evaluation protocol, the trained controller is checked daily. Let \(d_t=t-\tau_k\) be the age of the current holding segment. Unlike the fixed actor-training schedule, the evaluation controller does not use hard minimum- or maximum-holding constraints; after the initial position is formed, it can make a free hold/switch decision at every trading day. Segment boundaries are therefore updated by
+\[
+\tau_{k+1}\leftarrow t
+\quad\text{if and only if}\quad
+g_t=1.
+\]
+This design leaves the actual revision timing to the learned controller rather than to a rule-based holding cap. In the final experiments, the controller is evaluated with a decision stride of one trading day and a probability threshold of 0.5. The fixed 30-day schedule is used to stabilize HRL warmup and to provide a reference path for controller optimization, but it is not used as the final decision rule. Fixed 5/10/20/30/60-day controllers are used only as ablation baselines.
+
+\paragraph{Controller Training Objective.}
+The outer and inner actors are first warmed up under fixed holding segments so that they provide a stable HRL backbone. The controller is then trained with counterfactual policy gradients over controller-active rollouts, without external switch labels. For a rollout \(\xi\), let \(C\) denote the controlled path induced by sampled controller decisions and \(B\) denote the fixed-segment reference path. The controller reward is defined from relative log-return improvement with a penalty for excessive switching:
+\[
+R_{\xi}^{\mathrm{ctrl}}
+=
+\lambda_R\bigl(\log V_T^{C}-\log V_T^{B}\bigr)
+-
+\lambda_N\,\Omega(N_C),
+\]
+where \(N_C\) is the number of free switches in the controlled rollout and \(\Omega(\cdot)\) penalizes overflow beyond the allowed switching budget. The stochastic controller is optimized with a REINFORCE-style objective
+\[
+\mathcal{L}_{\mathrm{ctrl}}^{\mathrm{pg}}
+=
+-\mathbb{E}_{\xi}\!\left[
+R_{\xi}^{\mathrm{ctrl}}
+\sum_{t\in\xi}\log\pi_{\psi}(g_t\mid s_t^{\mathrm{ctrl}},\mathbf{w}_t^{\mathrm{cand}})
+\right].
+\]
+Auxiliary heads predict future holding return, holding risk, and switch advantage from the same controller feature. Their losses are trained from counterfactual rollout statistics,
+\[
+\mathcal{L}_{\mathrm{ctrl}}
+=
+\mathcal{L}_{\mathrm{ctrl}}^{\mathrm{pg}}
++\lambda_r\mathcal{L}_{r}
++\lambda_d\mathcal{L}_{d}
++\lambda_a\mathcal{L}_{\mathrm{sw}},
+\]
+where \(\mathcal{L}_{\mathrm{sw}}\) is a switch-advantage loss derived from counterfactual switch targets rather than from external switch labels. After controller policy-gradient training, a short controller-active joint finetune updates the controller, outer actor, and inner actor together with a small learning-rate multiplier, matching the final evaluation protocol.
+
+This controller links the three layers of \textit{CMTFlow}: it preserves the outer actor's base portfolio when the current holding state remains useful, invokes a new outer decision when the state deteriorates or the candidate replacement is sufficiently attractive, and gives the inner actor a persistent base around which daily relative-return refinements can be made.
+
+\section{Experiments}
+\subsection{Datasets and Experimental Setup}
+
+We evaluate \textit{CMTFlow} on two equity markets: Nasdaq-100 constituents from the U.S. market and CSI 300 constituents from the Chinese A-share market. All experiments use chronological splits and retain only stocks with continuous records in the selected universe, resulting in 39 Nasdaq-100 stocks and 53 CSI 300 stocks. Table~\ref{tab:dataset} summarizes the splits.
+
+\begin{table*}[t]
+\centering
+\caption{Dataset summary and chronological data splits.}
+\label{tab:dataset}
+\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Market} & \textbf{\#Stocks} & \textbf{Train} & \textbf{Valid} & \textbf{Test} \\
+\midrule
+Nasdaq-100 & 39 & 2000-04-07--2017-12-29 & 2018-01-02--2020-04-22 & 2020-04-23--2025-10-03 \\
+CSI 300 & 53 & 2000-04-07--2017-12-28 & 2018-01-02--2019-12-31 & 2020-01-02--2025-02-28 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+All methods are evaluated under a close-to-close, long-only, fully invested protocol with proportional transaction costs. Market features are normalized causally using only past observations. In our implementation, the outer and inner actors are first warmed up under a fixed 30-day holding reference, then jointly optimized as a fixed-segment HRL backbone. The controller is trained by counterfactual policy gradient over controller-active rollouts, and the final checkpoint is obtained by a short controller-active joint finetune of the controller, outer actor, and inner actor. During evaluation, the controller is checked daily, uses threshold 0.5, and has no hard minimum- or maximum-holding constraint. Table~\ref{tab:hyperparam} reports the main settings used in the final experiments.
+
+\begin{table}[t]
+\centering
+\caption{Key settings used by \textit{CMTFlow} in the final evaluation.}
+\label{tab:hyperparam}
+\small
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Setting} & \textbf{Nasdaq-100} & \textbf{CSI 300} \\
+\midrule
+Transaction cost rate & \(5\times10^{-5}\) & \(5\times10^{-5}\) \\
+Outer lookback window & 60 & 60 \\
+Inner lookback window & 10 & 10 \\
+Controller window & 30 & 30 \\
+Top-\(K\) base portfolio size & 10 & 10 \\
+Inner refinement strength \(\alpha\) & 0.6 & 0.6 \\
+Fixed HRL reference segment & 30 days & 30 days \\
+Controller decision stride & 1 day & 1 day \\
+Controller hard hold cap & disabled & disabled \\
+Controller evaluation threshold & 0.5 & 0.5 \\
+Switch-budget regularization & 30 switches & 30 switches \\
+Final joint LR multiplier & \(10^{-4}\) & \(10^{-4}\) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Baselines and Metrics}
+
+We compare \textit{CMTFlow} with matched traditional and deep RL baselines. Traditional and online methods include Buy\&Hold, Markowitz \citep{MVO}, UCRP \citep{UCRP}, Anticor \citep{ANTICOR}, OLMAR \citep{OLMAR}, and WMAMR \citep{WMAMR}. Deep RL baselines include AlphaStock \citep{alphastock}, DeepAries \citep{deeparies2025}, and DeepTrader \citep{6}. The table reports all baselines whose final metrics can be matched to stored result records. For cumulative-wealth visualization, we additionally require a stored or replayed portfolio path that reproduces the corresponding metric within tolerance, so Figures~\ref{fig:main_equity_nas} and~\ref{fig:main_equity_sh} show the matched trajectory subset used for visual comparison.
+
+Let \(\{V_t\}_{t=0}^{T}\) denote the portfolio value sequence and \(r_t=V_t/V_{t-1}-1\) the daily return. We report total return (TR), annualized return (AR), annualized volatility (Vol), annualized Sharpe ratio, and maximum drawdown (MDD). Annualized metrics use 252 trading days per year, and the risk-free rate is set to zero.
+
+\subsection{Main Results}
+
+\begin{table*}[t]
+\centering
+\caption{Main comparison with matched baselines. Values are percentages except Sharpe. The best result in each market-metric column is bolded, and the second best is underlined.}
+\label{tab:main}
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llrrrrrrrrrr}
+\toprule
+\multirow{2}{*}{\textbf{Type}} & \multirow{2}{*}{\textbf{Model}}
+& \multicolumn{5}{c}{\textbf{Nasdaq-100}}
+& \multicolumn{5}{c}{\textbf{CSI 300}} \\
+\cmidrule(lr){3-7}\cmidrule(lr){8-12}
+& & TR\(\uparrow\) & AR\(\uparrow\) & Vol\(\downarrow\) & Sharpe\(\uparrow\) & MDD\(\downarrow\)
+& TR\(\uparrow\) & AR\(\uparrow\) & Vol\(\downarrow\) & Sharpe\(\uparrow\) & MDD\(\downarrow\) \\
+\midrule
+Ours & \textit{CMTFlow} & \best{265.53} & 26.50 & 23.04 & \second{1.15} & \second{18.62}
+& \second{204.99} & 24.95 & 21.95 & \best{1.14} & \second{22.78} \\
+\midrule
+Traditional & Anticor   & 259.97 & \second{29.85} & 35.45 & 0.84 & 44.59 & 123.82 & 23.73 & 38.82 & 0.61 & 43.33 \\
+Traditional & Buy\&Hold & 160.64 & 19.80 & 20.88 & 0.95 & 29.79 & 54.37 & 10.87 & \second{20.51} & 0.53 & 29.86 \\
+Traditional & Markowitz & 57.76 & 9.88 & \second{17.25} & 0.57 & 24.73 & 50.53 & 11.39 & 25.03 & 0.45 & 36.11 \\
+Traditional & OLMAR     & 157.77 & 25.48 & 40.14 & 0.63 & 45.48 & 180.46 & \best{30.22} & 43.60 & 0.69 & 45.34 \\
+Traditional & UCRP      & 170.39 & 20.27 & 19.77 & 1.02 & 26.63 & 72.58 & 12.94 & \best{19.54} & 0.66 & 23.56 \\
+Traditional & WMAMR     & \second{264.39} & \best{29.95} & 35.32 & 0.85 & 33.88 & 117.12 & 24.68 & 42.75 & 0.58 & 50.52 \\
+\midrule
+Deep RL & AlphaStock & 185.35 & 21.55 & 21.07 & 1.02 & 21.90 & 128.39 & 19.11 & 21.87 & 0.87 & 36.37 \\
+Deep RL & DeepAries  & 162.96 & 19.33 & \best{12.88} & \best{1.50} & \best{10.83} & 148.76 & 21.01 & 23.36 & 0.90 & \best{15.23} \\
+Deep RL & DeepTrader & 196.27 & 23.07 & 25.64 & 0.90 & 24.54 & \best{212.81} & \second{26.35} & 25.59 & \second{1.03} & 31.86 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{figures/main_equity_nas.pdf}
+\caption{\textbf{Nasdaq-100 wealth.} Cumulative wealth comparison against matched baselines.}
+\label{fig:main_equity_nas}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{figures/main_equity_sh.pdf}
+\caption{\textbf{CSI 300 wealth.} Cumulative wealth comparison against matched baselines.}
+\label{fig:main_equity_sh}
+\end{figure}
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=\textwidth]{figures/main_metric_bars.pdf}
+\caption{\textbf{Main metric comparison.} Total return, Sharpe ratio, and maximum drawdown on Nasdaq-100 and CSI 300.}
+\label{fig:main_metrics}
+\end{figure*}
+
+Table~\ref{tab:main} and Figures~\ref{fig:main_equity_nas}--\ref{fig:main_metrics} show that \textit{CMTFlow} achieves a favorable risk-return trade-off across both markets. On Nasdaq-100, \textit{CMTFlow} obtains the highest cumulative return among the matched methods, reaching 265.53\%, while reducing maximum drawdown to 18.62\%. This drawdown is much lower than high-return traditional baselines such as WMAMR and Anticor, whose maximum drawdowns are 33.88\% and 44.59\%, respectively. DeepAries achieves a higher Sharpe ratio and lower MDD on Nasdaq-100, but its total return is 162.96\%, substantially lower than \textit{CMTFlow}. Thus, the Nasdaq result should be interpreted as a balanced high-return and controlled-drawdown outcome, not as dominance on every single metric.
+
+On CSI 300, \textit{CMTFlow} achieves 204.99\% total return, slightly below DeepTrader's 212.81\%, but improves Sharpe ratio from 1.03 to 1.14 and reduces maximum drawdown from 31.86\% to 22.78\%. This indicates that the proposed controller improves the quality and stability of returns rather than merely maximizing terminal wealth. Overall, the main results support the claim that explicit base-revision control leads to a more robust investment path.
+
+\subsection{Ablation Study}
+
+\begin{table}[t]
+\centering
+\caption{Ablation study results for policy components and fixed-window controllers. Values are percentages except Sharpe. Best and second-best results in each market-metric column are bolded and underlined, respectively.}
+\label{tab:ablation}
+\footnotesize
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{lrrrrrr}
+\toprule
+\multirow{2}{*}{\textbf{Variant}} &
+\multicolumn{3}{c}{\textbf{Nasdaq-100}} &
+\multicolumn{3}{c}{\textbf{CSI 300}} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+& TR\(\uparrow\) & Sharpe\(\uparrow\) & MDD\(\downarrow\)
+& TR\(\uparrow\) & Sharpe\(\uparrow\) & MDD\(\downarrow\) \\
+\midrule
+\textit{CMTFlow} & \best{265.53} & \best{1.15} & \best{18.62} & \second{204.99} & \second{1.14} & 22.78 \\
+\midrule
+Outer-only & 220.42 & 1.09 & 32.09 & 147.05 & 0.94 & 20.99 \\
+Outer + Inner & 227.43 & \second{1.11} & 31.73 & 158.99 & 0.99 & 20.85 \\
+Outer + Controller & \second{237.50} & 1.09 & \second{21.24} & \best{237.77} & \best{1.22} & 23.29 \\
+\midrule
+Fixed 5d & 219.84 & 1.03 & 25.56 & 103.69 & 0.77 & \second{19.96} \\
+Fixed 10d & 199.65 & 0.98 & 28.24 & 106.08 & 0.79 & 21.70 \\
+Fixed 20d & 176.03 & 0.93 & 25.72 & 98.23 & 0.75 & \best{19.92} \\
+Fixed 30d & 227.43 & \second{1.11} & 31.73 & 158.99 & 0.99 & 20.85 \\
+Fixed 60d & 170.88 & 0.95 & 29.96 & 129.73 & 0.89 & 21.25 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+Table~\ref{tab:ablation} identifies the controller as the main source of adaptive behavior. On Nasdaq-100, adding the controller to the outer actor improves total return from 220.42\% to 237.50\% and reduces MDD from 32.09\% to 21.24\%; the full model further reaches 265.53\% return and 18.62\% MDD. On CSI 300, Outer + Controller achieves the highest ablation return and Sharpe ratio, while the full model keeps a lower MDD than Outer + Controller and outperforms all fixed-window controllers in total return. This contrast clarifies the roles of the modules: the controller is the dominant mechanism for dynamic revision, whereas the inner actor is a local weight-refinement module whose return contribution is market-dependent.
+
+The fixed-window results show that the gain is not simply caused by more rebalancing. Fixed 5/10/20/30/60-day controllers fail to reproduce the full model's return on either market. The learned controller therefore captures state-dependent revision timing rather than a manually chosen rebalancing frequency.
+
+\FloatBarrier
+\raggedbottom
+
+\subsection{Controller Interpretability}
+
+We examine the controller from three perspectives that directly support the paper's claims: representative switch cases, random-switch comparison, and aggregate counterfactual/probability statistics.
+
+\begin{center}
+\begin{minipage}{\columnwidth}
+\centering
+\includegraphics[width=\columnwidth]{figures/explainability/controller_switch_case_nas.png}
+\captionof{figure}{\textbf{Nasdaq-100 switch case.} The controller exits a deteriorating holding state before the old base fully realizes the following drawdown.}
+\label{fig:controller_case_nas}
+\end{minipage}
+\end{center}
+
+\begin{center}
+\begin{minipage}{\columnwidth}
+\centering
+\includegraphics[width=\columnwidth]{figures/explainability/controller_switch_case_sh.png}
+\captionof{figure}{\textbf{CSI 300 switch case.} The switch replaces the old base with a new holding whose post-switch counterfactual path is stronger.}
+\label{fig:controller_case_sh}
+\end{minipage}
+\end{center}
+
+Figures~\ref{fig:controller_case_nas} and~\ref{fig:controller_case_sh} show switch cases in which continuing the previous base portfolio would have led to weaker future outcomes. In the Nasdaq case, the key switch on 2021-04-19 improves the 20-day counterfactual return from \(-6.05\%\) to \(-2.63\%\) and reduces future MDD from 8.82\% to 5.51\%. In the CSI 300 case, the key switch on 2021-07-07 improves the 20-day counterfactual return from \(-10.74\%\) to 4.31\% and reduces future MDD from 13.59\% to 8.23\%. These cases show the economic meaning of the controller: it can terminate a deteriorating holding state before the old base portfolio fully realizes the subsequent drawdown.
+
+\begin{center}
+\begin{minipage}{\columnwidth}
+\centering
+\includegraphics[width=\columnwidth]{figures/explainability/random_switch_nas.png}
+\captionof{figure}{\textbf{Nasdaq-100 learned versus random switching.} Random policies use the same switch-budget construction.}
+\label{fig:random_switch_nas}
+\end{minipage}
+\end{center}
+
+\begin{center}
+\begin{minipage}{\columnwidth}
+\centering
+\includegraphics[width=\columnwidth]{figures/explainability/random_switch_sh.png}
+\captionof{figure}{\textbf{CSI 300 learned versus random switching.} The learned controller improves both return quality and drawdown relative to random switch schedules.}
+\label{fig:random_switch_sh}
+\end{minipage}
+\end{center}
+
+Figures~\ref{fig:random_switch_nas} and~\ref{fig:random_switch_sh} test whether switching itself, rather than learned timing, explains the improvement. On Nasdaq-100, \textit{CMTFlow} obtains 265.53\% return, 1.15 Sharpe, and 18.62\% MDD, while random switching averages 260.78\% return, 1.13 Sharpe, and 23.53\% MDD. The Nasdaq return gap is modest, but the learned controller produces a clearer drawdown reduction. On CSI 300, the difference is larger: \textit{CMTFlow} obtains 204.99\% return and 1.14 Sharpe, whereas random switching averages 104.11\% return and 0.75 Sharpe. This supports that the controller's timing is state-dependent rather than a random rebalancing artifact.
+
+As an aggregate counterfactual check, we also compare all free switches against frozen old-holding continuations from the same switch date to the same remaining horizon. This avoids contamination from later switches within the same holding period. The comparison covers all free switches in the final traces: 231/231 decisions on Nasdaq-100 and 102/102 decisions on CSI 300. On Nasdaq-100, the mean switch return is 3.29\%, the mean old-holding return is 3.24\%, and the positive-gain ratio is 50.22\%. On CSI 300, the mean switch return is 4.43\%, the mean old-holding return is 4.39\%, and the positive-gain ratio is 48.04\%. The average advantage is intentionally interpreted conservatively: many switches are small maintenance decisions rather than large alpha events. The aggregate check shows that switching is not systematically worse than continuing, while the case studies and random-switch experiment explain where the realized path-level advantage comes from.
+
+We further summarize the relation between exit probability and subsequent switch advantage. The global linear correlation is weak (\(-0.05\) on Nasdaq-100 and 0.01 on CSI 300), which is expected because the controller's action also depends on holding state, candidate turnover, switching budget, transaction costs, and heterogeneous market regimes. We therefore interpret exit probability as a nonlinear policy signal: it can rise around meaningful switching opportunities, but it should not be read as a one-dimensional forecast of future excess return.
+
+\FloatBarrier
+
+\subsection{Inner Actor Interpretability}
+
+The inner actor should not be interpreted as a separate switch or stock-selection module. In the implementation, it receives the active base portfolio, constructs a support-constrained target distribution inside the selected assets, and forms the executed portfolio by convexly combining the base weights with this target. Therefore, the most direct explanation is the relative tilt
+\[
+\Delta w_{i,t}^{\mathrm{inner}}=w_{i,t}-w_{i,t}^{\mathrm{base}}.
+\]
+
+\begin{center}
+\begin{minipage}{\columnwidth}
+\centering
+\includegraphics[width=\columnwidth]{figures/explainability/inner_actor_nas.png}
+\captionof{figure}{\textbf{Nasdaq-100 inner actor resonance.} The inner tilt is compared with subsequent 5-day relative returns and executed weights.}
+\label{fig:inner_actor_nas}
+\end{minipage}
+\end{center}
+
+\begin{center}
+\begin{minipage}{\columnwidth}
+\centering
+\includegraphics[width=\columnwidth]{figures/explainability/inner_actor_sh.png}
+\captionof{figure}{\textbf{CSI 300 inner actor resonance.} Positive alignment means the weight tilt agrees with the future relative-return direction.}
+\label{fig:inner_actor_sh}
+\end{minipage}
+\end{center}
+
+Figures~\ref{fig:inner_actor_nas} and~\ref{fig:inner_actor_sh} compare this tilt with future 5-day relative returns. In the selected Nasdaq window, the correlation between inner tilt and future relative return is 0.46, with 73.33\% positive alignment days. In the selected CSI 300 window, the correlation is 0.33, with 70.00\% positive alignment days. These results indicate that the inner actor refines the base portfolio by locally increasing exposure to assets that subsequently show stronger relative performance, and decreasing exposure to weaker relative assets.
+
+The inner actor's aggregate contribution is more modest than the controller's contribution, which is consistent with its role. Its cumulative standalone inner alpha is not uniformly positive across markets, so it should not be claimed as an independent universal alpha source. A more faithful interpretation is that the inner actor provides within-holding-period weight flexibility, while the controller provides the dominant state-dependent revision mechanism.
+
+\FloatBarrier
+
+\section{Conclusions}
+
+This paper proposes \textit{CMTFlow}, a hierarchical portfolio management framework for non-stationary financial markets. The key idea is to separate three decisions that are often entangled in portfolio RL: when to revise the active base portfolio, what base portfolio to hold, and how to refine weights daily inside the active support.
+
+Experiments on Nasdaq-100 and CSI 300 show that \textit{CMTFlow} improves the overall risk-return trade-off against matched traditional and deep RL baselines. The ablation study shows that the controller is the dominant component: learned state-dependent switching improves over fixed-segment HRL and cannot be replaced by fixed-window controllers. The interpretability studies further show that the controller can reduce downside exposure in representative deteriorating holding states and outperforms random switching under the same evaluation protocol. The all-switch remaining-horizon counterfactual analysis gives a conservative decision-level check: switching is not systematically worse than continuing the old base on average, while important downside windows contribute the clearest gains. The inner actor provides a complementary form of local allocation refinement by tilting weights around the base portfolio in a way that can resonate with future relative returns.
+
+A limitation is that the current evaluation focuses on two equity markets under long-only and proportional-cost assumptions. Future work will extend the framework to broader asset classes, richer market-impact models, and controller designs that explicitly incorporate risk preferences under different investment mandates.
+
+\FloatBarrier
+\raggedbottom
+\bibliography{aaai2026}
+
+% Check whether the conference requires a reproducibility checklist to be included in the paper.
+% If so, you can uncomment the following line and ajust the path to include it.
+% \input{../../ReproducibilityChecklist/LaTeX/ReproducibilityChecklist.tex}
+
+\appendix
+
+\section{Additional Details of Hierarchical Policies}
+\label{app:hier_policy}
+
+\subsection{Manager Architecture and Base Portfolio Construction}
+\label{app:hier_manager}
+
+This section provides additional implementation details of the manager policy, whose role is to construct a segment-level base portfolio at each segment boundary.
+
+At decision time \(t=\tau_k\), the manager observes
+\[
+s^{\mathrm{mgr}}_{\tau_k}
+=
+\bigl\{\mathbf{X}^{\mathrm{mgr}}_{\tau_k},\tilde{\mathbf{w}}_{\tau_k}\bigr\},
+\]
+where \(\mathbf{X}^{\mathrm{mgr}}_{\tau_k}\in\mathbb{R}^{M\times \tau^{\mathrm{mgr}}\times F}\) denotes the long-horizon market observation tensor for the \(M\) candidate assets, \(\tau^{\mathrm{mgr}}\) is the manager lookback window, and \(F\) is the feature dimension. The vector \(\tilde{\mathbf{w}}_{\tau_k}\in\mathbb{R}^{M}\) is the drifted executed portfolio at the current decision point and provides the manager with the current portfolio context.
+
+The manager first applies an asset-wise temporal encoder to \(\mathbf{X}^{\mathrm{mgr}}_{\tau_k}\) to extract long-horizon sequential representations:
+\[
+\mathbf{H}^{\mathrm{mgr}}_{\tau_k}
+=
+\mathrm{LSTM\mbox{-}HA}\!\left(\mathbf{X}^{\mathrm{mgr}}_{\tau_k}\right),
+\]
+where \(\mathbf{H}^{\mathrm{mgr}}_{\tau_k}\in\mathbb{R}^{M\times d_{\mathrm{mgr}}}\) is the resulting asset-wise latent representation and \(d_{\mathrm{mgr}}\) is the manager hidden dimension. The LSTM-HA module summarizes asset-specific temporal patterns over the manager horizon.
+
+To incorporate cross-asset dependency, the latent representation is then processed by the cross-asset attention allocator (CAAN):
+\[
+\mathbf{C}^{\mathrm{mgr}}_{\tau_k}
+=
+\mathrm{CAAN}\!\left(
+\mathbf{H}^{\mathrm{mgr}}_{\tau_k},
+\mathbf{x}^{\mathrm{last}}_{\tau_k},
+\tilde{\mathbf{w}}_{\tau_k}
+\right),
+\]
+where \(\mathbf{x}^{\mathrm{last}}_{\tau_k}\in\mathbb{R}^{M\times F}\) denotes the most recent cross-sectional feature matrix. The CAAN module allows the manager to allocate capital according to both asset-wise temporal signals and current cross-sectional market structure.
+
+A stochastic policy head then maps \(\mathbf{C}^{\mathrm{mgr}}_{\tau_k}\) to the mean and log-standard-deviation of an asset-wise Gaussian allocation distribution:
+\[
+\boldsymbol{\mu}^{\mathrm{mgr}}_{\tau_k},
+\log \boldsymbol{\sigma}^{\mathrm{mgr}}_{\tau_k}
+=
+\mathrm{MLP}^{\mathrm{mgr}}\!\left(\mathbf{C}^{\mathrm{mgr}}_{\tau_k}\right).
+\]
+A raw allocation score vector is sampled as
+\[
+\hat{\mathbf{q}}^{\mathrm{mgr}}_{\tau_k}
+\sim
+\mathcal{N}\!\left(
+\boldsymbol{\mu}^{\mathrm{mgr}}_{\tau_k},
+\mathrm{diag}\bigl((\boldsymbol{\sigma}^{\mathrm{mgr}}_{\tau_k})^2\bigr)
+\right),
+\]
+and then squashed by \(\tanh(\cdot)\) to obtain bounded preference scores:
+\[
+\mathbf{q}^{\mathrm{mgr}}_{\tau_k}
+=
+\tanh\!\left(\hat{\mathbf{q}}^{\mathrm{mgr}}_{\tau_k}\right).
+\]
+
+To construct a sparse long-only base portfolio, only the Top-\(K\) assets with the largest scores are retained. Let \(\mathcal{I}_{\tau_k}=\mathrm{TopK}(\mathbf{q}^{\mathrm{mgr}}_{\tau_k},K)\) denote the index set of the selected assets. The final base portfolio is then given by
+\[
+w_{i,\tau_k}^{\mathrm{mgr}}
+=
+\begin{cases}
+\dfrac{\exp(q_{i,\tau_k}^{\mathrm{mgr}})}
+{\sum_{j\in\mathcal{I}_{\tau_k}}
+\exp(q_{j,\tau_k}^{\mathrm{mgr}})},
+& i\in\mathcal{I}_{\tau_k},\\[10pt]
+0, & \text{otherwise}.
+\end{cases}
+\]
+Here the exponential transformation ensures positive portfolio weights, and normalization guarantees that the selected weights sum to one. Thus, the manager converts long-horizon market context into a sparse segment-level base portfolio.
+
+\subsection{Trader Architecture and Support-Constrained Refinement}
+\label{app:hier_trader}
+
+This section provides additional implementation details of the trader policy, whose role is to refine execution daily around the active base portfolio.
+
+At each trading day \(t\) within the current segment, the trader observes
+\[
+s_t^{\mathrm{trd}}
+=
+\bigl\{\mathbf{X}^{\mathrm{trd}}_t,\tilde{\mathbf{w}}_t,\mathbf{w}^{\mathrm{base}}_t\bigr\},
+\]
+where \(\mathbf{X}^{\mathrm{trd}}_t\in\mathbb{R}^{M\times \tau^{\mathrm{trd}}\times F}\) denotes the short-horizon market observation tensor, \(\tilde{\mathbf{w}}_t\) is the current drifted executed portfolio, and \(\mathbf{w}^{\mathrm{base}}_t\) is the active base portfolio induced by the latest manager decision. Compared with the manager, the trader uses a much shorter lookback window \(\tau^{\mathrm{trd}}\), because its role is to react to local fluctuations rather than to construct stable medium-horizon exposure.
+
+The trader first applies an asset-wise LSTM-attention encoder to extract short-horizon representations:
+\[
+\mathbf{H}^{\mathrm{trd}}_t
+=
+\mathrm{LSTM\mbox{-}Attn}\!\left(\mathbf{X}^{\mathrm{trd}}_t\right),
+\]
+where \(\mathbf{H}^{\mathrm{trd}}_t\in\mathbb{R}^{M\times d_{\mathrm{trd}}}\) is the trader latent representation and \(d_{\mathrm{trd}}\) is the trader hidden dimension. The implementation uses a two-layer LSTM for each asset window and two temporal attention layers that use the latest hidden state as the query, allowing the inner actor to focus on the most relevant days inside the short lookback window.
+
+A stochastic policy head then conditions on \(\mathbf{H}^{\mathrm{trd}}_t\), the current drifted executed portfolio, and the active base portfolio to parameterize an asset-wise Gaussian refinement distribution:
+\[
+\boldsymbol{\mu}^{\mathrm{trd}}_t,\log \boldsymbol{\sigma}^{\mathrm{trd}}_t
+=
+\mathrm{MLP}^{\mathrm{trd}}\!\left(
+\mathbf{H}^{\mathrm{trd}}_t,
+\tilde{\mathbf{w}}_t,
+\mathbf{w}^{\mathrm{base}}_t
+\right).
+\]
+A raw refinement signal is sampled as
+\[
+\hat{\mathbf{q}}^{\mathrm{trd}}_t
+\sim
+\mathcal{N}\!\left(
+\boldsymbol{\mu}^{\mathrm{trd}}_t,
+\mathrm{diag}\bigl((\boldsymbol{\sigma}^{\mathrm{trd}}_t)^2\bigr)
+\right),
+\]
+and squashed by \(\tanh(\cdot)\):
+\[
+\mathbf{q}^{\mathrm{trd}}_t
+=
+\tanh\!\left(\hat{\mathbf{q}}^{\mathrm{trd}}_t\right).
+\]
+
+To preserve the structural role of the manager, the trader is constrained to refine only the support of the active base portfolio. Let
+\[
+m_{i,t}
+=
+\mathbb{I}\!\left(w_{i,t}^{\mathrm{base}}>0\right)
+\]
+be the support mask induced by \(\mathbf{w}^{\mathrm{base}}_t\). The masked refinement signal is
+\[
+\bar{q}_{i,t}^{\mathrm{trd}}
+=
+m_{i,t}\exp(q_{i,t}^{\mathrm{trd}}),
+\]
+and the final refinement portfolio is obtained by normalization over the active support:
+\[
+w_{i,t}^{\mathrm{trd}}
+=
+\frac{\bar{q}_{i,t}^{\mathrm{trd}}}
+{\sum_{j=1}^{M}\bar{q}_{j,t}^{\mathrm{trd}}}.
+\]
+Hence, the trader can only redistribute portfolio mass within the support of the current base portfolio and cannot arbitrarily introduce new assets outside that support. This is precisely what keeps daily refinement anchored to the manager's segment-level structural decision.
+
+The final executed portfolio is obtained by convex combination of the active base portfolio and the trader refinement:
+\[
+\mathbf{w}_t
+=
+(1-\alpha)\mathbf{w}^{\mathrm{base}}_t
++
+\alpha\mathbf{w}^{\mathrm{trd}}_t,
+\]
+where \(\alpha\in[0,1]\) controls the strength of daily refinement.
+
+\section{Additional Details of End-to-End Staged Training}
+\label{app:hier_training}
+
+To stabilize hierarchical optimization while preserving the final daily controller policy, \textit{CMTFlow} is trained with the same staged end-to-end schedule used in the experiment script. During the HRL warmup stages, holding segments are constructed with a fixed reference length \(H\), i.e.,
+\[
+\tau_k-\tau_{k-1}=H,\qquad k=1,\dots,K.
+\]
+This fixed-length segmentation is introduced only for early actor-training stability. It provides the outer actor with a consistent future holding horizon and avoids introducing controller-induced boundary variation before the outer/inner backbone is usable. During final joint finetuning and deployment, by contrast, segment boundaries are determined by the learned daily controller.
+
+Under fixed-length HRL warmup, the outer actor is invoked once at each segment boundary \(t=\tau_k\), while the inner actor acts daily within the resulting segment. Let \(\mathcal{D}_{\mathrm{mgr}}\) denote the set of outer decision points and \(\mathcal{D}_{\mathrm{trd}}\) denote the set of inner decision points collected from the training environment. The final pipeline contains five stages: outer warmup, inner warmup, fixed-HRL outer/inner joint training, counterfactual controller policy-gradient training, and controller-active end-to-end joint finetuning.
+
+\paragraph{Stage I: Outer warmup.}
+In the first stage, we optimize the outer actor alone in order to learn a stable segment-level base portfolio policy. At each segment boundary \(t=\tau_k\), the outer actor observes \(s_{\tau_k}^{\mathrm{mgr}}\), outputs a base portfolio \(\mathbf{w}^{\mathrm{mgr}}_{\tau_k}\), and receives the segment-level reward
+\[
+r_{\tau_k}^{\mathrm{mgr}}
+=
+J\!\left(\mathbf{w}^{\mathrm{mgr}}_{\tau_k}\right)
+-
+J\!\left(\mathbf{w}^{\mathrm{ew}}\right),
+\]
+where \(J(\cdot)\) is the Sharpe ratio over the subsequent fixed-length segment \([\tau_k,\tau_k+H)\). In this stage, the inner actor is disabled, so the executed portfolio within each segment is determined by the outer-generated base portfolio and its passive drift. This isolates the segment-level allocation problem and allows the outer actor to learn a robust strategic anchor without interference from daily refinement. The outer parameters \(\theta^{\mathrm{mgr}}\) are optimized with PPO using the trajectory set \(\mathcal{D}_{\mathrm{mgr}}\).
+
+\paragraph{Stage II: Inner warmup.}
+In the second stage, the best outer-warmup checkpoint is used to generate a stable base portfolio sequence throughout training episodes, and the inner actor is optimized to learn daily refinement around that base. At each trading day \(t\in\mathcal{D}_{\mathrm{trd}}\), the inner actor observes \(s_t^{\mathrm{trd}}\), outputs a refinement portfolio \(\mathbf{w}_t^{\mathrm{trd}}\), and the final executed portfolio is
+\[
+\mathbf{w}_t
+=
+(1-\alpha)\mathbf{w}_t^{\mathrm{base}}
++
+\alpha \mathbf{w}_t^{\mathrm{trd}}.
+\]
+The inner reward is
+\[
+r_t^{\mathrm{trd}}
+=
+\log\!\left(
+\frac{\mathbf{y}_t^\top \mathbf{w}_t}
+{\mathbf{y}_t^\top \mathbf{w}_t^{\mathrm{base}}}
+\right)
+-
+\lambda \|\mathbf{w}_t-\tilde{\mathbf{w}}_t\|_1.
+\]
+The implementation also uses a small next-return prediction auxiliary loss for the inner encoder, which encourages the LSTM-attention representation to preserve short-horizon relative-return information. This stage isolates the daily execution problem and avoids early co-adaptation between the two actor layers. The inner parameters \(\theta^{\mathrm{trd}}\) are optimized with PPO using the trajectory set \(\mathcal{D}_{\mathrm{trd}}\).
+
+\paragraph{Stage III: Fixed-HRL joint training.}
+After the two warmup stages, the outer and inner actors are jointly optimized under the same fixed 30-day reference segmentation, with the controller inactive. This stage lets the sparse base portfolio and the support-constrained daily refinement adapt to each other before the system is exposed to adaptive segment boundaries. The best fixed-HRL checkpoint is then used as the initialization for controller policy-gradient training.
+
+\paragraph{Stage IV: Counterfactual controller policy gradient.}
+The controller is trained to decide whether each candidate outer portfolio should replace the current holding state. For each controller rollout, we compare the controlled trajectory with a fixed-segment reference trajectory and assign the controller a relative investment reward. Let \(\theta^{\mathrm{ctrl}}\) denote the controller parameters. The controller objective can be written as
+\[
+\max_{\theta^{\mathrm{ctrl}}}
+\;
+\mathbb{E}\!\left[
+\sum_{\xi\in\mathcal{D}_{\mathrm{ctrl}}}
+r_{\xi}^{\mathrm{ctrl}}
+\right],
+\]
+where \(\xi\) indexes controller rollouts. In the final setting, \(r_{\xi}^{\mathrm{ctrl}}\) is primarily the log-return uplift over the fixed reference path, with a penalty for excessive switching beyond the controller budget. The current training path does not use external switch labels; switch decisions are learned from sampled controller actions and their realized counterfactual investment consequences. Auxiliary return, risk, and switch-advantage heads are trained from rollout statistics and can modulate the switch logit, but they are not external labels.
+
+\paragraph{Stage V: Controller-active end-to-end joint finetuning.}
+After controller policy-gradient training, we load the best controller checkpoint and run a short controller-active joint finetuning stage. In this stage the controller, outer actor, and inner actor are all trainable; rollouts use the daily controller decision protocol rather than a fixed-calendar rule; and a small joint learning-rate multiplier is applied to avoid destroying the fixed-HRL backbone. The final checkpoint is selected on validation performance under the same controller-active evaluation protocol used for the reported test results.
+
+\paragraph{PPO optimization.}
+The outer and inner actors are optimized using clipped proximal policy optimization (Clip-PPO) during actor training. For either layer, let \(\pi_{\theta}(\cdot)\) denote the current policy and \(\pi_{\theta_{\mathrm{old}}}(\cdot)\) the behavior policy used to collect trajectories. For a sampled transition \((s_t,a_t)\), the PPO ratio is
+\[
+r_t(\theta)
+=
+\frac{\pi_{\theta}(a_t\mid s_t)}
+{\pi_{\theta_{\mathrm{old}}}(a_t\mid s_t)}.
+\]
+The clipped surrogate objective is
+\[
+\mathcal{L}_{\mathrm{PPO}}
+=
+\mathbb{E}_t\!\left[
+\min\!\bigl(
+r_t(\theta)\hat{A}_t,
+\mathrm{clip}(r_t(\theta),1-\epsilon,1+\epsilon)\hat{A}_t
+\bigr)
+\right],
+\]
+where \(\hat{A}_t\) is the estimated advantage and \(\epsilon\) is the clipping coefficient. For the outer actor, this objective is computed over segment-level transitions in \(\mathcal{D}_{\mathrm{mgr}}\); for the inner actor, it is computed over daily transitions in \(\mathcal{D}_{\mathrm{trd}}\). Thus, although both actor layers are optimized with the same RL algorithm, they operate on different temporal resolutions and different reward signals.
+
+Overall, the staged schedule first establishes a reliable segment-level allocator, then learns a daily refinement policy around that anchor, then learns controller switching from counterfactual rollout rewards, and finally updates all modules together under the controller-active daily decision rule. This progressive design improves optimization stability while keeping the final model end-to-end aligned with the evaluation logic used in our experiments.
+
+\subsection{Final Evaluation and Matching Protocol}
+\label{app:eval_protocol}
+
+Table~\ref{tab:eval_protocol} summarizes the implementation details that are most relevant to reproducing the final evaluation and explanation experiments. The final controller checkpoint is selected by validation return, and the reported test runs use seeds 49 and 90 for Nasdaq-100 and CSI 300, respectively. The outer and inner actors are warmed up under fixed 30-day reference segments, then the final policy is obtained through controller policy-gradient training and controller-active end-to-end joint finetuning. The controller is evaluated as a daily event policy with no hard minimum- or maximum-holding constraint.
+
+\begin{table}[H]
+\centering
+\caption{Final evaluation and matching details.}
+\label{tab:eval_protocol}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{p{0.38\columnwidth}p{0.52\columnwidth}}
+\toprule
+\textbf{Item} & \textbf{Setting} \\
+\midrule
+Final seeds & Nasdaq-100: 49; CSI 300: 90 \\
+Actor reference segment & 30 trading days \\
+Controller evaluation rule & Daily free decision, threshold 0.5 \\
+Holding constraint & No hard min/max hold in final eval \\
+Controller rollout setting & Length 600; 12 windows per PG batch \\
+Switch-budget regularization & Max switches 30; overflow penalty 0.001 \\
+Random-switch comparison & 50 sampled schedules under the same test protocol \\
+Baseline matching & Plot only trajectories that reproduce table metrics within tolerance \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Additional Details of Controller State Construction}
+\label{app:ctrl_state}
+
+This section summarizes the controller state used by the final end-to-end training path. The controller is not trained with external switch labels. Instead, every controller decision is conditioned on a causal comparison between the current holding and the candidate outer portfolio, and the decision is optimized from counterfactual rollout rewards.
+
+At day \(t\), the controller receives the recent asset feature tensor
+\[
+\mathbf{X}^{\mathrm{ctrl}}_t
+\in
+\mathbb{R}^{M\times H_{\mathrm{ctrl}}\times F},
+\]
+where \(H_{\mathrm{ctrl}}\) is the controller lookback window. The tensor is constructed causally from historical market features and is encoded by the controller's asset-wise LSTM-attention encoder. Let \(\bar{\mathbf{w}}_t\) denote the normalized current holding after price drift and let \(\bar{\mathbf{w}}^{\mathrm{cand}}_t\) denote the normalized candidate base portfolio proposed by the outer actor. The controller forms weighted summaries for both portfolios:
+\[
+\mathbf{m}^{\mathrm{hold}}_t
+=
+\sum_i \bar{w}_{i,t}\mathbf{e}_{i,t},
+\qquad
+\mathbf{m}^{\mathrm{cand}}_t
+=
+\sum_i \bar{w}^{\mathrm{cand}}_{i,t}\mathbf{e}_{i,t},
+\]
+where \(\mathbf{e}_{i,t}\) is the encoded asset representation.
+
+The controller also uses compact portfolio-state and action-comparison features:
+\[
+\mathbf{u}_t=
+\begin{bmatrix}
+d_t/H_{\mathrm{ref}}\\
+1-d_t/H_{\mathrm{ref}}\\
+\tanh(R_t^{\mathrm{seg}}/s_R)\\
+\tanh(D_t^{\mathrm{seg}}/s_D)\\
+\|\bar{\mathbf{w}}_t\|_2^2
+\end{bmatrix},
+\]
+\[
+\mathbf{a}^{\mathrm{ctrl}}_t=
+\begin{bmatrix}
+\|\bar{\mathbf{w}}^{\mathrm{cand}}_t-\bar{\mathbf{w}}_t\|_1\\
+\|\bar{\mathbf{w}}^{\mathrm{cand}}_t\|_2^2\\
+\sum_i \min(\bar{w}^{\mathrm{cand}}_{i,t},\bar{w}_{i,t})
+\end{bmatrix}.
+\]
+Thus, the switch probability is a function of four coupled signals: the recent market sequence, the quality of the current holding, the properties of the candidate replacement, and the cost/overlap implied by switching. This construction is why the controller probability should be interpreted as a nonlinear policy signal rather than as a one-dimensional forecast of next-period return.
+\end{document}

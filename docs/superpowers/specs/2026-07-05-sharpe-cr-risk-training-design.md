@@ -5,7 +5,7 @@
 
 ## 目标
 
-设计一条独立的风险增强训练流程，让 KD4RL+ 尽量在总收益、Sharpe、最大回撤和 CR/Calmar ratio 上同时超过 DeepAries 和 DeepTrader。
+设计一条独立的风险增强训练流程，让 KD4RL+ 尽量在总收益、Sharpe、最大回撤和 CR/Calmar ratio 上同时超过 DeepAries 和 DeepTrader等baseline。
 
 第一原则是不影响当前稳定训练流程：
 
@@ -129,7 +129,6 @@ outer reward：
 outer_reward_s =
   outer_sharpe_coef * clip(segment_sharpe_s, -outer_sharpe_clip, outer_sharpe_clip)
 + outer_return_floor_coef * segment_log_return_s
-- outer_turnover_coef * turnover_to_w_s
 ```
 
 这里的 `turnover_to_w_s` 可以先设为 0，不作为第一版核心约束。
@@ -192,7 +191,6 @@ controller reward：
 ```text
 controller_reward =
   controller_cr_coef * clip(CR_controlled - CR_baseline, -controller_cr_clip, controller_cr_clip)
-+ controller_return_floor_coef * (log_return_controlled - log_return_baseline)
 - normalized_max_switch_overflow_penalty
 ```
 
@@ -403,3 +401,6 @@ fixed-horizon Sharpe 可作为 ablation。如果实际 segment Sharpe 训练不�
 完全自由 controller 可能学到过少切换或过多切换。过少切换用 relative CR 和 validation 指标约束，过多切换用交易成本、soft switch penalty 和 entropy/diagnostics 约束。第一版不加入 hard max-hold，是为了让模型真正学习切换时机，而不是复刻手工持仓边界。
 
 现有好模型必须可复现。通过默认参数保持旧行为、保留旧脚本、测试旧脚本 echo 输出进行保护。
+
+
+

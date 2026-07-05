@@ -39,6 +39,20 @@ class PaperExperimentHelperTests(unittest.TestCase):
         self.assertIn("sortino", metrics)
         self.assertIn("calmar", metrics)
 
+    def test_financial_metrics_include_recorded_first_daily_return(self):
+        df = pd.DataFrame(
+            {
+                "portfolio_value_before": [1000.0, 990.0],
+                "portfolio_value": [990.0, 1089.0],
+                "daily_simple_return": [-0.01, 0.10],
+            }
+        )
+        metrics = compute_financial_metrics(df)
+
+        self.assertAlmostEqual(metrics["total_return"], 0.089)
+        self.assertAlmostEqual(metrics["annualized_return"], 0.09 / 2 * 252)
+        self.assertAlmostEqual(metrics["daily_win_rate"], 0.5)
+
     def test_inner_alpha_summary_ignores_nan(self):
         df = pd.DataFrame(
             {

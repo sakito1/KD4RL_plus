@@ -1,5 +1,6 @@
 import argparse
 import ast
+import re
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +42,8 @@ matplotlib.rcParams.update(
 import matplotlib.pyplot as plt
 from PIL import Image
 
+from paper_experiments.metrics import summarize_all
+
 
 COLORS = {
     "full_controller": "#D55E00",
@@ -50,6 +53,8 @@ COLORS = {
     "Controller-PG checkpoint": "#E69F00",
     "Fixed HRL checkpoint": "#2F3A44",
     "random": "#B9C2CC",
+    "fixed_window": "#8B93C7",
+    "fixed_window_best": "#4F46A5",
     "exit": "#009E73",
     "switch": "#CC79A7",
     "hold": "#7A7F86",
@@ -147,7 +152,7 @@ CASE_WINDOWS = {
 
 
 def _market_label(market: str) -> str:
-    labels = {"sh": "SH Market", "nas": "NASDAQ Market"}
+    labels = {"sh": "CSI-300", "nas": "Nasdaq-100"}
     return labels.get(str(market).lower(), str(market).upper())
 
 
@@ -366,6 +371,113 @@ def _load_trace(input_dir: Path, market: str, seed: int, scenario: str):
     if not path.exists():
         return pd.DataFrame()
     return pd.read_csv(path)
+
+
+def _wealth_multiple(df: pd.DataFrame) -> pd.Series:
+    values = pd.to_numeric(df["portfolio_value"], errors="coerce")
+    if values.dropna().empty:
+        return pd.Series(dtype="float64")
+    base = float(values.dropna().iloc[0])
+    return values / max(base, 1e-12)
+
+
+def _fixed_window_search_dirs(input_dir: Path):
+    input_dir = Path(input_dir)
+    candidates = [
+        input_dir / "_cache" / "fixed_windows",
+        input_dir / "fixed_windows",
+        input_dir.parent / "paper_experiments_final" / "_cache" / "fixed_windows",
+        Path("paper_experiments_outputs") / "paper_experiments_final" / "_cache" / "fixed_windows",
+    ]
+    seen = set()
+    for path in candidates:
+        resolved = Path(path)
+        key = str(resolved.resolve()) if resolved.exists() else str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.exists():
+            yield resolved
+
+
+def _fixed_window_paths(input_dir: Path, market: str, seed: int):
+    paths = []
+    pattern = f"{market}_seed{seed}_fixed_window_*_portfolio.csv"
+    for directory in _fixed_window_search_dirs(input_dir):
+        for path in directory.glob(pattern):
+            match = re.search(r"_fixed_window_(\d+)_portfolio\.csv$", path.name)
+            if not match:
+                continue
+            paths.append((int(match.group(1)), path))
+    unique = {}
+    for window, path in paths:
+        unique[window] = path
+    return sorted(unique.items(), key=lambda item: item[0])
+
+
+def _portfolio_summary_row(label: str, df: pd.DataFrame, *, window: int = None) -> dict:
+    row = {"label": label, "fixed_window_days": window}
+    row.update(summarize_all(df))
+    return row
+
+
+def _format_pct(value: float) -> str:
+    return "" if pd.isna(value) else f"{float(value) * 100.0:.2f}%"
+
+
+def _format_ratio(value: float) -> str:
+    return "" if pd.isna(value) else f"{float(value):.2f}"
+
+
+def _write_fixed_window_stats(output_dir: Path, market: str, seed: int, stats: pd.DataFrame, full_row: pd.Series) -> None:
+    group_dir = Path(output_dir) / "06_random_switch"
+    group_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = group_dir / f"fig07_fixed_window_timing_stats_{market}_seed{seed}.csv"
+    stats.to_csv(csv_path, index=False)
+
+    fixed = stats[stats["label"].eq("Fixed window")].copy()
+    n = len(fixed)
+    if n == 0:
+        return
+    best_tr = fixed.loc[pd.to_numeric(fixed["total_return"], errors="coerce").idxmax()]
+    best_sharpe = fixed.loc[pd.to_numeric(fixed["sharpe"], errors="coerce").idxmax()]
+    best_cr = fixed.loc[pd.to_numeric(fixed["calmar"], errors="coerce").idxmax()]
+    best_mdd = fixed.loc[pd.to_numeric(fixed["max_drawdown"], errors="coerce").idxmin()]
+    full_tr = float(full_row["total_return"])
+    full_sharpe = float(full_row["sharpe"])
+    full_mdd = float(full_row["max_drawdown"])
+    full_cr = float(full_row["calmar"])
+    beat_tr = int((pd.to_numeric(fixed["total_return"], errors="coerce") < full_tr).sum())
+    beat_sharpe = int((pd.to_numeric(fixed["sharpe"], errors="coerce") < full_sharpe).sum())
+    beat_mdd = int((pd.to_numeric(fixed["max_drawdown"], errors="coerce") > full_mdd).sum())
+    beat_cr = int((pd.to_numeric(fixed["calmar"], errors="coerce") < full_cr).sum())
+    market_name = "Nasdaq-100" if market == "nas" else "CSI-300"
+    md = f"""# Dense Fixed Holding-Window Timing Baseline ({market_name}, seed {seed})
+
+这张图展示 Dense Fixed Holding-Window Timing Baseline。比较对象是大量不同固定持仓期窗口：{int(fixed['fixed_window_days'].min())}d 到 {int(fixed['fixed_window_days'].max())}d，共 {n} 个 fixed holding-window baselines。
+
+## 怎么看图
+
+- 灰紫色细线：不同固定持仓期窗口的累计财富曲线。
+- 红色线：learned controller 的实际累计财富曲线。
+- 左图统计框：controller 相比固定窗口集合的胜出次数。
+- 右图柱形面板：controller 在 TR、Sharpe、MDD 和 CR 上相对 60 个固定窗口的胜出比例。
+
+## 统计结论
+
+- Learned controller 的 TR 为 {_format_pct(full_tr)}，Sharpe 为 {_format_ratio(full_sharpe)}，MDD 为 {_format_pct(full_mdd)}，CR 为 {_format_ratio(full_cr)}。
+- 固定窗口中最高 TR 来自 {int(best_tr['fixed_window_days'])}d，TR 为 {_format_pct(best_tr['total_return'])}；controller 在 TR 上优于 {beat_tr}/{n} 个固定窗口。
+- 固定窗口中最高 Sharpe 来自 {int(best_sharpe['fixed_window_days'])}d，Sharpe 为 {_format_ratio(best_sharpe['sharpe'])}；controller 在 Sharpe 上优于 {beat_sharpe}/{n} 个固定窗口。
+- 固定窗口中最低 MDD 来自 {int(best_mdd['fixed_window_days'])}d，MDD 为 {_format_pct(best_mdd['max_drawdown'])}；controller 在 MDD 上优于 {beat_mdd}/{n} 个固定窗口。
+- 固定窗口中最高 CR 来自 {int(best_cr['fixed_window_days'])}d，CR 为 {_format_ratio(best_cr['calmar'])}；controller 在 CR 上优于 {beat_cr}/{n} 个固定窗口。
+
+注意：{market_name} 上可能存在少数事后挑选的固定窗口（例如 {int(best_tr['fixed_window_days'])}d）在部分指标上高于 controller。因此论文中不应写成“controller 在所有固定窗口和所有指标上都是第一”。更合理的结论是：controller 不需要事后选择固定窗口，却在固定窗口集合中取得高分位表现，并在关键风险指标上体现出更稳定的控制能力。
+
+## 可写入论文的表述
+
+Compared with a dense set of fixed holding-window baselines, the learned controller achieves high-percentile risk-return performance without ex-post selection of a constant holding period. This result indicates that the controller learns state-dependent timing for revising the active base portfolio rather than relying on a manually tuned fixed window.
+"""
+    (group_dir / f"fig07_fixed_window_timing_stats_{market}_seed{seed}.md").write_text(md, encoding="utf-8")
 
 
 def _prepare_ablation_rows(group: pd.DataFrame) -> pd.DataFrame:
@@ -699,30 +811,123 @@ def plot_switch_events(input_dir: Path, output_dir: Path, market: str, seed: int
 def plot_random(input_dir: Path, output_dir: Path, market: str, seed: int):
     full = _load_trace(input_dir, market, seed, "full_controller")
     fixed = _load_trace(input_dir, market, seed, "fixed_hrl")
-    random_paths = sorted((input_dir / "traces").glob(f"{market}_seed{seed}_random_switch_matched_count_*_portfolio.csv"))
-    if full.empty or not random_paths:
+    fixed_paths = _fixed_window_paths(input_dir, market, seed)
+    if full.empty or not fixed_paths:
         return
-    fig, ax = plt.subplots(figsize=(7.9, 4.85))
-    random_final = []
-    for path in random_paths:
+
+    rows = []
+    loaded = []
+    for window, path in fixed_paths:
         df = pd.read_csv(path)
-        values = pd.to_numeric(df["portfolio_value"], errors="coerce")
-        y = values / max(values.iloc[0], 1e-12)
-        random_final.append(float(y.iloc[-1]))
-        ax.plot(pd.to_datetime(df["date"]), y, color=COLORS["random"], alpha=0.22, linewidth=0.78, zorder=1)
-    for df, label, color, lw, ls in [(fixed, "Fixed HRL", COLORS["fixed_hrl"], 1.9, "--"), (full, "Full controller", COLORS["full_controller"], 2.5, "-")]:
-        if df.empty:
+        if df.empty or "portfolio_value" not in df:
             continue
-        values = pd.to_numeric(df["portfolio_value"], errors="coerce")
-        line = ax.plot(pd.to_datetime(df["date"]), values / max(values.iloc[0], 1e-12), label=label, color=color, linewidth=lw, linestyle=ls, zorder=4 if "Full" in label else 3)[0]
-        if "Full" in label:
-            _annotate_endpoint(ax, line, label)
-    ax.set_title(_paper_title("Random Switch Matched-Count Comparison", market), pad=10)
+        y = _wealth_multiple(df)
+        if y.empty:
+            continue
+        loaded.append((window, df, y))
+        rows.append(_portfolio_summary_row("Fixed window", df, window=window))
+    if not loaded:
+        return
+
+    full_row = _portfolio_summary_row("Learned controller", full)
+    stats = pd.DataFrame([full_row, *rows])
+    _write_fixed_window_stats(output_dir, market, seed, stats, pd.Series(full_row))
+
+    fixed_stats = stats[stats["label"].eq("Fixed window")].copy()
+    best_windows_by_metric = {
+        "TR": int(fixed_stats.loc[pd.to_numeric(fixed_stats["total_return"], errors="coerce").idxmax(), "fixed_window_days"]),
+        "Sharpe": int(fixed_stats.loc[pd.to_numeric(fixed_stats["sharpe"], errors="coerce").idxmax(), "fixed_window_days"]),
+        "MDD": int(fixed_stats.loc[pd.to_numeric(fixed_stats["max_drawdown"], errors="coerce").idxmin(), "fixed_window_days"]),
+        "CR": int(fixed_stats.loc[pd.to_numeric(fixed_stats["calmar"], errors="coerce").idxmax(), "fixed_window_days"]),
+    }
+
+    fig, (ax, ax_rank) = plt.subplots(
+        1,
+        2,
+        figsize=(10.4, 5.0),
+        gridspec_kw={"width_ratios": [2.3, 1.0], "wspace": 0.18},
+    )
+    windows = np.array([item[0] for item in loaded], dtype=float)
+    cmap = plt.cm.Purples
+    denom = max(float(windows.max() - windows.min()), 1.0)
+    for window, df, y in loaded:
+        shade = 0.25 + 0.45 * ((float(window) - float(windows.min())) / denom)
+        color = cmap(shade)
+        ax.plot(pd.to_datetime(df["date"]), y, color=color, alpha=0.30, linewidth=0.76, zorder=1)
+
+    if not fixed.empty:
+        fixed_y = _wealth_multiple(fixed)
+        if not fixed_y.empty:
+            ax.plot(
+                pd.to_datetime(fixed["date"]),
+                fixed_y,
+                label="Reference fixed HRL (30d)",
+                color=COLORS["fixed_hrl"],
+                linewidth=1.55,
+                linestyle="--",
+                alpha=0.85,
+                zorder=2,
+            )
+    full_y = _wealth_multiple(full)
+    full_line = ax.plot(
+        pd.to_datetime(full["date"]),
+        full_y,
+        label="Learned controller",
+        color=COLORS["full_controller"],
+        linewidth=2.85,
+        linestyle="-",
+        zorder=4,
+    )[0]
+    _annotate_endpoint(ax, full_line, "Learned controller")
+
+    n = len(fixed_stats)
+    full_tr = float(full_row["total_return"])
+    full_sharpe = float(full_row["sharpe"])
+    full_mdd = float(full_row["max_drawdown"])
+    full_cr = float(full_row["calmar"])
+    beat_tr = int((pd.to_numeric(fixed_stats["total_return"], errors="coerce") < full_tr).sum())
+    beat_sharpe = int((pd.to_numeric(fixed_stats["sharpe"], errors="coerce") < full_sharpe).sum())
+    beat_mdd = int((pd.to_numeric(fixed_stats["max_drawdown"], errors="coerce") > full_mdd).sum())
+    beat_cr = int((pd.to_numeric(fixed_stats["calmar"], errors="coerce") < full_cr).sum())
+    _add_metric_box(
+        ax,
+        [
+            f"Fixed windows: {int(windows.min())}-{int(windows.max())}d, n={n}",
+            f"TR wins: {beat_tr}/{n}; Sharpe wins: {beat_sharpe}/{n}",
+            f"MDD wins: {beat_mdd}/{n}; CR wins: {beat_cr}/{n}",
+        ],
+        loc="lower right",
+    )
+
+    percentile_rows = [
+        ("TR", beat_tr / n * 100.0),
+        ("Sharpe", beat_sharpe / n * 100.0),
+        ("MDD", beat_mdd / n * 100.0),
+        ("CR", beat_cr / n * 100.0),
+    ]
+    y_pos = np.arange(len(percentile_rows))
+    vals = [v for _, v in percentile_rows]
+    rank_colors = [COLORS["full_controller"], COLORS["full_controller"], COLORS["exit"], COLORS["full_controller"]]
+    ax_rank.barh(y_pos, vals, color=rank_colors, alpha=0.88, height=0.58)
+    ax_rank.axvline(50, color=COLORS["muted_ink"], linestyle=(0, (3, 2)), linewidth=1.0)
+    ax_rank.set_yticks(y_pos)
+    ax_rank.set_yticklabels([name for name, _ in percentile_rows])
+    ax_rank.set_xlim(0, 100)
+    ax_rank.set_xlabel("Controller win rate vs fixed windows (%)")
+    ax_rank.set_title("Controller percentile", pad=8)
+    for i, value in enumerate(vals):
+        ax_rank.text(min(value + 2.0, 98.0), i, f"{value:.0f}%", va="center", ha="left" if value < 96 else "right", fontsize=8.7, color=COLORS["paper_ink"])
+    ax_rank.invert_yaxis()
+    _style_axis(ax_rank, grid_axis="x")
+
+    fig.suptitle(_paper_title("Dense Fixed Holding-Window Timing Baseline", market), y=0.985, fontsize=13.8, fontweight="bold")
+    ax.set_title("Wealth paths across fixed holding windows", pad=8)
     ax.set_xlabel("Date")
     ax.set_ylabel("Normalized portfolio value")
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, loc="upper left")
     _style_axis(ax)
-    _save(fig, output_dir, f"fig07_random_switch_comparison_{market}_seed{seed}")
+    fig.subplots_adjust(left=0.065, right=0.985, bottom=0.145, top=0.840, wspace=0.22)
+    _save(fig, output_dir, f"fig07_random_switch_comparison_{market}_seed{seed}", tight=False)
 
 
 def plot_case_windows(input_dir: Path, output_dir: Path, market: str, seed: int):

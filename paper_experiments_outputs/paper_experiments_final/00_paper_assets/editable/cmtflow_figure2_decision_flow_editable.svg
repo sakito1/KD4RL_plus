@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="760" viewBox="0 0 1600 760">
+  <defs>
+    <style>
+      .title { font-family: Arial, Helvetica, sans-serif; font-size: 34px; font-weight: 700; fill: #172033; }
+      .subtitle { font-family: Arial, Helvetica, sans-serif; font-size: 17px; fill: #5E6675; }
+      .label { font-family: Arial, Helvetica, sans-serif; font-size: 19px; font-weight: 700; fill: #172033; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #2B3345; }
+      .tiny { font-family: Arial, Helvetica, sans-serif; font-size: 13px; fill: #5E6675; }
+      .math { font-family: Arial, Helvetica, sans-serif; font-size: 16px; font-style: italic; fill: #172033; }
+      .state { fill: #F5F7FA; stroke: #B7C0CF; stroke-width: 1.4; rx: 12; }
+      .outer { fill: #E8F1FF; stroke: #3B82F6; stroke-width: 2.2; rx: 18; }
+      .controller { fill: #FFF0EC; stroke: #E05A47; stroke-width: 2.2; rx: 18; }
+      .inner { fill: #EAF7F2; stroke: #16A085; stroke-width: 2.2; rx: 18; }
+      .portfolio { fill: #FFF7D7; stroke: #D59B18; stroke-width: 1.8; rx: 12; }
+      .decision { fill: #FFFFFF; stroke: #E05A47; stroke-width: 2.2; }
+      .arrow { stroke: #2B3345; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+      .arrowBlue { stroke: #3B82F6; stroke-width: 2.4; fill: none; marker-end: url(#arrowBlue); }
+      .arrowRed { stroke: #E05A47; stroke-width: 2.4; fill: none; marker-end: url(#arrowRed); }
+      .arrowGreen { stroke: #16A085; stroke-width: 2.4; fill: none; marker-end: url(#arrowGreen); }
+      .dash { stroke: #697386; stroke-width: 1.8; stroke-dasharray: 7 7; fill: none; marker-end: url(#arrowGray); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2B3345"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3B82F6"/>
+    </marker>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#E05A47"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#16A085"/>
+    </marker>
+    <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#697386"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="760" fill="#FFFFFF"/>
+  <text x="60" y="58" class="title">CMTFlow Daily Decision Flow</text>
+  <text x="60" y="88" class="subtitle">A daily event policy compares the current base with an outer-actor candidate, then inner actor refines the selected base.</text>
+
+  <rect x="70" y="165" width="205" height="92" class="state"/>
+  <text x="101" y="198" class="label">Day t state</text>
+  <text x="97" y="225" class="small">Market window X_t</text>
+  <text x="100" y="247" class="small">Drifted holding w_t</text>
+
+  <rect x="355" y="145" width="250" height="132" class="outer"/>
+  <text x="398" y="182" class="label">Outer Actor</text>
+  <text x="391" y="211" class="small">Encode long window</text>
+  <text x="391" y="234" class="small">Top-K sparse allocation</text>
+  <text x="410" y="258" class="math">candidate base w_t^cand</text>
+
+  <rect x="355" y="330" width="250" height="120" class="portfolio"/>
+  <text x="395" y="366" class="label">Current Base</text>
+  <text x="396" y="395" class="small">Passive price drift</text>
+  <text x="418" y="421" class="math">active base b_t</text>
+
+  <rect x="705" y="185" width="300" height="210" class="controller"/>
+  <text x="756" y="225" class="label">Controller</text>
+  <text x="738" y="254" class="small">Compare current and candidate</text>
+  <text x="741" y="279" class="small">Use age, return, drawdown</text>
+  <text x="738" y="304" class="small">Use turnover, concentration, overlap</text>
+  <text x="783" y="340" class="math">p_exit = pi(switch)</text>
+
+  <polygon points="855,452 950,535 855,618 760,535" class="decision"/>
+  <text x="812" y="528" class="label">Switch?</text>
+  <text x="808" y="556" class="small">p_exit &gt; threshold</text>
+
+  <rect x="1095" y="345" width="240" height="105" class="portfolio"/>
+  <text x="1141" y="381" class="label">Selected Base</text>
+  <text x="1130" y="410" class="small">Hold old base or</text>
+  <text x="1134" y="434" class="small">accept candidate base</text>
+
+  <rect x="1095" y="510" width="240" height="120" class="inner"/>
+  <text x="1148" y="548" class="label">Inner Actor</text>
+  <text x="1123" y="577" class="small">LSTM-attention local tilt</text>
+  <text x="1122" y="601" class="small">Refine within selected support</text>
+
+  <rect x="1405" y="510" width="150" height="120" class="portfolio"/>
+  <text x="1437" y="548" class="label">Execute</text>
+  <text x="1434" y="577" class="math">w_t</text>
+  <text x="1432" y="602" class="small">return r_t</text>
+
+  <rect x="70" y="525" width="205" height="92" class="state"/>
+  <text x="114" y="558" class="label">Day t+1</text>
+  <text x="96" y="585" class="small">Update value V_t</text>
+  <text x="96" y="607" class="small">Drift portfolio weights</text>
+
+  <path d="M275 211 L355 211" class="arrow"/>
+  <path d="M275 211 C315 211 318 390 355 390" class="dash"/>
+  <path d="M605 211 C650 211 660 260 705 260" class="arrowBlue"/>
+  <path d="M605 390 C655 390 655 315 705 315" class="dash"/>
+  <path d="M855 395 L855 452" class="arrowRed"/>
+  <path d="M950 535 C1015 535 1020 398 1095 398" class="arrowRed"/>
+  <path d="M760 535 C690 535 690 398 1095 398" class="arrow"/>
+  <text x="978" y="513" class="tiny">switch: use candidate</text>
+  <text x="644" y="512" class="tiny">hold: keep old base</text>
+  <path d="M1215 450 L1215 510" class="arrow"/>
+  <path d="M1335 570 L1405 570" class="arrowGreen"/>
+  <path d="M1480 630 C1480 704 258 704 172 617" class="dash"/>
+  <path d="M172 525 C172 475 172 305 172 257" class="dash"/>
+  <text x="685" y="700" class="tiny">feedback: realized return, price-relative vector, new drifted holding</text>
+
+  <rect x="70" y="665" width="18" height="18" fill="#E8F1FF" stroke="#3B82F6"/>
+  <text x="98" y="679" class="tiny">Outer proposal</text>
+  <rect x="215" y="665" width="18" height="18" fill="#FFF0EC" stroke="#E05A47"/>
+  <text x="243" y="679" class="tiny">Controller decision</text>
+  <rect x="390" y="665" width="18" height="18" fill="#EAF7F2" stroke="#16A085"/>
+  <text x="418" y="679" class="tiny">Inner refinement</text>
+  <rect x="545" y="665" width="18" height="18" fill="#FFF7D7" stroke="#D59B18"/>
+  <text x="573" y="679" class="tiny">Portfolio state/output</text>
+</svg>
