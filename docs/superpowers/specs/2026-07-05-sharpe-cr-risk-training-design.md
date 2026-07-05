@@ -1,7 +1,7 @@
 # Sharpe/CR 风险增强训练设计
 
 日期：2026-07-05
-状态：已根据联合训练 reward 可比性问题修订，等待实现计划
+状态：已根据 PPO 下 variable-length segment 可比较的讨论修订，等待实现计划
 
 ## 目标
 
@@ -36,18 +36,18 @@
 
 ```text
 controller reward = 同一 rollout 上 controlled 策略相对 baseline 的 CR 改善
-outer reward      = 每次 outer 输出组合在固定 horizon 上的反事实 Sharpe
+outer reward      = 每个实际持仓 segment 上 base portfolio 的 realized Sharpe
 inner reward      = 当前 alpha reward，暂时保持不变
 ```
 
-关键修正：联合训练时，outer actor **不能** 使用实际 segment Sharpe。因为自由 controller 会导致不同模型产生不同 segment 数量和不同 segment 长度，实际 segment Sharpe 不可比，且会让 controller 的切换频率污染 outer 的 credit assignment。
+关键修正：联合训练时，outer actor 可以使用 Sharpe，但必须把它作为 PPO 中的相对强弱信号来用，而不是把不同长度 segment 的原始 Sharpe 当成绝对可比的最终指标。PPO 的 advantage/normalization 允许不同 segment 长度的样本共同训练；真正需要控制的是短 segment Sharpe 的高方差，以及 controller 切换频率对 outer 更新次数的影响。
 
 ## 新参数
 
 新增参数默认保持旧行为：
 
 ```text
---outer_reward_mode return|fixed_horizon_sharpe
+--outer_reward_mode return|segment_sharpe|fixed_horizon_sharpe
 --controller_reward_mode return_uplift|relative_cr
 --model_selection_metric sharpe|return|mdd|cr|rank_score
 --inner_selection_metric sharpe|return|mdd|cr|rank_score
@@ -70,6 +70,8 @@ controller_selection_metric=risk_return
 outer_sharpe_horizon=30
 outer_sharpe_coef=1.0
 outer_sharpe_clip=5.0
+outer_sharpe_min_days=5
+outer_sharpe_length_weight=1
 outer_return_floor_coef=0.05
 outer_turnover_coef=0.0
 
@@ -87,52 +89,68 @@ controller_max_switch_penalty_coef=0.001
 
 当 `outer_reward_mode=return` 时，保持当前逻辑不变。outer 的 segment reward 继续来自 daily log return 的聚合。
 
-### 风险增强模式
+### 风险增强主模式：Segment Sharpe
 
-当 `outer_reward_mode=fixed_horizon_sharpe` 时，每次 outer actor 在第 `t` 天输出 base portfolio `w_t`，不使用实际持仓 segment 的收益来评价它，而是使用固定 horizon 的反事实路径。
+当 `outer_reward_mode=segment_sharpe` 时，每个 outer decision 对应一个实际持仓 segment。outer reward 使用该 segment 内 base portfolio 的 realized Sharpe。
 
-设固定 horizon 为 `H=30`：
+设某次 outer 在第 `t_s` 天输出 base portfolio `w_s`，该组合实际被 controller 持有到 `t_e`：
 
 ```text
-path_H(w_t) = 从第 t 天开始，使用 w_t 买入并持有 H 天得到的反事实净值路径
+base_path_s = 从 t_s 到 t_e，使用 w_s 作为 base portfolio 得到的 base-only 净值路径
 
-daily_log_returns_H = path_H(w_t) 的逐日 log return
+base_daily_log_returns_s = base_path_s 的逐日 log return
 
-sharpe_H =
-  mean(daily_log_returns_H)
-  / (std(daily_log_returns_H) + eps)
+segment_sharpe_s =
+  mean(base_daily_log_returns_s)
+  / (std(base_daily_log_returns_s) + eps)
   * sqrt(252)
 
-log_return_H = log(path_H[-1] / path_H[0])
+segment_log_return_s = log(base_path_s[-1] / base_path_s[0])
 ```
 
 outer reward：
 
 ```text
-outer_reward_t =
-  outer_sharpe_coef * clip(sharpe_H, -outer_sharpe_clip, outer_sharpe_clip)
-+ outer_return_floor_coef * log_return_H
-- outer_turnover_coef * turnover_to_w_t
+outer_reward_s =
+  outer_sharpe_coef * clip(segment_sharpe_s, -outer_sharpe_clip, outer_sharpe_clip)
++ outer_return_floor_coef * segment_log_return_s
+- outer_turnover_coef * turnover_to_w_s
 ```
 
-这里的 `turnover_to_w_t` 可以先设为 0，不作为第一版核心约束。
+这里的 `turnover_to_w_s` 可以先设为 0，不作为第一版核心约束。
 
-### 为什么不能用实际 segment Sharpe
+必须使用 base-only path，而不是 inner 调整后的 executed path。这样 outer 的 credit 只来自它选出的 base portfolio，inner actor 的局部执行能力不会污染 outer reward。
 
-联合训练时，controller 会改变切换时点：
+### 为什么 variable-length segment 仍然可以用 Sharpe
 
-- 模型 A 可能产生 10 个长 segment。
-- 模型 B 可能产生 30 个短 segment。
-- 短 segment 的 Sharpe 方差更大，也更容易被极端短期波动放大。
-- 如果 outer 使用实际 segment Sharpe，那么 outer 的 reward 分布会被 controller 的切换频率改变。
+outer actor 使用 PPO，训练时比较的是 action 的相对 advantage，而不是把每个 segment Sharpe 当作最终表格指标直接比较。因此 segment 步数不同不是原则性问题。
 
-因此 outer 必须用统一的 `H` 做横向比较。这样 outer 的每个动作都回答同一个问题：
+但短 segment 的 Sharpe 方差更大，所以实现时需要三层保护：
 
 ```text
-如果从今天开始固定持有这个 base portfolio H 天，它的风险调整质量如何？
+1. 对 segment_sharpe 做 clip。
+2. 对 outer reward/advantage 做 batch normalization 或沿用 PPO 的 advantage normalization。
+3. 对过短 segment 使用 length reliability weight，或在天数不足 outer_sharpe_min_days 时退化为 return floor。
 ```
 
-这让 outer 的学习目标和 controller 的切换频率解耦。
+可选的 length reliability weight：
+
+```text
+length_weight = min(1, sqrt(segment_days / outer_sharpe_horizon))
+outer_reward_s = length_weight * clipped_segment_sharpe + return_floor
+```
+
+这个权重不是因为不同长度不能训练，而是为了降低短段 Sharpe 的估计噪声。
+
+### 可选对照模式：Fixed-Horizon Sharpe
+
+`outer_reward_mode=fixed_horizon_sharpe` 保留为 ablation 或诊断模式。它在每个 outer action day 使用固定 `H` 天的反事实 Sharpe：
+
+```text
+path_H(w_t) = 从第 t 天开始，使用 w_t 买入并持有 H 天得到的反事实净值路径
+```
+
+该模式的优点是评价窗口完全一致，缺点是更像监督式未来标签，和实际 controller 持仓路径的耦合较弱。第一版主实验使用 `segment_sharpe`，fixed-horizon 作为稳定性对照。
 
 ## Controller Reward
 
@@ -185,14 +203,14 @@ inner actor 的任务仍然是持仓期内相对 base portfolio 做局部增强�
 
 controller 固定周期，inner 关闭或固定。
 
-目标是让 outer actor 学会在每个决策日选择未来固定 horizon 风险收益质量更高的 base portfolio。
+目标是让 outer actor 学会选择实际持仓段内风险收益质量更高的 base portfolio。
 
 ```text
-outer_reward = fixed_horizon_counterfactual_sharpe(w_t, H=30)
+outer_reward = base-only segment Sharpe
              + small_return_floor
 ```
 
-不使用实际 segment Sharpe，即使 warmup 阶段 segment 长度固定，也建议直接使用 fixed-horizon Sharpe，以保证 warmup 和后续联训目标一致。
+warmup 阶段 controller 固定，因此 segment 长度基本一致，segment Sharpe 的噪声较低。这个阶段可以让 outer 先建立 Sharpe-oriented 的选组合能力。
 
 ### 阶段 2：Warmup Inner
 
@@ -209,11 +227,11 @@ inner_reward = executed_return - base_return
 controller 仍然由固定 schedule 控制，outer 和 inner 可以一起训练。
 
 ```text
-outer_reward = fixed_horizon_counterfactual_sharpe(w_t, H=30)
+outer_reward = base-only segment Sharpe
 inner_reward = executed_return - base_return
 ```
 
-此阶段的作用是让 outer 的 fixed-horizon Sharpe 目标和 inner 的局部 alpha 目标先共同稳定下来。
+此阶段的作用是让 outer 的 segment Sharpe 目标和 inner 的局部 alpha 目标先共同稳定下来。
 
 ### 阶段 4：Controller PG
 
@@ -231,15 +249,15 @@ controlled 和 baseline 在同一个 rollout window 上比较，因此 CR 可比
 
 ```text
 controller_reward = rollout-level relative CR uplift
-outer_reward      = fixed-horizon counterfactual Sharpe of selected base portfolio
+outer_reward      = base-only realized segment Sharpe of selected base portfolio
 inner_reward      = executed_return - base_return
 ```
 
-不要让 outer 使用 controller 的 rollout CR reward。不要让 outer 使用实际 variable-length segment Sharpe。
+不要让 outer 使用 controller 的 rollout CR reward。outer 使用自身 segment 的 Sharpe，相当于评价“这次换过去的 base portfolio 在实际持仓期间质量如何”。
 
-controller 决定切换频率，outer 只评价每次切换时给出的组合在标准 horizon 上的质量。
+controller 决定切换频率，outer 评价每次切换时给出的组合在实际持仓段内的相对强弱。
 
-实现时还要注意：outer loss 应按 outer decision 数量做平均或保持现有 PPO 归一化，避免“切换更多导致 outer 梯度次数更多”成为隐式奖励。切换频率只应由 controller 的 CR reward 和 switch penalty 管。
+实现时还要注意：outer loss 应按 outer decision 数量做平均或保持现有 PPO 归一化，避免“切换更多导致 outer 梯度次数更多”成为隐式奖励。切换频率只应由 controller 的 CR reward 和 switch penalty 管。短 segment 的 Sharpe 只作为带 clip/weight 的相对 reward 使用，不作为最终评测指标。
 
 ## 模型选择
 
@@ -307,9 +325,9 @@ SH_SEEDS="80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99"
 1. `run_hrl_training.py` 解析新增 reward mode、horizon、clip 和系数参数。
 2. runtime config 保存这些参数，默认值保持旧行为。
 3. `PPO_Env.step` 继续输出 daily log return、portfolio value、base weight、outer action 等信息。
-4. 新增固定 horizon 反事实指标计算函数，用于根据 outer action `w_t` 计算 `Sharpe_H` 和 `log_return_H`。
-5. buffer 或 trainer 在 outer 决策点记录 fixed-horizon outer reward。
-6. `HRL_Buffer.finish_episode` 在 `outer_reward_mode=return` 时保持旧聚合逻辑，在 `fixed_horizon_sharpe` 时使用记录好的 outer decision reward。
+4. 新增 segment-level base-only Sharpe 计算函数，用于根据 outer action `w_s` 和实际持仓段 `[t_s, t_e]` 计算 `segment_sharpe_s` 和 `segment_log_return_s`。
+5. buffer 或 trainer 在 outer decision segment 结束时记录 segment Sharpe outer reward。
+6. `HRL_Buffer.finish_episode` 在 `outer_reward_mode=return` 时保持旧聚合逻辑，在 `segment_sharpe` 时使用对应 segment 的 base-only Sharpe reward；`fixed_horizon_sharpe` 作为可选对照模式。
 7. controller counterfactual rollout 计算 baseline 和 controlled 的 log return、MDD、annualized return、CR。
 8. `controller_reward` 根据 `controller_reward_mode` 选择旧 return uplift 或新 relative CR uplift。
 9. validation 计算 total return、annualized return、Sharpe、MDD 和 CR。
@@ -325,19 +343,23 @@ SH_SEEDS="80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99"
 - CR 在 max drawdown 极小或为 0 时使用 epsilon 和 clip，避免爆炸。
 - `_validation_score` 支持 `cr` 和 `rank_score`。
 - `outer_reward_mode=return` 时，outer reward 聚合与旧逻辑一致。
-- `outer_reward_mode=fixed_horizon_sharpe` 时，outer reward 使用固定 horizon 反事实 Sharpe，而不是实际 segment Sharpe。
-- 两个不同实际 segment 长度的 outer action，如果 action day 和 `w_t` 相同，应得到相同 fixed-horizon outer reward。
+- `outer_reward_mode=segment_sharpe` 时，outer reward 使用 base-only realized segment Sharpe，不使用 inner executed return。
+- 两个相同 base-only return 序列应得到相同 segment Sharpe reward，即使它们来自不同 rollout。
+- 过短 segment 应触发 clip、length weight 或 return-floor fallback，避免 Sharpe 爆炸。
+- `outer_reward_mode=fixed_horizon_sharpe` 作为可选对照时，应使用固定 horizon 反事实 Sharpe。
 - 原始 `run_end_to_end_hrl_controller_joint_nas49_sh90.sh` echo 测试仍然通过。
 - 新 seed-sweep 脚本 echo 测试检查 seeds、reward modes、selection metrics 和 safe output root。
 
 ## 风险与缓解
 
-固定 horizon Sharpe 仍可能有噪声。使用 `outer_sharpe_clip`、`eps` 和 small return floor 控制。
+segment Sharpe 在短持仓段上可能有噪声。使用 `outer_sharpe_clip`、`eps`、length reliability weight 和 small return floor 控制。
 
 CR 在极低回撤时可能爆炸。使用 `controller_cr_clip` 和 `eps`。
 
 所有指标同时 best 不一定存在，因为总收益和回撤天然可能冲突。通过 `best_rank_score` 和单指标 best checkpoint 同时保存来避免只押一个指标。
 
-outer 使用未来固定 horizon 反事实 reward 会引入更强的监督信号，但这是训练期可用的历史数据反事实评价，不影响测试期策略执行。
+outer 使用 segment Sharpe 会受到 controller 切换频率影响。通过按 outer decision 归一化 loss、controller switch penalty、以及短段 Sharpe 降权来缓解。
+
+fixed-horizon Sharpe 可作为 ablation。如果实际 segment Sharpe 训练不稳定，再切换到 fixed-horizon 模式做稳定性对照。
 
 现有好模型必须可复现。通过默认参数保持旧行为、保留旧脚本、测试旧脚本 echo 输出进行保护。
