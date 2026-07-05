@@ -1,72 +1,48 @@
-# Sharpe/CR 风险增强训练设计
+# Sharpe/CR 风险增强训练设计（最小侵入版）
 
 日期：2026-07-05
-状态：已根据 PPO 下 variable-length segment 可比较、controller 完全自由切换的讨论修订，等待实现计划
+状态：按现有 end-to-end 链路简化，等待实现计划
 
 ## 目标
 
-设计一条独立的风险增强训练流程，让 KD4RL+ 尽量在总收益、Sharpe、最大回撤和 CR/Calmar ratio 上同时超过 DeepAries 和 DeepTrader等baseline。
-
-第一原则是不影响当前稳定训练流程：
+沿现有训练链路：
 
 `train_sh/run_end_to_end_hrl_controller_joint_nas49_sh90.sh`
 
-所有新 reward、新选择指标和新 seed sweep 都必须通过新参数和新脚本显式开启。默认参数保持旧行为。
+新增一条独立风险增强训练流程。目标是在尽量不改动原训练结构的前提下，让模型在收益率优先的基础上改善 Sharpe、最大回撤和 CR，从而更有机会超过 DeepAries、DeepTrader 等 baseline。
 
-## 当前问题
+原脚本不改默认行为。新实验通过新脚本和新增 reward 参数显式开启。
 
-现有训练流程主要还是 return-oriented：
+## 最小侵入原则
 
-- `train_sh/run_end_to_end_hrl_controller_joint_nas49_sh90.sh` 中 controller 使用 `--controller_return_coef`，并把 `--controller_mdd_coef` 固定为 `0.0`。
-- `Train/controller_pg.py::controller_reward` 虽然保留了 `mdd_coef` 等参数，但当前实现有意忽略 MDD、turnover 和 minimum-count penalty，只使用相对 log-return uplift 加 max-switch overflow penalty。
-- `env/PPO_env.py::step` 中 outer reward 目前是 daily log return，outer actor 没有直接优化 Sharpe。
-- 现有 validation selection 支持 `return`、`mdd`、`sharpe` 和 `risk_return`，但不支持 CR/Calmar，也不支持综合多指标排名。
+本设计只改三件事：
 
-因此，单纯调脚本里的系数无法实现“outer 用 Sharpe、controller 用相对 CR”的风险训练目标，需要新增 opt-in reward mode。
+1. outer actor 的 reward 从 segment return 切换为 segment Sharpe。
+2. controller 的 reward 从 return uplift 切换为相对 CR uplift。
+3. seed 范围扩大，模型选择先按收益率最高。
 
-## 核心设计原则
+不引入 rank score，不引入复杂多目标 selection，不引入 fixed-horizon reward，不对 reward 做 clip。只保留必要的 `eps` 防止除零。
 
-三个模块的职责必须分清：
-
-- controller 负责“什么时候换仓”，在 controller-active 阶段不受最大持仓期硬约束。
-- outer actor 负责“换仓时选什么 base portfolio”。
-- inner actor 负责“持仓期间如何微调执行权重”。
-
-对应的 reward 也必须分清：
-
-```text
-controller reward = 同一 rollout 上 controlled 策略相对 baseline 的 CR 改善
-outer reward      = 每个实际持仓 segment 上 base portfolio 的 realized Sharpe
-inner reward      = 当前 alpha reward，暂时保持不变
-```
-
-关键修正：联合训练时，outer actor 可以使用 Sharpe，但必须把它作为 PPO 中的相对强弱信号来用，而不是把不同长度 segment 的原始 Sharpe 当成绝对可比的最终指标。PPO 的 advantage/normalization 允许不同 segment 长度的样本共同训练；真正需要控制的是短 segment Sharpe 的高方差，以及 controller 切换频率对 outer 更新次数的影响。
-
-第二个关键修正：controller-active 阶段不再考虑最大持仓期。除了第一个交易日必须建仓外，是否 switch 完全由 controller policy 决定。`min_hold`、`max_hold` 和 hard max-switch cap 不再作为强制规则介入 controller 训练或测试；切换频率只通过 relative CR reward、switch overflow soft penalty、entropy 和最终 validation 结果间接约束。
-
-## 新参数
+## 新增参数
 
 新增参数默认保持旧行为：
 
 ```text
---outer_reward_mode return|segment_sharpe|fixed_horizon_sharpe
+--outer_reward_mode return|segment_sharpe
 --controller_reward_mode return_uplift|relative_cr
---model_selection_metric sharpe|return|mdd|cr|rank_score
---inner_selection_metric sharpe|return|mdd|cr|rank_score
---controller_selection_metric risk_return|return|mdd|sharpe|cr|rank_score
 ```
 
-默认值：
+风险增强脚本中使用：
 
 ```text
-outer_reward_mode=return
-controller_reward_mode=return_uplift
-model_selection_metric=sharpe
+outer_reward_mode=segment_sharpe
+controller_reward_mode=relative_cr
+model_selection_metric=return
 inner_selection_metric=return
-controller_selection_metric=risk_return
+controller_selection_metric=return
 ```
 
-controller-active 阶段的自由切换默认设置：
+controller 保持自由切换：
 
 ```text
 controller_no_hold_constraints=1
@@ -77,248 +53,147 @@ controller_eval_decision_mode=daily
 controller_eval_force_max_hold=0
 ```
 
-这里 `controller_train_max_hold=0` 和 `controller_eval_max_hold=0` 表示禁用 forced max-hold，而不是使用 0 天持仓。现有实现里 controller PG 训练已经部分支持这个语义，但 controller-active joint / eval 的 force-switch 逻辑也必须统一遵守该语义。
-
-新增 reward 系数建议：
-
-```text
-outer_sharpe_horizon=30
-outer_sharpe_coef=1.0
-outer_sharpe_clip=5.0
-outer_sharpe_min_days=5
-outer_sharpe_length_weight=1
-outer_return_floor_coef=0.05
-outer_turnover_coef=0.0
-
-controller_cr_coef=1.0
-controller_cr_clip=5.0
-controller_return_floor_coef=0.05
-controller_max_switch_penalty_coef=0.001
-```
-
-这些值作为第一轮实验起点，后续可以做小网格搜索。
+这里 `controller_train_max_hold=0` 和 `controller_eval_max_hold=0` 表示禁用 forced max-hold。除了第一个交易日必须建仓，之后是否 switch 完全由 controller policy 决定。
 
 ## Outer Actor Reward
 
-### 旧模式
+现有 outer reward 是每个 segment 内 daily log return 的求和。风险增强版只把这个 segment 聚合方式改成 Sharpe。
 
-当 `outer_reward_mode=return` 时，保持当前逻辑不变。outer 的 segment reward 继续来自 daily log return 的聚合。
-
-### 风险增强主模式：Segment Sharpe
-
-当 `outer_reward_mode=segment_sharpe` 时，每个 outer decision 对应一个实际持仓 segment。outer reward 使用该 segment 内 base portfolio 的 realized Sharpe。
-
-设某次 outer 在第 `t_s` 天输出 base portfolio `w_s`，该组合实际被 controller 持有到 `t_e`：
+设某个 outer decision 产生一个实际持仓段：
 
 ```text
-base_path_s = 从 t_s 到 t_e，使用 w_s 作为 base portfolio 得到的 base-only 净值路径
+segment_returns = 该 segment 内的 daily portfolio log returns
+```
 
-base_daily_log_returns_s = base_path_s 的逐日 log return
+当 `outer_reward_mode=return`：
 
-segment_sharpe_s =
-  mean(base_daily_log_returns_s)
-  / (std(base_daily_log_returns_s) + eps)
+```text
+outer_reward = sum(segment_returns)
+```
+
+当 `outer_reward_mode=segment_sharpe`：
+
+```text
+outer_reward =
+  mean(segment_returns)
+  / (std(segment_returns) + eps)
   * sqrt(252)
-
-segment_log_return_s = log(base_path_s[-1] / base_path_s[0])
 ```
 
-outer reward：
+这里的 segment 是 controller 实际决定出来的 segment。它会受到 controller stopping rule 的影响，这是可以接受的，因为在联合训练时我们希望 outer actor 在整个 controller-aware 框架下学习：controller 切到哪里，outer 就评价这段实际持仓结果的相对强弱。
 
-```text
-outer_reward_s =
-  outer_sharpe_coef * clip(segment_sharpe_s, -outer_sharpe_clip, outer_sharpe_clip)
-+ outer_return_floor_coef * segment_log_return_s
-```
-
-这里的 `turnover_to_w_s` 可以先设为 0，不作为第一版核心约束。
-
-必须使用 base-only path，而不是 inner 调整后的 executed path。这样 outer 的 credit 只来自它选出的 base portfolio，inner actor 的局部执行能力不会污染 outer reward。
-
-### 为什么 variable-length segment 仍然可以用 Sharpe
-
-outer actor 使用 PPO，训练时比较的是 action 的相对 advantage，而不是把每个 segment Sharpe 当作最终表格指标直接比较。因此 segment 步数不同不是原则性问题。
-
-但短 segment 的 Sharpe 方差更大，所以实现时需要三层保护：
-
-```text
-1. 对 segment_sharpe 做 clip。
-2. 对 outer reward/advantage 做 batch normalization 或沿用 PPO 的 advantage normalization。
-3. 对过短 segment 使用 length reliability weight，或在天数不足 outer_sharpe_min_days 时退化为 return floor。
-```
-
-可选的 length reliability weight：
-
-```text
-length_weight = min(1, sqrt(segment_days / outer_sharpe_horizon))
-outer_reward_s = length_weight * clipped_segment_sharpe + return_floor
-```
-
-这个权重不是因为不同长度不能训练，而是为了降低短段 Sharpe 的估计噪声。
-
-### 可选对照模式：Fixed-Horizon Sharpe
-
-`outer_reward_mode=fixed_horizon_sharpe` 保留为 ablation 或诊断模式。它在每个 outer action day 使用固定 `H` 天的反事实 Sharpe：
-
-```text
-path_H(w_t) = 从第 t 天开始，使用 w_t 买入并持有 H 天得到的反事实净值路径
-```
-
-该模式的优点是评价窗口完全一致，缺点是更像监督式未来标签，和实际 controller 持仓路径的耦合较弱。第一版主实验使用 `segment_sharpe`，fixed-horizon 作为稳定性对照。
+不同 segment 的步数可以不同。outer actor 使用 PPO，训练比较的是 advantage 的相对强弱，不要求每个 segment 的长度完全一致。短 segment 的 Sharpe 会更噪声，但第一版不做复杂处理，只使用 `eps` 保证数值稳定。
 
 ## Controller Reward
 
-controller 使用 rollout 级别的相对 CR 改善。
+controller reward 使用当前 controller 策略相对于“训练好的 HRL”的 CR 改善。
 
-对于同一个训练窗口，构造两条路径：
+训练好的 HRL 指前面 warmup outer、warmup inner、固定周期 HRL joint 后得到的 HRL 策略。controller 学的是：在这套已训练 HRL 基础上，加入自由 switch 后，整段 rollout 的 CR 是否提升。
+
+对同一个 rollout window，计算两条路径：
 
 ```text
-baseline   = 无自由 controller / 固定规则 / 继续原策略的 counterfactual path
-controlled = 当前 controller 策略产生的 path
+baseline_path   = 训练好的 HRL，不使用自由 controller
+controlled_path = 训练好的 HRL + 当前 controller policy
 ```
-
-两条路径必须覆盖同一个 rollout window，因此长度一致，可以比较 CR。
 
 CR 定义：
 
 ```text
-annualized_return = mean(daily_returns) * 252
-CR = annualized_return / max(max_drawdown, eps)
+CR = annualized_return / (max_drawdown + eps)
 ```
 
-controller reward：
+当 `controller_reward_mode=return_uplift`，保持旧逻辑。
+
+当 `controller_reward_mode=relative_cr`：
 
 ```text
 controller_reward =
-  controller_cr_coef * clip(CR_controlled - CR_baseline, -controller_cr_clip, controller_cr_clip)
-- normalized_max_switch_overflow_penalty
+  CR(controlled_path) - CR(baseline_path)
+  - switch_penalty
 ```
 
-使用相对 CR uplift，而不是绝对 CR，原因是 controller 应学习“当前切换策略相对同一窗口 baseline 是否改善了风险收益效率”。
-
-return floor 很小，只用于防止 controller 学到“收益很低但回撤也很低”的保守路径。
-
-switch penalty 仍然由 controller 承担，因为切换频率是 controller 的职责，不应该通过 outer reward 间接惩罚。
-
-controller reward 不包含最大持仓期惩罚。若 controller 长时间不切换但 CR 更高，这是允许的；若频繁切换导致交易成本、回撤或收益质量变差，relative CR 和 soft switch penalty 会给出负反馈。
-
-## Inner Actor Reward
-
-第一版不改 inner actor reward：
-
-```text
-inner_reward = executed_return - base_return
-```
-
-inner actor 的任务仍然是持仓期内相对 base portfolio 做局部增强。暂时不把 Sharpe 或 CR 直接塞给 inner，避免三个模块同时改变导致无法定位实验效果。
+其中 `switch_penalty` 继续使用现有 soft max-switch penalty。它只作为软惩罚，不作为 hard cap。
 
 ## 各阶段训练设计
 
-### 阶段 1：Warmup Outer
+### 1. Warmup Outer
 
-controller 固定周期，inner 关闭或固定。
+沿原链路训练 outer。
 
-目标是让 outer actor 学会选择实际持仓段内风险收益质量更高的 base portfolio。
+风险增强脚本中：
 
 ```text
-outer_reward = base-only segment Sharpe
-             + small_return_floor
+outer_reward = segment_sharpe
 ```
 
-warmup 阶段 controller 固定，因此 segment 长度基本一致，segment Sharpe 的噪声较低。这个阶段可以让 outer 先建立 Sharpe-oriented 的选组合能力。
+controller 仍由固定 schedule 控制，因此这个阶段的 segment 长度相对稳定，outer 先学习风险调整后的组合选择。
 
-### 阶段 2：Warmup Inner
+### 2. Warmup Inner
 
-outer 和 controller 不作为主要训练对象，inner 保持旧目标：
+保持原逻辑不变：
 
 ```text
 inner_reward = executed_return - base_return
 ```
 
-这个阶段只让 inner 学习在已有 base portfolio 上做局部执行增强。
+不把 Sharpe 或 CR 加到 inner actor 上，避免一次性改动过多。
 
-### 阶段 3：固定周期 HRL Joint
+### 3. 固定周期 HRL Joint
 
-controller 仍然由固定 schedule 控制，outer 和 inner 可以一起训练。
+沿原链路做 outer + inner joint。
 
 ```text
-outer_reward = base-only segment Sharpe
+outer_reward = segment_sharpe
 inner_reward = executed_return - base_return
 ```
 
-此阶段的作用是让 outer 的 segment Sharpe 目标和 inner 的局部 alpha 目标先共同稳定下来。
+这个阶段得到“训练好的 HRL”，作为后续 controller 相对 CR reward 的 baseline。
 
-### 阶段 4：Controller PG
+### 4. Controller PG
 
-冻结或近似冻结 outer/inner，单独训练 controller。
+冻结或近似冻结训练好的 HRL，训练 controller。
 
 ```text
-controller_reward = rollout_level_relative_CR_uplift
+controller_reward = CR(controlled_path) - CR(trained_HRL_baseline_path) - switch_penalty
 ```
 
-controlled 和 baseline 在同一个 rollout window 上比较，因此 CR 可比。这个阶段只学习“什么时候切换”。
+controller 不考虑最大持仓期，不考虑最小持仓期。除首日建仓外，每天是否 switch 都由 controller policy 决定。
 
-该阶段不使用 min-hold 或 max-hold 强制规则：
+### 5. Controller-active Joint
 
-```text
-step_idx == 0: 强制 switch，用于建仓
-step_idx > 0: controller 每天自由决定 hold / switch
-```
-
-如果 controller 一直 hold 到 rollout 结束，这是合法轨迹；如果 controller 每天 switch，也只是通过交易成本、CR 变化和 soft switch penalty 受到惩罚，而不是被硬规则禁止。
-
-### 阶段 5：Controller + Outer 联合训练
-
-这是最关键阶段，reward 必须保持职责分离：
+沿原链路做最终 controller-active joint。
 
 ```text
-controller_reward = rollout-level relative CR uplift
-outer_reward      = base-only realized segment Sharpe of selected base portfolio
+outer_reward      = segment_sharpe
+controller_reward = relative_cr
 inner_reward      = executed_return - base_return
 ```
 
-不要让 outer 使用 controller 的 rollout CR reward。outer 使用自身 segment 的 Sharpe，相当于评价“这次换过去的 base portfolio 在实际持仓期间质量如何”。
+这里 outer 的 segment Sharpe 接受 controller stopping rule 的影响。这个设计符合联合训练逻辑：整个框架共同决定实际持仓段，outer 在这个实际框架下学习每次 switch 后组合的相对强弱。
 
-controller 决定切换频率，outer 评价每次切换时给出的组合在实际持仓段内的相对强弱。
+## 模型选择与评估
 
-实现时还要注意：outer loss 应按 outer decision 数量做平均或保持现有 PPO 归一化，避免“切换更多导致 outer 梯度次数更多”成为隐式奖励。切换频率只应由 controller 的 CR reward、交易成本和 soft switch penalty 管。短 segment 的 Sharpe 只作为带 clip/weight 的相对 reward 使用，不作为最终评测指标。
+第一版不做复杂多指标选择。
 
-该阶段同样不使用 max-hold forced switch。风险增强版 controller 的目标是学习完全自由的切换策略，而不是在手工最大持仓期边界附近做局部优化。
-
-## 模型选择
-
-训练 reward 负责优化模块行为，最终模型选择使用多指标。
-
-验证指标：
+训练中 checkpoint selection 先按收益率最高：
 
 ```text
-total_return: 越高越好
-sharpe:       越高越好
-max_drawdown: 越低越好
-cr:           越高越好
+model_selection_metric=return
+controller_selection_metric=return
+inner_selection_metric=return
 ```
 
-新增 `rank_score`：
+最终报告仍然统计：
 
 ```text
-rank_score =
-  rank(total_return, higher better)
-+ rank(sharpe, higher better)
-+ rank(cr, higher better)
-+ rank(max_drawdown, lower better)
+total_return
+sharpe
+max_drawdown
+cr
 ```
 
-保存以下 checkpoint：
-
-```text
-best_return
-best_sharpe
-best_mdd
-best_cr
-best_rank_score
-```
-
-如果某个模型在所有指标上都是 best，则直接作为主结果。如果没有，则使用 `best_rank_score` 作为综合主结果，同时保留单指标冠军用于表格和消融分析。
+如果收益率最高的模型风险指标不理想，再考虑第二轮加权 selection 或 CR selection。第一轮先保持简单。
 
 ## Seed Sweep
 
@@ -326,81 +201,57 @@ best_rank_score
 
 `train_sh/run_end_to_end_hrl_controller_joint_sharpe_cr_seed_sweep.sh`
 
-第一轮 seed：
+第一轮 seeds：
 
 ```text
 NAS_SEEDS="41 42 43 44 45 46 47 48 49 50"
 SH_SEEDS="82 83 84 85 86 87 88 89 90 91"
 ```
 
-算力允许且训练稳定后扩展到 20 seeds：
+算力允许后扩展到 20 seeds：
 
 ```text
 NAS_SEEDS="40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59"
 SH_SEEDS="80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99"
 ```
 
-默认输出目录：
+输出目录独立：
 
 `results/end_to_end_hrl_controller_joint_sharpe_cr_seed_sweep`
 
-该脚本必须保留现有 protected-output 检查，拒绝写入 archived good-model roots。
+保留现有 protected-output 检查，避免覆盖已有好模型。
 
-## 实现数据流
+## 实现要点
 
-1. `run_hrl_training.py` 解析新增 reward mode、horizon、clip 和系数参数。
-2. runtime config 保存这些参数，默认值保持旧行为。
-3. `PPO_Env.step` 继续输出 daily log return、portfolio value、base weight、outer action 等信息。
-4. 新增 segment-level base-only Sharpe 计算函数，用于根据 outer action `w_s` 和实际持仓段 `[t_s, t_e]` 计算 `segment_sharpe_s` 和 `segment_log_return_s`。
-5. buffer 或 trainer 在 outer decision segment 结束时记录 segment Sharpe outer reward。
-6. `HRL_Buffer.finish_episode` 在 `outer_reward_mode=return` 时保持旧聚合逻辑，在 `segment_sharpe` 时使用对应 segment 的 base-only Sharpe reward；`fixed_horizon_sharpe` 作为可选对照模式。
-7. controller counterfactual rollout 计算 baseline 和 controlled 的 log return、MDD、annualized return、CR。
-8. `controller_reward` 根据 `controller_reward_mode` 选择旧 return uplift 或新 relative CR uplift。
-9. validation 计算 total return、annualized return、Sharpe、MDD 和 CR。
-10. trainer 保存单指标 best checkpoint 和综合 rank-score checkpoint。
-11. 新 seed-sweep 脚本运行 NASDAQ 和 CSI-300 的扩大 seed 实验。
-
-controller force-switch 逻辑需要统一修改：
-
-- controller PG window 中 `controller_train_max_hold=0` 禁用 forced max-hold。
-- controller-active joint / eval 中也必须读取 `controller_train_max_hold` / `controller_eval_max_hold`，不能继续在训练时直接使用全局 `max_hold` 强制切换。
-- 当 `controller_no_hold_constraints=1` 且对应 max-hold override 为 `0` 时，除首日建仓外，不因持仓时长强制 hold 或 switch。
-- `controller_max_switches` 只作为 soft penalty 阈值，不作为 hard cap。
+1. 在 `run_hrl_training.py` 增加 `outer_reward_mode` 和 `controller_reward_mode` 参数。
+2. 在 outer segment 聚合处增加 `segment_sharpe` 模式。
+3. 在 controller reward 处增加 `relative_cr` 模式。
+4. controller 的 baseline 使用训练好的 HRL，不使用自由 controller。
+5. controller-active 阶段确保 `controller_train_max_hold=0` 和 `controller_eval_max_hold=0` 真正禁用 forced max-hold。
+6. 新增 seed-sweep 脚本，复制现有 e2e 链路，只改输出目录、seeds、reward mode 和 selection metric。
+7. 原脚本默认行为必须不变。
 
 ## 测试计划
 
-实现前先加 focused tests：
+需要覆盖：
 
-- 旧默认参数下，`controller_reward` 保持 return uplift 行为不变。
-- `controller_reward_mode=relative_cr` 时，reward 使用 clipped CR uplift。
-- CR 在 max drawdown 极小或为 0 时使用 epsilon 和 clip，避免爆炸。
-- `_validation_score` 支持 `cr` 和 `rank_score`。
-- `outer_reward_mode=return` 时，outer reward 聚合与旧逻辑一致。
-- `outer_reward_mode=segment_sharpe` 时，outer reward 使用 base-only realized segment Sharpe，不使用 inner executed return。
-- 两个相同 base-only return 序列应得到相同 segment Sharpe reward，即使它们来自不同 rollout。
-- 过短 segment 应触发 clip、length weight 或 return-floor fallback，避免 Sharpe 爆炸。
-- `outer_reward_mode=fixed_horizon_sharpe` 作为可选对照时，应使用固定 horizon 反事实 Sharpe。
-- 原始 `run_end_to_end_hrl_controller_joint_nas49_sh90.sh` echo 测试仍然通过。
-- 新 seed-sweep 脚本 echo 测试检查 seeds、reward modes、selection metrics 和 safe output root。
-- `controller_train_max_hold=0` 时，controller PG rollout 不会因为达到全局 `max_hold` 被强制 switch。
-- `controller_eval_max_hold=0` 时，controller eval/test 不会因为达到全局 `max_hold` 被强制 switch。
-- controller-active joint 阶段应与 controller PG/eval 一致，禁用 forced max-hold；这需要覆盖 `_compute_force_switch_locked` 的测试。
+- 原 `run_end_to_end_hrl_controller_joint_nas49_sh90.sh` echo 测试仍通过。
+- `outer_reward_mode=return` 时 outer reward 与旧逻辑一致。
+- `outer_reward_mode=segment_sharpe` 时 outer reward 使用 segment returns 计算 Sharpe。
+- `controller_reward_mode=return_uplift` 时 controller reward 与旧逻辑一致。
+- `controller_reward_mode=relative_cr` 时 controller reward 等于 controlled path 和 trained-HRL baseline path 的 CR 差值再减 soft switch penalty。
+- `controller_train_max_hold=0` 和 `controller_eval_max_hold=0` 时不会因为达到全局 `max_hold` 被 forced switch。
+- 新 seed-sweep 脚本使用独立 output root 和扩大 seeds。
 
-## 风险与缓解
+## 关于“短 segment Sharpe 噪声”的说明
 
-segment Sharpe 在短持仓段上可能有噪声。使用 `outer_sharpe_clip`、`eps`、length reliability weight 和 small return floor 控制。
+之前提到“短 segment Sharpe 噪声大”，意思是：segment 天数越少，Sharpe 的估计方差越高。这个问题存在，但不意味着不能训练。PPO 比较的是 batch 内相对 advantage，第一版可以先接受这个噪声，只用 `eps` 做数值保护。若实验中出现极端不稳定，再考虑加 clip 或最短天数 fallback。
 
-CR 在极低回撤时可能爆炸。使用 `controller_cr_clip` 和 `eps`。
+## 风险
 
-所有指标同时 best 不一定存在，因为总收益和回撤天然可能冲突。通过 `best_rank_score` 和单指标 best checkpoint 同时保存来避免只押一个指标。
+第一版风险增强训练可能出现两类问题：
 
-outer 使用 segment Sharpe 会受到 controller 切换频率影响。通过按 outer decision 归一化 loss、controller switch penalty、以及短段 Sharpe 降权来缓解。
+- controller 过度频繁 switch，导致成本上升。
+- segment Sharpe 噪声较大，outer reward 方差上升。
 
-fixed-horizon Sharpe 可作为 ablation。如果实际 segment Sharpe 训练不稳定，再切换到 fixed-horizon 模式做稳定性对照。
-
-完全自由 controller 可能学到过少切换或过多切换。过少切换用 relative CR 和 validation 指标约束，过多切换用交易成本、soft switch penalty 和 entropy/diagnostics 约束。第一版不加入 hard max-hold，是为了让模型真正学习切换时机，而不是复刻手工持仓边界。
-
-现有好模型必须可复现。通过默认参数保持旧行为、保留旧脚本、测试旧脚本 echo 输出进行保护。
-
-
-
+先不引入复杂约束。通过 seed sweep 和最终收益率选择观察效果。如果收益提升且风险指标改善，则说明最小侵入方案有效；如果不稳定，再进入第二轮 reward shaping。
