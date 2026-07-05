@@ -1,7 +1,7 @@
 # Sharpe/CR 风险增强训练设计
 
 日期：2026-07-05
-状态：已根据 PPO 下 variable-length segment 可比较的讨论修订，等待实现计划
+状态：已根据 PPO 下 variable-length segment 可比较、controller 完全自由切换的讨论修订，等待实现计划
 
 ## 目标
 
@@ -28,7 +28,7 @@
 
 三个模块的职责必须分清：
 
-- controller 负责“什么时候换仓”。
+- controller 负责“什么时候换仓”，在 controller-active 阶段不受最大持仓期硬约束。
 - outer actor 负责“换仓时选什么 base portfolio”。
 - inner actor 负责“持仓期间如何微调执行权重”。
 
@@ -41,6 +41,8 @@ inner reward      = 当前 alpha reward，暂时保持不变
 ```
 
 关键修正：联合训练时，outer actor 可以使用 Sharpe，但必须把它作为 PPO 中的相对强弱信号来用，而不是把不同长度 segment 的原始 Sharpe 当成绝对可比的最终指标。PPO 的 advantage/normalization 允许不同 segment 长度的样本共同训练；真正需要控制的是短 segment Sharpe 的高方差，以及 controller 切换频率对 outer 更新次数的影响。
+
+第二个关键修正：controller-active 阶段不再考虑最大持仓期。除了第一个交易日必须建仓外，是否 switch 完全由 controller policy 决定。`min_hold`、`max_hold` 和 hard max-switch cap 不再作为强制规则介入 controller 训练或测试；切换频率只通过 relative CR reward、switch overflow soft penalty、entropy 和最终 validation 结果间接约束。
 
 ## 新参数
 
@@ -63,6 +65,19 @@ model_selection_metric=sharpe
 inner_selection_metric=return
 controller_selection_metric=risk_return
 ```
+
+controller-active 阶段的自由切换默认设置：
+
+```text
+controller_no_hold_constraints=1
+controller_train_max_hold=0
+controller_eval_max_hold=0
+controller_decision_mode=daily
+controller_eval_decision_mode=daily
+controller_eval_force_max_hold=0
+```
+
+这里 `controller_train_max_hold=0` 和 `controller_eval_max_hold=0` 表示禁用 forced max-hold，而不是使用 0 天持仓。现有实现里 controller PG 训练已经部分支持这个语义，但 controller-active joint / eval 的 force-switch 逻辑也必须统一遵守该语义。
 
 新增 reward 系数建议：
 
@@ -187,6 +202,8 @@ return floor 很小，只用于防止 controller 学到“收益很低但回撤�
 
 switch penalty 仍然由 controller 承担，因为切换频率是 controller 的职责，不应该通过 outer reward 间接惩罚。
 
+controller reward 不包含最大持仓期惩罚。若 controller 长时间不切换但 CR 更高，这是允许的；若频繁切换导致交易成本、回撤或收益质量变差，relative CR 和 soft switch penalty 会给出负反馈。
+
 ## Inner Actor Reward
 
 第一版不改 inner actor reward：
@@ -243,6 +260,15 @@ controller_reward = rollout_level_relative_CR_uplift
 
 controlled 和 baseline 在同一个 rollout window 上比较，因此 CR 可比。这个阶段只学习“什么时候切换”。
 
+该阶段不使用 min-hold 或 max-hold 强制规则：
+
+```text
+step_idx == 0: 强制 switch，用于建仓
+step_idx > 0: controller 每天自由决定 hold / switch
+```
+
+如果 controller 一直 hold 到 rollout 结束，这是合法轨迹；如果 controller 每天 switch，也只是通过交易成本、CR 变化和 soft switch penalty 受到惩罚，而不是被硬规则禁止。
+
 ### 阶段 5：Controller + Outer 联合训练
 
 这是最关键阶段，reward 必须保持职责分离：
@@ -257,7 +283,9 @@ inner_reward      = executed_return - base_return
 
 controller 决定切换频率，outer 评价每次切换时给出的组合在实际持仓段内的相对强弱。
 
-实现时还要注意：outer loss 应按 outer decision 数量做平均或保持现有 PPO 归一化，避免“切换更多导致 outer 梯度次数更多”成为隐式奖励。切换频率只应由 controller 的 CR reward 和 switch penalty 管。短 segment 的 Sharpe 只作为带 clip/weight 的相对 reward 使用，不作为最终评测指标。
+实现时还要注意：outer loss 应按 outer decision 数量做平均或保持现有 PPO 归一化，避免“切换更多导致 outer 梯度次数更多”成为隐式奖励。切换频率只应由 controller 的 CR reward、交易成本和 soft switch penalty 管。短 segment 的 Sharpe 只作为带 clip/weight 的相对 reward 使用，不作为最终评测指标。
+
+该阶段同样不使用 max-hold forced switch。风险增强版 controller 的目标是学习完全自由的切换策略，而不是在手工最大持仓期边界附近做局部优化。
 
 ## 模型选择
 
@@ -334,6 +362,13 @@ SH_SEEDS="80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99"
 10. trainer 保存单指标 best checkpoint 和综合 rank-score checkpoint。
 11. 新 seed-sweep 脚本运行 NASDAQ 和 CSI-300 的扩大 seed 实验。
 
+controller force-switch 逻辑需要统一修改：
+
+- controller PG window 中 `controller_train_max_hold=0` 禁用 forced max-hold。
+- controller-active joint / eval 中也必须读取 `controller_train_max_hold` / `controller_eval_max_hold`，不能继续在训练时直接使用全局 `max_hold` 强制切换。
+- 当 `controller_no_hold_constraints=1` 且对应 max-hold override 为 `0` 时，除首日建仓外，不因持仓时长强制 hold 或 switch。
+- `controller_max_switches` 只作为 soft penalty 阈值，不作为 hard cap。
+
 ## 测试计划
 
 实现前先加 focused tests：
@@ -349,6 +384,9 @@ SH_SEEDS="80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99"
 - `outer_reward_mode=fixed_horizon_sharpe` 作为可选对照时，应使用固定 horizon 反事实 Sharpe。
 - 原始 `run_end_to_end_hrl_controller_joint_nas49_sh90.sh` echo 测试仍然通过。
 - 新 seed-sweep 脚本 echo 测试检查 seeds、reward modes、selection metrics 和 safe output root。
+- `controller_train_max_hold=0` 时，controller PG rollout 不会因为达到全局 `max_hold` 被强制 switch。
+- `controller_eval_max_hold=0` 时，controller eval/test 不会因为达到全局 `max_hold` 被强制 switch。
+- controller-active joint 阶段应与 controller PG/eval 一致，禁用 forced max-hold；这需要覆盖 `_compute_force_switch_locked` 的测试。
 
 ## 风险与缓解
 
@@ -361,5 +399,7 @@ CR 在极低回撤时可能爆炸。使用 `controller_cr_clip` 和 `eps`。
 outer 使用 segment Sharpe 会受到 controller 切换频率影响。通过按 outer decision 归一化 loss、controller switch penalty、以及短段 Sharpe 降权来缓解。
 
 fixed-horizon Sharpe 可作为 ablation。如果实际 segment Sharpe 训练不稳定，再切换到 fixed-horizon 模式做稳定性对照。
+
+完全自由 controller 可能学到过少切换或过多切换。过少切换用 relative CR 和 validation 指标约束，过多切换用交易成本、soft switch penalty 和 entropy/diagnostics 约束。第一版不加入 hard max-hold，是为了让模型真正学习切换时机，而不是复刻手工持仓边界。
 
 现有好模型必须可复现。通过默认参数保持旧行为、保留旧脚本、测试旧脚本 echo 输出进行保护。
