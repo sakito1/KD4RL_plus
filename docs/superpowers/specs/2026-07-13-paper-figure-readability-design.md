@@ -154,3 +154,53 @@ labels and surrounding result claims remain unchanged.
 - Do not select new representative cases or Inner windows.
 - Do not change unrelated user edits in the dirty worktree.
 - Do not refactor unrelated plotting or experiment code.
+
+## Approved Typography and Geometry Revision (2026-07-14)
+
+The final per-market assets remain the authoritative targets for this revision.
+Their data, selected cases, traces, colors, labels, and manuscript paths remain
+unchanged.
+
+### Controller switch cases
+
+- Increase every visible source font to at least twice its current size,
+  including the figure title, panel titles, axes, ticks, legend, endpoint
+  labels, and metric annotations.
+- Keep the current source width.
+- Make the plotted curve regions smaller by increasing the space reserved for
+  typography and by reducing the axes rectangles within the canvas.
+- Preserve both evidence rows and all plotted paths and statistics.
+
+### Inner-Actor refinement cases
+
+- Keep the current `11.5 in` source width and increase only the figure height.
+- Increase every visible source font to at least twice its current size,
+  including asset codes, titles, ticks, colorbars, summary text, axis labels,
+  and bar annotations.
+- Use the additional vertical space to prevent overlap and clipping; do not
+  widen the figure.
+- Preserve the four evidence rows, selected assets and window, heatmap values,
+  alignment bars, correlations, and hit rates.
+
+### Cumulative portfolio-value plots
+
+- Keep the existing per-market canvas geometry and curves.
+- Increase every visible source font by at least two times, including titles,
+  axis labels, tick labels, and legend labels.
+- The legend may wrap to additional rows only when required to prevent text
+  collisions; no curve, method, or label may be removed.
+
+### Outputs and validation
+
+Regenerate and replace exactly these six stable manuscript assets:
+
+- `paper_full_evidence_edit/figures/main_equity_nas.pdf`
+- `paper_full_evidence_edit/figures/main_equity_sh.pdf`
+- `paper_full_evidence_edit/figures/explainability/controller_switch_case_nas.png`
+- `paper_full_evidence_edit/figures/explainability/controller_switch_case_sh.png`
+- `paper_full_evidence_edit/figures/explainability/inner_actor_nas.png`
+- `paper_full_evidence_edit/figures/explainability/inner_actor_sh.png`
+
+Validation must compare the revised Matplotlib font settings with the current
+settings, confirm the Inner canvas width is unchanged and its height is larger,
+and visually inspect all six final assets for clipping and overlap.
