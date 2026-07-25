@@ -113,9 +113,9 @@ class PPO_Env(gym.Env):
         if self.logger: self.logger.info("正在加载全量数据以保证边界连续性...")
 
         loaded_data = process_files(
-            self.dataset['ssm_data_path'],
+            self.dataset['feature_path'],
             self._load_stock_list(self.dataset['stocks_path']),
-            self.dataset['features_name']
+            self.dataset['features_name'],
         )
 
         self.all_dates = pd.to_datetime(loaded_data['dates'])
@@ -147,13 +147,6 @@ class PPO_Env(gym.Env):
         self.cdj_price = self.prices[:, :, 1]
 
         self.ratio = self.cdj_price[:, 1:] / (self.cdj_price[:, :-1] + 1e-8)
-
-        ssm = loaded_data['ssm']
-        self.h_tensor = torch.tensor(ssm['h'], dtype=torch.float32, device=self.device)
-        self.z_tensor = torch.tensor(ssm['z'], dtype=torch.float32, device=self.device)
-        self.p_tensor = torch.tensor(ssm['p'], dtype=torch.float32, device=self.device)
-        self.q_bear_tensor = torch.tensor(ssm['q_bear'], dtype=torch.float32, device=self.device)
-        self.q_bull_tensor = torch.tensor(ssm['q_bull'], dtype=torch.float32, device=self.device)
 
         self.idx_map = {
             'train': self._get_indices_range(train_date_range),
@@ -621,16 +614,6 @@ class PPO_Env(gym.Env):
 
     def _get_observation(self):
         t = self.day
-        if t >= self.p_tensor.shape[1]:
-            t = self.p_tensor.shape[1] - 1
-
-        ssm_dict = {
-            'z': self.z_tensor[:, t, :].unsqueeze(0),
-            'h': self.h_tensor[:, t, :].unsqueeze(0),
-            'p': self.p_tensor[:, t].unsqueeze(0),
-            'q_bear': self.q_bear_tensor[:, t].unsqueeze(0),
-            'q_bull': self.q_bull_tensor[:, t].unsqueeze(0)
-        }
         if self.day - 1 >= 0:
             r_past = self.ratio[:, self.day - 1]  # (t-1 -> t)
         else:
@@ -639,21 +622,16 @@ class PPO_Env(gym.Env):
         weights_drift = self._normalize(self.prev_weights * r_past)  # w_t^drift
         base_drift = self._normalize(self.prev_base_weight * r_past)  # b_t^drift
 
-        current_p = self.p_tensor[:, t]
-        held_p = torch.sum(current_p * weights_drift)
-
-        outer_state, _ = self.get_outer_state(t)
-        inner_state, _ = self.get_inner_state(t)
+        outer_state = self.get_outer_state(t)
+        inner_state = self.get_inner_state(t)
         port_state = self._calc_port_state()
 
         return {
-            'ssm': ssm_dict,
             'outer_state': outer_state.unsqueeze(0),
             'inner_state': inner_state.unsqueeze(0),
             'weights_drift': weights_drift.unsqueeze(0),
             'base_drift': base_drift.unsqueeze(0),
             'port_state': port_state,
-            'held_p': held_p.unsqueeze(0)
         }
 
     def get_outer_state(self, t):
@@ -663,7 +641,7 @@ class PPO_Env(gym.Env):
         mean = self.rolling_means[:, t, :].unsqueeze(1)
         std = self.rolling_stds[:, t, :].unsqueeze(1)
         norm_state = (raw_feat - mean) / (std + 1e-8)
-        return norm_state, self.h_tensor[:, start:end, :]
+        return norm_state
 
     def get_inner_state(self, t):
         start = t - self.inner_window + 1
@@ -679,7 +657,7 @@ class PPO_Env(gym.Env):
                 norm_state[:, :, p_idx] = raw_feat[:, :, p_idx] / (last_val + 1e-8)
             if len(self.other_indices) > 0:
                 norm_state[:, :, self.other_indices] = raw_feat[:, :, self.other_indices]
-            return norm_state, self.h_tensor[:, start:end, :]
+            return norm_state
 
         if len(self.ohlc_indices) > 0:
             p_idx = self.ohlc_indices
@@ -708,7 +686,7 @@ class PPO_Env(gym.Env):
             o_idx = self.other_indices
             norm_state[:, :, o_idx] = _window_zscore(raw_feat[:, :, o_idx])
 
-        return norm_state, self.h_tensor[:, start:end, :]
+        return norm_state
 
     def _calc_port_state(self):
         time_norm = self.t_held / float(self.max_hold)
@@ -727,5 +705,4 @@ class PPO_Env(gym.Env):
             self.cumulative_alpha, self.cumulative_risk, cost_feat
         ], dtype=torch.float32, device=self.device)
         return state.unsqueeze(0)
-
 

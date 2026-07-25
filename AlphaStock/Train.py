@@ -15,6 +15,40 @@ import math
 warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib.font_manager")
 
 
+def apply_transaction_costs(gross_returns, turnovers, transaction_cost_rate=None):
+    """Deduct proportional one-way transaction costs from portfolio returns."""
+    rate = (
+        config.TRANSACTION_COST_RATE
+        if transaction_cost_rate is None
+        else float(transaction_cost_rate)
+    )
+    gross = np.asarray(gross_returns, dtype=float)
+    turnover = np.asarray(turnovers, dtype=float)
+    if gross.shape != turnover.shape:
+        raise ValueError("gross_returns and turnovers must have identical shapes")
+    return gross - turnover * rate
+
+
+def rebalance_turnovers(weights, prices, decision_offsets):
+    """Return L1 turnover at each decision, measured from drifted holdings."""
+    weights = np.asarray(weights, dtype=float)
+    prices = np.asarray(prices, dtype=float)
+    turnovers = np.zeros(weights.shape[0], dtype=float)
+    for offset in decision_offsets:
+        offset = int(offset)
+        if offset < 0 or offset >= len(turnovers):
+            continue
+        target = weights[offset]
+        if offset == 0:
+            current = np.zeros_like(target)
+        else:
+            relatives = prices[:, offset] / prices[:, offset - 1]
+            current = weights[offset - 1] * relatives
+            current = current / (current.sum() + 1e-12)
+        turnovers[offset] = np.abs(target - current).sum()
+    return turnovers
+
+
 class BasedDataLoader:
     def __init__(self, sample_list: List):
         self.original_samples = sample_list.copy()  # 保存原始列表
@@ -72,8 +106,7 @@ class alphastock_main:
         self.start_train_date = config.train_start_date
         self.end_train_date = config.train_end_date
         self.initial_amount = config.initial_amount
-        # 由于不是高频交易，可以不考虑交易成本
-        transaction_cost_pct = 0
+        self.transaction_cost_pct = float(config.TRANSACTION_COST_RATE)
         # 回测的部分，这部分需要按照
         self.start_valid_date = config.valid_start_date
         self.end_valid_date = config.valid_end_date
@@ -208,6 +241,15 @@ class alphastock_main:
                 weights.T * (adjc[:, 1:] - adjc[:, :-1]) / adjc[:, :-1],
                 axis=0
             )  # [L-1]
+            decision_offsets = [
+                day - self.valid_step_list[0] for day in self.valid_step_list
+            ]
+            turnovers = rebalance_turnovers(weights, adjc, decision_offsets)
+            returns = apply_transaction_costs(
+                returns,
+                turnovers,
+                transaction_cost_rate=self.transaction_cost_pct,
+            )
 
             # 6. 只计算 Sharpe 作为模型选择指标
             mean_ret = returns.mean()
@@ -286,6 +328,11 @@ class alphastock_main:
             rel = adjc / (adjc[:, 0:1] + eps)  # [N, L]
             port_val = torch.sum(action * rel, dim=0)  # [L]
             port_ret = (port_val[1:] - port_val[:-1]) / (port_val[:-1] + eps)  # [L-1]
+            port_ret = port_ret.clone()
+            port_ret[0] = (
+                port_ret[0]
+                - torch.sum(torch.abs(action[:, 0])) * self.transaction_cost_pct
+            )
 
             s_port = self._ann_sharpe_from_returns(port_ret, eps=eps)
             total_loss = total_loss - s_port
@@ -333,6 +380,12 @@ class alphastock_main:
         self.logger.info(f"动作数据已保存至：{file_path}")
 
         returns = np.sum(weights.T * (adjc[:, 1:] - adjc[:, :-1]) / adjc[:, :-1], axis=0)
+        turnovers = rebalance_turnovers(weights, adjc, input_list2[:-1])
+        returns = apply_transaction_costs(
+            returns,
+            turnovers,
+            transaction_cost_rate=self.transaction_cost_pct,
+        )
 
         wealth_index = (1 + returns).cumprod()
         # 计算累计最大值（替代 pandas 的 cummax()）
@@ -364,7 +417,7 @@ class alphastock_main:
         prices_df = load_prices(raw_folder, self.stocks)
         contrib_df = compute_asset_contributions(
             actions_df, prices_df,
-            transaction_cost_pct=0.001,
+            transaction_cost_pct=self.transaction_cost_pct,
             initial_value=1000
         )
 

@@ -1,7 +1,7 @@
-# Sharpe/CR 风险增强训练设计（最小侵入版）
+# Sharpe/相对收益+MDD 风险增强训练设计（最小侵入版）
 
 日期：2026-07-05
-状态：按现有 end-to-end 链路简化，等待实现计划
+状态：CR reward 实验后修订，controller 改用相对收益提升 + 相对 MDD 改善
 
 ## 目标
 
@@ -18,7 +18,7 @@
 本设计只改三件事：
 
 1. outer actor 的 reward 从 segment return 切换为 segment Sharpe。
-2. controller 的 reward 从 return uplift 切换为相对 CR uplift。
+2. controller 的 reward 从 return uplift 切换为相对收益提升 + 相对 MDD 改善。
 3. seed 范围扩大，模型选择先按收益率最高。
 
 不引入 rank score，不引入复杂多目标 selection，不引入 fixed-horizon reward，不对 reward 做 clip。只保留必要的 `eps` 防止除零。
@@ -29,14 +29,16 @@
 
 ```text
 --outer_reward_mode return|segment_sharpe
---controller_reward_mode return_uplift|relative_cr
+--controller_reward_mode return_uplift|relative_cr|relative_return_mdd
 ```
 
 风险增强脚本中使用：
 
 ```text
 outer_reward_mode=segment_sharpe
-controller_reward_mode=relative_cr
+controller_reward_mode=relative_return_mdd
+controller_return_coef=1.0
+controller_mdd_coef=0.3
 model_selection_metric=return
 inner_selection_metric=return
 controller_selection_metric=return
@@ -86,9 +88,12 @@ outer_reward =
 
 ## Controller Reward
 
-controller reward 使用当前 controller 策略相对于“训练好的 HRL”的 CR 改善。
+CR reward 已经通过初步 seed sweep 证明训练信号不理想：它容易把 controller 推向 switch 上限，但测试收益和 Sharpe 没有稳定转化。因此 controller reward 改为更直接的两项相对提升：
 
-训练好的 HRL 指前面 warmup outer、warmup inner、固定周期 HRL joint 后得到的 HRL 策略。controller 学的是：在这套已训练 HRL 基础上，加入自由 switch 后，整段 rollout 的 CR 是否提升。
+1. 相对收益提升：controller 是否比训练好的 HRL baseline 赚得更多。
+2. 相对 MDD 改善：controller 是否降低最大回撤。
+
+训练好的 HRL 指前面 warmup outer、warmup inner、固定周期 HRL joint 后得到的 HRL 策略。controller 学的是：在这套已训练 HRL 基础上，加入自由 switch 后，整段 rollout 的收益是否相对提升、最大回撤是否相对下降。
 
 对同一个 rollout window，计算两条路径：
 
@@ -97,23 +102,35 @@ baseline_path   = 训练好的 HRL，不使用自由 controller
 controlled_path = 训练好的 HRL + 当前 controller policy
 ```
 
-CR 定义：
-
-```text
-CR = annualized_return / (max_drawdown + eps)
-```
-
 当 `controller_reward_mode=return_uplift`，保持旧逻辑。
 
-当 `controller_reward_mode=relative_cr`：
+当 `controller_reward_mode=relative_return_mdd`：
 
 ```text
+relative_return_uplift =
+  (log_return(controlled_path) - log_return(baseline_path))
+  / max(abs(log_return(baseline_path)), eps)
+
+relative_mdd_uplift =
+  (max_drawdown(baseline_path) - max_drawdown(controlled_path))
+  / max(max_drawdown(baseline_path), eps)
+
 controller_reward =
-  CR(controlled_path) - CR(baseline_path)
+  controller_return_coef * relative_return_uplift
+  + controller_mdd_coef * relative_mdd_uplift
   - switch_penalty
 ```
 
-其中 `switch_penalty` 继续使用现有 soft max-switch penalty。它只作为软惩罚，不作为 hard cap。
+第一版权重：
+
+```text
+controller_return_coef = 1.0
+controller_mdd_coef    = 0.3
+```
+
+这样收益项是主信号，MDD 项是风险刹车。上一版表现较好的设计里 MDD 权重更大，但那是直接对 validation metric 做加权；这里两个项都已经归一化成相对改善，因此 MDD 不再需要极大的系数。
+
+其中 `switch_penalty` 继续使用现有 soft max-switch penalty。另加可选 `controller_hard_max_switches` 作为安全上限，防止 controller PG 训练窗口中出现无限高频切换。
 
 ## 各阶段训练设计
 
@@ -148,17 +165,20 @@ outer_reward = segment_sharpe
 inner_reward = executed_return - base_return
 ```
 
-这个阶段得到“训练好的 HRL”，作为后续 controller 相对 CR reward 的 baseline。
+这个阶段得到“训练好的 HRL”，作为后续 controller 相对收益/MDD reward 的 baseline。
 
 ### 4. Controller PG
 
 冻结或近似冻结训练好的 HRL，训练 controller。
 
 ```text
-controller_reward = CR(controlled_path) - CR(trained_HRL_baseline_path) - switch_penalty
+controller_reward =
+  relative_return_uplift(controlled_path, trained_HRL_baseline_path)
+  + 0.3 * relative_mdd_uplift(controlled_path, trained_HRL_baseline_path)
+  - switch_penalty
 ```
 
-controller 不考虑最大持仓期，不考虑最小持仓期。除首日建仓外，每天是否 switch 都由 controller policy 决定。
+controller 不考虑最大持仓期，不考虑最小持仓期。除首日建仓外，每天是否 switch 都由 controller policy 决定；训练脚本可设置 hard switch cap 作为安全约束。
 
 ### 5. Controller-active Joint
 
@@ -166,7 +186,7 @@ controller 不考虑最大持仓期，不考虑最小持仓期。除首日建仓
 
 ```text
 outer_reward      = segment_sharpe
-controller_reward = relative_cr
+controller_reward = relative_return_mdd
 inner_reward      = executed_return - base_return
 ```
 
@@ -193,7 +213,7 @@ max_drawdown
 cr
 ```
 
-如果收益率最高的模型风险指标不理想，再考虑第二轮加权 selection 或 CR selection。第一轮先保持简单。
+如果收益率最高的模型风险指标不理想，再考虑第二轮加权 selection。第一轮先保持简单。
 
 ## Seed Sweep
 
@@ -225,7 +245,7 @@ SH_SEEDS="80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99"
 
 1. 在 `run_hrl_training.py` 增加 `outer_reward_mode` 和 `controller_reward_mode` 参数。
 2. 在 outer segment 聚合处增加 `segment_sharpe` 模式。
-3. 在 controller reward 处增加 `relative_cr` 模式。
+3. 在 controller reward 处增加 `relative_return_mdd` 模式，并保留 `relative_cr` 作为可回顾旧实验的兼容模式。
 4. controller 的 baseline 使用训练好的 HRL，不使用自由 controller。
 5. controller-active 阶段确保 `controller_train_max_hold=0` 和 `controller_eval_max_hold=0` 真正禁用 forced max-hold。
 6. 新增 seed-sweep 脚本，复制现有 e2e 链路，只改输出目录、seeds、reward mode 和 selection metric。
@@ -239,7 +259,7 @@ SH_SEEDS="80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99"
 - `outer_reward_mode=return` 时 outer reward 与旧逻辑一致。
 - `outer_reward_mode=segment_sharpe` 时 outer reward 使用 segment returns 计算 Sharpe。
 - `controller_reward_mode=return_uplift` 时 controller reward 与旧逻辑一致。
-- `controller_reward_mode=relative_cr` 时 controller reward 等于 controlled path 和 trained-HRL baseline path 的 CR 差值再减 soft switch penalty。
+- `controller_reward_mode=relative_return_mdd` 时 controller reward 等于相对收益提升加 0.3 倍相对 MDD 改善，再减 soft switch penalty。
 - `controller_train_max_hold=0` 和 `controller_eval_max_hold=0` 时不会因为达到全局 `max_hold` 被 forced switch。
 - 新 seed-sweep 脚本使用独立 output root 和扩大 seeds。
 

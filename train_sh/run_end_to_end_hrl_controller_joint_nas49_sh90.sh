@@ -106,6 +106,7 @@ CONTROLLER_EVAL_SWITCH_THRESHOLD="${CONTROLLER_EVAL_SWITCH_THRESHOLD:-0.5}"
 CONTROLLER_EVAL_DIAGNOSTICS="${CONTROLLER_EVAL_DIAGNOSTICS:-1}"
 CONTROLLER_EVAL_DIAG_THRESHOLDS="${CONTROLLER_EVAL_DIAG_THRESHOLDS:-0.5}"
 CONTROLLER_RETURN_COEF="${CONTROLLER_RETURN_COEF:-1.0}"
+CONTROLLER_MDD_COEF="${CONTROLLER_MDD_COEF:-0.0}"
 CONTROLLER_MAX_SWITCHES="${CONTROLLER_MAX_SWITCHES:-30}"
 CONTROLLER_MAX_SWITCH_PENALTY_COEF="${CONTROLLER_MAX_SWITCH_PENALTY_COEF:-0.001}"
 CONTROLLER_EXPECTED_SWITCH_PENALTY_COEF="${CONTROLLER_EXPECTED_SWITCH_PENALTY_COEF:-0.0}"
@@ -130,6 +131,11 @@ CONTROLLER_LOCAL_ADV_CLIP="${CONTROLLER_LOCAL_ADV_CLIP:-5.0}"
 CONTROLLER_LOCAL_ADV_MARGIN="${CONTROLLER_LOCAL_ADV_MARGIN:-0.0}"
 CONTROLLER_LOCAL_ADV_LOSS_TYPE="${CONTROLLER_LOCAL_ADV_LOSS_TYPE:-weighted_bce}"
 CONTROLLER_LOCAL_ADV_BALANCE_CLASSES="${CONTROLLER_LOCAL_ADV_BALANCE_CLASSES:-0}"
+OUTER_REWARD_MODE="${OUTER_REWARD_MODE:-return}"
+CONTROLLER_REWARD_MODE="${CONTROLLER_REWARD_MODE:-return_uplift}"
+MODEL_SELECTION_METRIC="${MODEL_SELECTION_METRIC:-sharpe}"
+INNER_SELECTION_METRIC="${INNER_SELECTION_METRIC:-return}"
+CONTROLLER_SELECTION_METRIC="${CONTROLLER_SELECTION_METRIC:-return}"
 
 JOINT_EPOCHS="${JOINT_EPOCHS:-1}"
 JOINT_LR_MULT="${JOINT_LR_MULT:-0.0001}"
@@ -264,7 +270,7 @@ run_market() {
     --controller_hidden_dim "$CONTROLLER_HIDDEN_DIM" \
     --controller_init_exit_bias "$CONTROLLER_INIT_EXIT_BIAS" \
     --controller_return_coef "$CONTROLLER_RETURN_COEF" \
-    --controller_mdd_coef 0.0 \
+    --controller_mdd_coef "$CONTROLLER_MDD_COEF" \
     --controller_count_min 0 \
     --controller_count_max 0 \
     --controller_max_switches "$CONTROLLER_MAX_SWITCHES" \
@@ -293,7 +299,8 @@ run_market() {
     --controller_local_adv_margin "$CONTROLLER_LOCAL_ADV_MARGIN" \
     --controller_local_adv_loss_type "$CONTROLLER_LOCAL_ADV_LOSS_TYPE" \
     "${CONTROLLER_LOCAL_ADV_BALANCE_ARGS[@]}" \
-    --controller_selection_metric return \
+    --controller_reward_mode "$CONTROLLER_REWARD_MODE" \
+    --controller_selection_metric "$CONTROLLER_SELECTION_METRIC" \
     --controller_no_hold_constraints \
     --controller_decision_mode "$CONTROLLER_DECISION_MODE" \
     --controller_eval_decision_mode "$CONTROLLER_EVAL_DECISION_MODE" \
@@ -310,8 +317,9 @@ run_market() {
     --outer_pred_coef "$OUTER_PRED_COEF" \
     --inner_pred_coef "$INNER_PRED_COEF" \
     --inner_pred_target_scale "$INNER_PRED_TARGET_SCALE" \
-    --model_selection_metric sharpe \
-    --inner_selection_metric return \
+    --outer_reward_mode "$OUTER_REWARD_MODE" \
+    --model_selection_metric "$MODEL_SELECTION_METRIC" \
+    --inner_selection_metric "$INNER_SELECTION_METRIC" \
     --train_monitor \
     "${TEST_SKIP_FIXED_SCENARIOS_ARGS[@]}" \
     --test_max_days "$TEST_MAX_DAYS" \

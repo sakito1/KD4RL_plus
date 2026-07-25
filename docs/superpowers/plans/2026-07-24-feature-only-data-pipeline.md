@@ -1,259 +1,170 @@
-# Feature-Only Data Pipeline Implementation Plan
+# 仅使用 Feature 的数据链重写实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use $superpower-subagents (recommended) or $superpower-executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking via update_plan.
+> 实施时按任务顺序执行，每一项都遵循“先写失败测试，再进行最小修改，最后运行回归测试”。所有代码修改只保留在本地工作区，不执行 Git 提交或推送。
 
-**Goal:** Remove the complete SSM runtime path and make CMTFlow plus all active baselines consume model-appropriate inputs derived from `dataset["feature_path"]`.
+## 目标
 
-**Architecture:** A single feature-only portfolio loader aligns stock CSVs and derives the configured adjusted fields. CMTFlow observations expose only asset histories and portfolio state, while each deep baseline keeps its own adapter: AlphaStock uses seven adjusted fields, DeepTrader uses six asset fields, and DeepAries builds raw OHLCV-compatible input before invoking its native preprocessor. Obsolete SSM models, CLI options, buffers, and rule-switch paths are deleted.
+彻底移除 CMTFlow 和当前 baseline 运行链中的 SSM 依赖，使所有有效模型从
+`config.dataset["feature_path"]` 获取数据，并由各模型自己的适配器生成所需输入。
 
-**Tech Stack:** Python 3.10, pandas, NumPy, PyTorch, pytest, Bash.
+## 总体设计
 
-**Workspace preservation:** The repository already contains unrelated user
-changes, including changes in several target files. Before every task commit,
-inspect the staged diff. If a target file contains pre-existing user work that
-cannot be separated safely at hunk level, do not commit that task; leave the
-verified change in the working tree and report it explicitly.
+- CMTFlow 使用统一的普通特征加载器，输入只包含特征、交易价格、日期和股票映射。
+- Outer Actor、Inner Actor 和 learned Controller 均使用普通资产特征窗口。
+- Controller 删除 `h/z/p/q_bear/q_bull` 输入及 SSM fallback。
+- AlphaStock、DeepTrader 和 DeepAries 分别保留自己的字段和预处理方式。
+- 删除 SSM-only baseline、SSM pipeline、rule-switch 及相关参数。
+- 不兼容旧 checkpoint，新模型必须重新训练。
+- 保护工作区已有修改，只编辑本任务涉及的代码，不执行 Git 操作。
 
 ---
 
-## File Structure
+## 任务一：建立仅使用 Feature 的统一加载器
 
-- `utils/PriceMatrix.py`: feature derivation and aligned feature-only portfolio loading.
-- `env/PPO_env.py`: feature-only CMTFlow environment and observations.
-- `Components/PPO_model.py`: learned Controller API without SSM fallback inputs.
-- `agent/PPO_agent.py`: feature-only action and PPO update paths.
-- `Train/PPO_train.py`: feature-only rollout/controller records and training orchestration.
-- `run_hrl_training.py`: feature-only CLI, metadata, and model construction.
-- `utils/config.py`, `utils/config_Nas.py`, `utils/config_SH.py`: active data configuration without SSM paths.
-- `Train/baseline.py`, `Baseline/__init__.py`: active baseline registry without SSM-only.
-- `utils/PriceMatrix.py`, `Train/deep_baseline.py`: AlphaStock feature-path integration.
-- `create_deeptrader_data.py`: DeepTrader-specific six-field adapter.
-- `create_DeepAries_data.py`, `Train/deep_baseline.py`: DeepAries raw adapter and native preprocessing handoff.
-- `train_sh/*.sh`, `scripts/*.sh`, `run_deeparies_baseline.py`: remove obsolete SSM arguments and messages where present.
-- Delete `Baseline/SSM/` and `SSM_pipeline.py`.
-- `tests/test_feature_only_data_pipeline.py`: focused regression tests for the new data contract.
-- Existing controller, command, and end-to-end tests: update calls to the new Controller and network APIs.
+### 涉及文件
 
-### Task 1: Feature-Only Portfolio Loader
+- 修改：`utils/PriceMatrix.py`
+- 新增：`tests/test_feature_only_data_pipeline.py`
 
-**Files:**
-- Modify: `utils/PriceMatrix.py`
-- Create: `tests/test_feature_only_data_pipeline.py`
+### 实施步骤
 
-- [ ] **Step 1: Write failing loader tests**
+1. 新增失败测试，使用临时 Nasdaq 风格 CSV：
 
 ```python
-import numpy as np
-import pandas as pd
-
-from utils.PriceMatrix import load_feature_files
-
-
-def _write_stock(path, scale):
-    pd.DataFrame({
-        "Date": ["2020-01-02", "2020-01-03"],
-        "open": [10.0, 11.0],
-        "high": [12.0, 13.0],
-        "low": [9.0, 10.0],
-        "close": [11.0, 12.0],
-        "volume": [100.0, 120.0],
-        "adjfactor": [scale, scale],
-    }).to_csv(path, index=False)
-
-
-def test_load_feature_files_derives_fields_without_ssm(tmp_path):
-    _write_stock(tmp_path / "AAA.csv", 2.0)
-    _write_stock(tmp_path / "BBB.csv", 3.0)
-    cols = ["adjopen", "adjhigh", "adjlow", "adjclose", "amount", "amp", "body"]
-
-    loaded = load_feature_files(tmp_path, ["AAA", "BBB"], cols)
-
+def test_load_feature_files_derives_adjusted_fields(tmp_path):
+    # CSV 只提供 OHLCV 和 adjfactor
+    # 加载后必须生成：
+    # adjopen、adjhigh、adjlow、adjclose、amount、amp、body
+    loaded = load_feature_files(tmp_path, ["AAA", "BBB"], FEATURE_COLUMNS)
     assert loaded["data"].shape == (2, 2, 7)
     assert loaded["prices"].shape == (2, 2, 2)
     assert np.isfinite(loaded["data"]).all()
-    assert set(loaded) == {"data", "prices", "dates", "id2stock", "stock2id"}
+    assert set(loaded) == {
+        "data", "prices", "dates", "id2stock", "stock2id"
+    }
 ```
 
-- [ ] **Step 2: Verify RED**
-
-Run:
+2. 运行测试，确认因 `load_feature_files` 尚不存在而失败：
 
 ```bash
 /home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
-  tests/test_feature_only_data_pipeline.py::test_load_feature_files_derives_fields_without_ssm -v
+  tests/test_feature_only_data_pipeline.py::test_load_feature_files_derives_adjusted_fields -v
 ```
 
-Expected: FAIL because `load_feature_files` does not exist.
+3. 在 `utils/PriceMatrix.py` 中：
 
-- [ ] **Step 3: Replace the SSM loader**
+   - 保留 `_standardize_feature_columns()`；
+   - 删除 `Datamatrix_ssm_hidden()`；
+   - 用 `load_feature_files(file_paths, stocks, feature_cols)` 取代 `process_files()`；
+   - 只读取每只股票的 CSV；
+   - 对齐所有股票的共同日期；
+   - 返回特征、`adjopen/adjclose`、日期和股票映射；
+   - 不读取 `ssm3_*` 列和 `*_ssm3_states.pt`；
+   - 缺少文件、字段不可推导、共同日期为空或输出存在非有限值时，给出明确错误。
 
-In `utils/PriceMatrix.py`:
+4. 重新运行测试，确认通过。
 
-- delete `Datamatrix_ssm_hidden`;
-- replace `process_files` with `load_feature_files(file_paths, stocks, feature_cols)`;
-- retain `_standardize_feature_columns`;
-- return only aligned `data`, `prices`, `dates`, and stock mappings;
-- raise a descriptive error for a missing CSV, empty common calendar, missing derived field, or non-finite tensor.
+---
 
-The implementation must not read `ssm3_*` columns or `*_ssm3_states.pt`.
+## 任务二：将 CMTFlow 环境切换到 Feature
 
-- [ ] **Step 4: Verify GREEN**
+### 涉及文件
 
-Run:
+- 修改：`env/PPO_env.py`
+- 修改：`tests/test_feature_only_data_pipeline.py`
 
-```bash
-/home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
-  tests/test_feature_only_data_pipeline.py::test_load_feature_files_derives_fields_without_ssm -v
-```
+### 实施步骤
 
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add utils/PriceMatrix.py tests/test_feature_only_data_pipeline.py
-git commit -m "refactor: add feature-only portfolio loader"
-```
-
-### Task 2: Feature-Only CMTFlow Environment
-
-**Files:**
-- Modify: `env/PPO_env.py`
-- Modify: `tests/test_feature_only_data_pipeline.py`
-
-- [ ] **Step 1: Write a failing environment contract test**
-
-Add a focused test using a temporary dataset and patched config:
+1. 新增环境契约测试：
 
 ```python
-def test_cmtflow_observation_contains_no_ssm(monkeypatch, tmp_path):
+def test_cmtflow_observation_has_no_ssm(monkeypatch, tmp_path):
     env = build_tiny_feature_env(monkeypatch, tmp_path)
     obs = env.reset()
-
     assert "outer_state" in obs
     assert "inner_state" in obs
     assert "ssm" not in obs
     assert "held_p" not in obs
 ```
 
-`build_tiny_feature_env` must create two stock CSVs, a stock-list file, and
-patch `config.dataset["feature_path"]`, date bounds, and CPU device.
+2. 运行测试，确认当前代码因为读取 `ssm_data_path` 或返回 `ssm` 而失败。
 
-- [ ] **Step 2: Verify RED**
+3. 修改 `PPO_Env`：
 
-```bash
-/home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
-  tests/test_feature_only_data_pipeline.py::test_cmtflow_observation_contains_no_ssm -v
-```
+   - 调用 `load_feature_files(dataset["feature_path"], ...)`；
+   - 删除 `h_tensor`、`z_tensor`、`p_tensor`、`q_bear_tensor`、`q_bull_tensor`；
+   - observation 删除 `ssm` 和 `held_p`；
+   - `get_outer_state()` 只返回标准化后的 Outer 特征窗口；
+   - `get_inner_state()` 只返回标准化后的 Inner 特征窗口；
+   - 保留价格漂移、收益、交易成本、持仓年龄、回撤和反事实收益计算。
 
-Expected: FAIL because the environment still resolves `ssm_data_path` and emits SSM fields.
+4. 运行新环境测试和现有 Controller 测试，记录后续仅由 Controller 旧接口导致的失败。
 
-- [ ] **Step 3: Rewrite environment loading and observations**
+---
 
-In `env/PPO_env.py`:
+## 任务三：删除 Controller 的 SSM 接口
 
-- import and call `load_feature_files(dataset["feature_path"], ...)`;
-- delete `h_tensor`, `z_tensor`, `p_tensor`, `q_bear_tensor`, and `q_bull_tensor`;
-- delete `ssm_dict` and `held_p`;
-- make `get_outer_state` and `get_inner_state` return only normalized feature tensors;
-- retain feature normalization, prices, returns, portfolio state, reward, cost,
-  and holding-period accounting unchanged.
+### 涉及文件
 
-- [ ] **Step 4: Verify GREEN**
+- 修改：`Components/PPO_model.py`
+- 修改：`agent/PPO_agent.py`
+- 修改：`Train/PPO_train.py`
+- 修改：`tests/test_controller_counterfactual_pg.py`
+- 修改：`tests/test_controller_joint_baseline.py`
+- 修改：`tests/test_feature_only_data_pipeline.py`
 
-Run the focused environment test and the existing environment/controller tests:
+### 实施步骤
 
-```bash
-/home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
-  tests/test_feature_only_data_pipeline.py \
-  tests/test_controller_counterfactual_pg.py -q
-```
-
-Expected: the new test passes; existing tests may now fail only at old Controller signatures, which Task 3 addresses.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add env/PPO_env.py tests/test_feature_only_data_pipeline.py
-git commit -m "refactor: make CMTFlow environment feature only"
-```
-
-### Task 3: Remove SSM From the Learned Controller
-
-**Files:**
-- Modify: `Components/PPO_model.py`
-- Modify: `Train/PPO_train.py`
-- Modify: `agent/PPO_agent.py`
-- Modify: `tests/test_controller_counterfactual_pg.py`
-- Modify: `tests/test_feature_only_data_pipeline.py`
-
-- [ ] **Step 1: Write failing Controller API tests**
+1. 新增失败测试，期望 Controller 只接受普通特征：
 
 ```python
-def test_controller_accepts_asset_features_without_ssm():
-    controller = MonitorAC(
-        port_state_dim=6,
-        hidden_dim=8,
-        asset_in_dim=7,
-        controller_window=5,
-    )
-    stats = controller.decision_stats(
-        asset_state=torch.randn(2, 3, 5, 7),
-        weights_drift=torch.full((2, 3), 1 / 3),
-        port_state=torch.zeros(2, 6),
-        switch_action=torch.full((2, 3), 1 / 3),
-    )
-    assert stats["exit_prob"].shape == (2,)
-```
-
-Also assert `HRL_Buffer().data` has no `"ssm"` key and a stored transition can
-be batched without an SSM dictionary.
-
-- [ ] **Step 2: Verify RED**
-
-```bash
-/home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
-  tests/test_feature_only_data_pipeline.py::test_controller_accepts_asset_features_without_ssm -v
-```
-
-Expected: FAIL because `MonitorAC` still requires `z_dim` and `h_dim`.
-
-- [ ] **Step 3: Simplify `MonitorAC`**
-
-In `Components/PPO_model.py`:
-
-- remove `z_dim`, `h_dim`, and `fallback_projection`;
-- make `asset_in_dim` required;
-- change `decision_stats`, `encode`, `pi`, `value`, and `forward` to receive
-  `asset_state`, `weights_drift`, `port_state`, and optional `switch_action`;
-- make `_encode_asset_sequence` accept only `asset_state`;
-- retain attention, portfolio/action features, auxiliary heads, thresholding,
-  and output dictionary unchanged.
-
-- [ ] **Step 4: Remove SSM from action/update/buffer paths**
-
-In `agent/PPO_agent.py` and `Train/PPO_train.py`:
-
-- remove `"ssm"` from `HRL_Buffer`;
-- remove special SSM stacking logic;
-- call Controller methods with feature-only keyword arguments;
-- remove SSM entries from daily transitions and detached Controller records;
-- update Controller auxiliary replay and counterfactual PG records accordingly.
-
-- [ ] **Step 5: Update existing tests and verify GREEN**
-
-Replace old Controller calls in tests with:
-
-```python
-stats = controller.decision_stats(
-    asset_state=asset_state,
-    weights_drift=weights,
-    port_state=port_state,
-    switch_action=candidate,
+controller = MonitorAC(
+    port_state_dim=6,
+    hidden_dim=8,
+    asset_in_dim=7,
+    controller_window=5,
 )
+stats = controller.decision_stats(
+    asset_state=torch.randn(2, 3, 5, 7),
+    weights_drift=torch.full((2, 3), 1 / 3),
+    port_state=torch.zeros(2, 6),
+    switch_action=torch.full((2, 3), 1 / 3),
+)
+assert stats["exit_prob"].shape == (2,)
 ```
 
-Run:
+2. 确认测试因 `z_dim/h_dim` 必填而失败。
+
+3. 修改 `MonitorAC`：
+
+   - 删除 `z_dim`、`h_dim` 和 `fallback_projection`；
+   - `asset_in_dim` 改为必要参数；
+   - `decision_stats()`、`pi()`、`value()`、`forward()` 只接收：
+
+```text
+asset_state
+weights_drift
+port_state
+switch_action
+```
+
+   - 保留两阶段注意力、组合状态、候选组合差异、切换概率、收益/风险/优势辅助头。
+
+4. 修改 `HRL_Buffer`：
+
+   - 删除 `"ssm"` 数据项；
+   - 删除 SSM 字典的特殊堆叠逻辑。
+
+5. 修改 Agent 和 Trainer：
+
+   - 所有 Controller 前向调用只传普通特征；
+   - transition 删除 `ssm`；
+   - Controller PG、辅助预训练和反事实记录删除 SSM 字段；
+   - 保持 Controller reward、switch advantage 和验证逻辑不变。
+
+6. 更新现有测试中的 Controller 调用。
+
+7. 运行：
 
 ```bash
 /home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
@@ -262,70 +173,69 @@ Run:
   tests/test_controller_joint_baseline.py -q
 ```
 
-Expected: PASS.
+预期全部通过。
 
-- [ ] **Step 6: Commit**
+---
 
-```bash
-git add Components/PPO_model.py agent/PPO_agent.py Train/PPO_train.py \
-  tests/test_controller_counterfactual_pg.py tests/test_controller_joint_baseline.py \
-  tests/test_feature_only_data_pipeline.py
-git commit -m "refactor: remove SSM controller interface"
-```
+## 任务四：删除训练入口中的 SSM 和 Rule-Switch 参数
 
-### Task 4: Remove SSM and Rule-Switch Training Configuration
+### 涉及文件
 
-**Files:**
-- Modify: `run_hrl_training.py`
-- Modify: `utils/config.py`
-- Modify: `utils/config_Nas.py`
-- Modify: `utils/config_SH.py`
-- Modify: `Train/PPO_train.py`
-- Modify: `train_sh/run_end_to_end_hrl_controller_joint_nas49_sh90.sh`
-- Modify: relevant scripts under `train_sh/` and `scripts/`
-- Modify: `tests/test_run_hrl_training_command.py`
-- Modify: `tests/test_end_to_end_hrl_controller_joint_script.py`
+- 修改：`run_hrl_training.py`
+- 修改：`utils/config.py`
+- 修改：`utils/config_Nas.py`
+- 修改：`utils/config_SH.py`
+- 修改：`Train/PPO_train.py`
+- 修改：`train_sh/` 和 `scripts/` 下当前仍在使用的训练脚本
+- 修改：`tests/test_run_hrl_training_command.py`
+- 修改：`tests/test_end_to_end_hrl_controller_joint_script.py`
+- 修改：`tests/test_controller_end_replay_scripts.py`
 
-- [ ] **Step 1: Write failing command/config tests**
+### 实施步骤
 
-Add assertions:
+1. 新增失败断言：
 
 ```python
-def test_end_to_end_command_has_no_ssm_arguments(command):
-    joined = " ".join(command)
-    assert "--ssm_dim" not in joined
-    assert "--ssm_data_path" not in joined
-    assert "--nas_ssm_data_path" not in joined
-    assert "--sh_ssm_data_path" not in joined
-
-
-def test_runtime_config_uses_feature_path():
-    assert "feature_path" in config.dataset
-    assert "ssm_data_path" not in config.dataset
+joined = " ".join(command)
+assert "--ssm_dim" not in joined
+assert "--ssm_data_path" not in joined
+assert "--nas_ssm_data_path" not in joined
+assert "--sh_ssm_data_path" not in joined
 ```
 
-- [ ] **Step 2: Verify RED**
+同时检查：
 
-```bash
-/home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
-  tests/test_run_hrl_training_command.py \
-  tests/test_end_to_end_hrl_controller_joint_script.py -q
+```python
+assert "feature_path" in config.dataset
+assert "ssm_data_path" not in config.dataset
 ```
 
-Expected: FAIL on current SSM arguments.
+2. 运行相关测试，确认当前命令仍包含旧参数。
 
-- [ ] **Step 3: Remove obsolete runtime configuration**
+3. 修改训练入口：
 
-- change `HRL_Networks.__init__` to `(num_stocks, cfg)`;
-- remove `ssm_dim` and all SSM path CLI arguments and metadata;
-- log `dataset["feature_path"]`;
-- delete `ssm_data_path`, `ssm_feature`, and `ssm_features` from the three
-  active config files;
-- remove rule-switch CLI/config/test execution and `held_p` diagnostics;
-- remove obsolete shell variables and arguments without changing active
-  end-to-end hyperparameters.
+   - `HRL_Networks` 构造函数改为 `(num_stocks, cfg)`；
+   - 删除 `ssm_dim`；
+   - 删除 `ssm_data_path` 及两个市场的覆盖参数；
+   - 运行日志和 metadata 改为记录 `feature_path`。
 
-- [ ] **Step 4: Verify GREEN**
+4. 修改三个配置：
+
+   - 删除 `ssm_data_path`；
+   - 删除 `ssm_feature`；
+   - 删除 `ssm_features`；
+   - 保留 `feature_path`、股票池、七个模型输入字段和交易成本配置。
+
+5. 删除 rule-switch：
+
+   - 删除 `use_rule_switch` 分支；
+   - 删除 `rule_switch_threshold`、连续低 `held_p` 等参数；
+   - 删除 Scenario 4 rule-switch 测试；
+   - 保留 learned Controller 和固定周期测试。
+
+6. 清理 shell 脚本中的旧参数，但不改变现有 epoch、窗口、seed、成本和输出路径逻辑。
+
+7. 运行：
 
 ```bash
 /home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
@@ -334,253 +244,166 @@ Expected: FAIL on current SSM arguments.
   tests/test_controller_end_replay_scripts.py -q
 ```
 
-Expected: PASS.
+---
 
-- [ ] **Step 5: Commit**
+## 任务五：移除 SSM-only Baseline 和旧 Pipeline
 
-```bash
-git add run_hrl_training.py Train/PPO_train.py utils/config.py utils/config_Nas.py \
-  utils/config_SH.py train_sh scripts tests/test_run_hrl_training_command.py \
-  tests/test_end_to_end_hrl_controller_joint_script.py \
-  tests/test_controller_end_replay_scripts.py
-git commit -m "refactor: remove SSM training configuration"
-```
+### 涉及文件
 
-### Task 5: Remove the SSM-Only Baseline and Pipeline
+- 修改：`Train/baseline.py`
+- 修改：`Baseline/__init__.py`
+- 删除：`Baseline/SSM/`
+- 删除：`SSM_pipeline.py`
+- 修改：`tests/test_feature_only_data_pipeline.py`
 
-**Files:**
-- Modify: `Train/baseline.py`
-- Modify: `Baseline/__init__.py`
-- Delete: `Baseline/SSM/run.py`
-- Delete: `SSM_pipeline.py`
-- Modify: `tests/test_feature_only_data_pipeline.py`
+### 实施步骤
 
-- [ ] **Step 1: Write a failing baseline registry test**
+1. 新增失败测试：
 
 ```python
-def test_baseline_registry_has_no_ssm_only_model():
-    source = Path("Train/baseline.py").read_text()
-    assert "baseline_ssm" not in source
-    assert not Path("Baseline/SSM").exists()
-    assert not Path("SSM_pipeline.py").exists()
+source = Path("Train/baseline.py").read_text()
+assert "baseline_ssm" not in source
+assert not Path("Baseline/SSM").exists()
+assert not Path("SSM_pipeline.py").exists()
 ```
 
-- [ ] **Step 2: Verify RED**
+2. 确认测试失败。
+
+3. 删除：
+
+   - `baseline_ssm` 的导入、导出和执行；
+   - `Baseline/SSM/`；
+   - `SSM_pipeline.py`。
+
+4. 验证 baseline 入口仍能正常导入：
 
 ```bash
-/home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
-  tests/test_feature_only_data_pipeline.py::test_baseline_registry_has_no_ssm_only_model -v
-```
-
-Expected: FAIL because the SSM-only baseline and pipeline exist.
-
-- [ ] **Step 3: Delete the obsolete code**
-
-- remove `baseline_ssm` import/export/call;
-- delete `Baseline/SSM/`;
-- delete `SSM_pipeline.py`;
-- retain the current test tree unchanged here because repository search finds
-  no test importing `SSM_pipeline`, `baseline_ssm`, or `Baseline.SSM`.
-
-- [ ] **Step 4: Verify GREEN**
-
-Run the focused test and import check:
-
-```bash
-/home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
-  tests/test_feature_only_data_pipeline.py::test_baseline_registry_has_no_ssm_only_model -v
 /home/tongwenxuan/conda/envs/xuangu/bin/python -c \
   "from Train.baseline import baseline; from Baseline import baseline_BH"
 ```
 
-Expected: PASS and clean import.
+---
 
-- [ ] **Step 5: Commit**
+## 任务六：适配 AlphaStock 和 DeepTrader
 
-```bash
-git add Train/baseline.py Baseline tests/test_feature_only_data_pipeline.py
-git add -u SSM_pipeline.py
-git commit -m "refactor: remove obsolete SSM baseline pipeline"
+### 涉及文件
+
+- 修改：`Train/deep_baseline.py`
+- 修改：`utils/PriceMatrix.py`
+- 修改：`create_deeptrader_data.py`
+- 修改：`tests/test_feature_only_data_pipeline.py`
+
+### AlphaStock
+
+1. 新增 Nasdaq 风格字段推导测试。
+2. 删除 `_run_alphastock()` 中将 `feature_path` 强制改成 `ssm_data_path` 的代码。
+3. 在 `alphastock_files()` 选择字段前调用 `_standardize_feature_columns()`。
+4. 输入字段保持：
+
+```text
+adjopen, adjhigh, adjlow, adjclose, amount, amp, body
 ```
 
-### Task 6: AlphaStock and DeepTrader Feature Adapters
+### DeepTrader
 
-**Files:**
-- Modify: `Train/deep_baseline.py`
-- Modify: `utils/PriceMatrix.py`
-- Modify: `create_deeptrader_data.py`
-- Modify: `tests/test_feature_only_data_pipeline.py`
-
-- [ ] **Step 1: Write failing adapter tests**
-
-```python
-def test_alphastock_files_derives_nasdaq_fields(tmp_path):
-    _write_stock(tmp_path / "AAA.csv", 2.0)
-    data, dates, _, _, prices = alphastock_files(
-        tmp_path,
-        ["AAA"],
-        ["adjopen", "adjhigh", "adjlow", "adjclose", "amount", "amp", "body"],
-    )
-    assert data.shape[-1] == 7
-    assert np.isfinite(data).all()
-
-
-def test_deeptrader_uses_six_model_specific_fields(monkeypatch, tmp_path):
-    outputs = deeptrader_files(output_path=tmp_path / "out")
-    features = np.load(tmp_path / "out" / "features.npy")
-    assert features.shape[-1] == 6
-```
-
-The test fixture must provide both `feature_path` and a deliberately invalid
-`ssm_data_path`; success proves the adapter did not resolve the old path.
-
-- [ ] **Step 2: Verify RED**
-
-Run the two focused tests. Expected: AlphaStock raises missing-column `KeyError`
-and DeepTrader resolves `ssm_data_path` or emits seven features.
-
-- [ ] **Step 3: Implement AlphaStock adaptation**
-
-- remove the `feature_path = ssm_data_path` override in `Train/deep_baseline.py`;
-- call `_standardize_feature_columns(df, feature_cols)` in `alphastock_files`
-  before selecting features and prices.
-
-- [ ] **Step 4: Implement DeepTrader adaptation**
-
-In `create_deeptrader_data.py`:
-
-- resolve only `dataset["feature_path"]`;
-- define:
+1. 新增测试，配置一个无效的 `ssm_data_path`，确认模型仍从 `feature_path` 成功生成输入。
+2. 固定 DeepTrader 自己的六维输入：
 
 ```python
 DEEPTRADER_FEATURES = [
-    "adjopen", "adjhigh", "adjlow", "adjclose", "amount", "amp"
+    "adjopen",
+    "adjhigh",
+    "adjlow",
+    "adjclose",
+    "amount",
+    "amp",
 ]
 ```
 
-- standardize each stock DataFrame before computing returns and extracting
-  features;
-- preserve date intersection, return calculation, relation matrix, and split
-  files;
-- accept an optional `output_path` to make the adapter testable without
-  mutating configured output directories.
+3. `create_deeptrader_data.py`：
 
-- [ ] **Step 5: Verify GREEN**
+   - 只读取 `dataset["feature_path"]`；
+   - 每只股票先做字段适配；
+   - 再生成 `features.npy`、`rets.npy`、`relation.npy` 和 `split_idx.txt`；
+   - 增加可选输出目录参数，测试时不污染正式目录。
+
+4. 验证：
 
 ```bash
 /home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
   tests/test_feature_only_data_pipeline.py -k "alphastock or deeptrader" -v
 ```
 
-Expected: PASS.
+---
 
-- [ ] **Step 6: Commit**
+## 任务七：恢复 DeepAries 原生特征处理
 
-```bash
-git add Train/deep_baseline.py utils/PriceMatrix.py create_deeptrader_data.py \
-  tests/test_feature_only_data_pipeline.py
-git commit -m "fix: load AlphaStock and DeepTrader from feature data"
-```
+### 涉及文件
 
-### Task 7: Restore Native DeepAries Feature Processing
+- 修改：`create_DeepAries_data.py`
+- 修改：`Train/deep_baseline.py`
+- 修改：`run_deeparies_baseline.py`
+- 修改：`tests/test_feature_only_data_pipeline.py`
 
-**Files:**
-- Modify: `create_DeepAries_data.py`
-- Modify: `Train/deep_baseline.py`
-- Modify: `run_deeparies_baseline.py`
-- Modify: `tests/test_feature_only_data_pipeline.py`
+### 实施步骤
 
-- [ ] **Step 1: Write a failing DeepAries handoff test**
-
-```python
-def test_deeparies_builds_raw_ohlcv_then_native_features(tmp_path):
-    summary = save_deeparies_data(
-        market="nas",
-        output_root=tmp_path,
-        feature_path=feature_dir,
-        stocks_path=stocks_file,
-        start_date="2020-01-02",
-        end_date="2020-01-03",
-    )
-    raw = pd.read_csv(summary["raw_path"])
-    assert list(raw.columns) == [
-        "date", "tic", "open", "high", "low", "close", "adjclose", "volume"
-    ]
-    assert not Path(summary["processed_path"]).exists()
-
-    YfinancePreprocessor(
-        summary["raw_path"], summary["processed_path"]
-    ).make_feature()
-    processed = pd.read_csv(summary["processed_path"])
-    assert {"zopen", "zhigh", "zlow", "zclose", "zd_5", "zd_60"} <= set(processed)
-```
-
-Add a second fixture containing only SH-style adjusted fields. Its expected raw
-mapping is:
+1. 新增测试，要求适配器只输出原始输入：
 
 ```text
-open=adjopen, high=adjhigh, low=adjlow, close=adjclose,
-adjclose=adjclose, volume=amount/adjclose
+date, tic, open, high, low, close, adjclose, volume
 ```
 
-- [ ] **Step 2: Verify RED**
+2. Nasdaq 风格文件直接使用原始 OHLCV 和 `adjclose`。
 
-Run the DeepAries tests. Expected: FAIL because the current adapter writes
-seven adjusted features and pre-creates the processed file.
+3. SH 风格文件缺少原始 OHLCV 时采用：
 
-- [ ] **Step 3: Rewrite the raw adapter**
+```text
+open     = adjopen
+high     = adjhigh
+low      = adjlow
+close    = adjclose
+adjclose = adjclose
+volume   = amount / adjclose
+```
 
-In `create_DeepAries_data.py`:
+4. `create_DeepAries_data.py` 只生成 `<market>_data.csv`，不再提前生成
+`<market>_general_data.csv`。
 
-- resolve only `feature_path`;
-- replace the shared seven-field export with
-  `build_deeparies_raw_dataframe`;
-- for NAS-style files use raw OHLCV and adjusted close;
-- for SH-style files derive the raw-compatible mapping above;
-- write only `<market>_data.csv`;
-- remove a stale generated `<market>_general_data.csv` inside the run-specific
-  output directory before launching DeepAries;
-- retain dates, stock alignment, and summary metadata.
+5. 在本次运行自己的输出目录中删除陈旧的 processed 文件，使
+`DeepAries/main.py` 必定调用其原生 `YfinancePreprocessor`。
 
-Update `Train/deep_baseline.py` and `run_deeparies_baseline.py` messages to say
-`feature_path`, then let `DeepAries/main.py` invoke `YfinancePreprocessor`.
+6. 测试原生处理后必须出现：
 
-- [ ] **Step 4: Verify GREEN**
+```text
+zopen, zhigh, zlow, zadjcp, zclose,
+zd_5, zd_10, zd_15, zd_20, zd_25, zd_30, zd_60
+```
+
+7. 运行：
 
 ```bash
 /home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
   tests/test_feature_only_data_pipeline.py -k deeparies -v
 ```
 
-Expected: PASS.
+---
 
-- [ ] **Step 5: Commit**
+## 任务八：完整回归和 Smoke 验证
 
-```bash
-git add create_DeepAries_data.py Train/deep_baseline.py run_deeparies_baseline.py \
-  tests/test_feature_only_data_pipeline.py
-git commit -m "fix: restore native DeepAries feature preprocessing"
-```
-
-### Task 8: Full Regression and Smoke Verification
-
-**Files:**
-- Modify only files required by failures found in this task.
-
-- [ ] **Step 1: Audit active runtime references**
-
-Run:
+### 1. 检查旧运行引用
 
 ```bash
-rg -n "feature_ssm|ssm_data_path|ssm_dim|ssm3_|held_p|use_rule_switch|baseline_ssm" \
+rg -n \
+  "feature_ssm|ssm_data_path|ssm_dim|ssm3_|held_p|use_rule_switch|baseline_ssm" \
   Components env agent Train Baseline utils run_hrl_training.py \
   create_deeptrader_data.py create_DeepAries_data.py run_deeparies_baseline.py \
-  train_sh scripts --glob '*.py' --glob '*.sh'
+  train_sh scripts \
+  --glob '*.py' --glob '*.sh'
 ```
 
-Expected: no active runtime matches.
+预期：活动代码中没有匹配。
 
-- [ ] **Step 2: Run focused regression tests**
+### 2. 运行重点测试
 
 ```bash
 /home/tongwenxuan/conda/envs/xuangu/bin/python -m pytest \
@@ -592,9 +415,7 @@ Expected: no active runtime matches.
   tests/test_controller_end_replay_scripts.py -q
 ```
 
-Expected: PASS.
-
-- [ ] **Step 3: Run feature-only CMTFlow smoke training**
+### 3. CMTFlow 双市场 Smoke
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -606,31 +427,30 @@ CUDA_VISIBLE_DEVICES=0 \
   --continue_on_error
 ```
 
-Expected: both markets construct from `feature_path`, perform at least one
-training update, write checkpoints/results, and emit no SSM-path warning.
+预期：
 
-- [ ] **Step 4: Run deep-baseline adapter smoke checks**
+- 两个市场都从 `feature_path` 建立环境；
+- 至少完成一次训练更新；
+- 正常写出 checkpoint 和测试结果；
+- 不出现 SSM 文件或路径错误。
 
-Run the adapter tests plus the existing DeepAries smoke entry with one epoch
-and a small stock subset. Expected: AlphaStock data construction, DeepTrader
-NPY generation, and DeepAries native preprocessing all complete without
-reading `feature_ssm`.
+### 4. Baseline 适配器 Smoke
 
-- [ ] **Step 5: Inspect the final diff**
+- AlphaStock 能完成两个市场的数据构造；
+- DeepTrader 输出最后一维为6；
+- DeepAries 确实经过原生预处理器；
+- 全部输入均来自 `feature`。
+
+### 5. 最终检查
 
 ```bash
 git diff --check
 git status --short
 ```
 
-Expected: no whitespace errors; only intended source/test deletions and the
-user's pre-existing unrelated changes remain.
+这里只用于检查改动，不执行暂存、提交或推送。最终向用户列出：
 
-- [ ] **Step 6: Commit final verification fixes**
-
-```bash
-git add Components env agent Train Baseline utils run_hrl_training.py \
-  create_deeptrader_data.py create_DeepAries_data.py run_deeparies_baseline.py \
-  train_sh scripts tests
-git commit -m "test: verify feature-only training pipeline"
-```
+- 修改和删除的文件；
+- 通过的测试；
+- smoke 结果；
+- 仍需完整重训的模型。

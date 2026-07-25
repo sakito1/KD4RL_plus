@@ -784,11 +784,6 @@ def collect_scenario_trace(trainer, *, scenario: str, fixed_cycle=None, disable_
                 force_locked=force_locked,
             )
             stats = trainer.agent.net.mon.decision_stats(
-                obs["ssm"]["z"],
-                obs["ssm"]["h"],
-                obs["ssm"]["p"],
-                obs["ssm"]["q_bear"],
-                obs["ssm"]["q_bull"],
                 obs["weights_drift"],
                 obs["port_state"],
                 switch_action=out["act_out"],

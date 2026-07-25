@@ -1,1 +1,0 @@
-2026-01-21 12:16:50:WARNING:after training 6 round, [VAL] max wealth: 2.1910, min wealth: 1.0000, avg wealth: 1.5273, final wealth: 1.8517, ARR: 31.915%, ASR: 1.034, AVol: 0.309, MDD: 27.43%, CR: 1.163, DDR: 15.604 | [TEST] max wealth: 2.9627, min wealth: 1.0000, avg wealth: 1.9652, final wealth: 2.9627, ARR: 23.066%, ASR: 0.900, AVol: 0.256, MDD: 24.54%, CR: 0.940, DDR: 15.006

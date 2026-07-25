@@ -25,7 +25,7 @@ def load_prices(raw_folder: str, assets: list) -> pd.DataFrame:
 
 def compute_asset_contributions(weights: pd.DataFrame,
                                 prices: pd.DataFrame,
-                                transaction_cost_pct: float = 0.001,
+                                transaction_cost_pct: float = None,
                                 initial_value: float = 1.0) -> pd.DataFrame:
     """
     计算每个资产对组合的绝对累计贡献：
@@ -33,6 +33,12 @@ def compute_asset_contributions(weights: pd.DataFrame,
     累积后得到 cum_contrib_i[t]；权重为0时贡献为0，累积保持不变。
     返回 DataFrame（index=日期，columns=资产名）。
     """
+    transaction_cost_pct = (
+        config.TRANSACTION_COST_RATE
+        if transaction_cost_pct is None
+        else float(transaction_cost_pct)
+    )
+
     # 对齐日期并填充
     idx = weights.index.intersection(prices.index)
     w = weights.reindex(idx).fillna(method="ffill")

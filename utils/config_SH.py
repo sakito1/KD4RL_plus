@@ -76,7 +76,7 @@ wmamr_window_size=90
 markowitz_window_size=30
 anticor_window_size=90
 
-TRANSACTION_COST_RATE=5e-5
+TRANSACTION_COST_RATE=1e-4
 
 # Monitor reward: include transaction cost when switching
 monitor_use_transaction_cost = True
@@ -179,10 +179,8 @@ HierAgent = dict(
 # 输入env的数据参数，包括数据来源，特征，投资组合股票
 dataset = dict(
     type = "PortfolioManagementDataset",
-    ssm_data_path = 'Dataset/沪深数据/feature_ssm',
     raw_path="Dataset/沪深数据/raw",
     feature_path = 'Dataset/沪深数据/feature',
-    ssm_feature = "Dataset/沪深数据/ssm_feature",# 用于SSM模型训练的特征
     market_path="占位符",
     stocks_path ="utils/SH_pool.txt",
     prices_name = ['open', 'high', 'low', 'close'],
@@ -301,5 +299,4 @@ dataset = dict(
         'sumd_60',
     ]
 )
-
 

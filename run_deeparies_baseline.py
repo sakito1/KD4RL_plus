@@ -32,7 +32,7 @@ def apply_market_config(config_module):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run DeepAries baseline on KD4RL feature_ssm data for A-share and NAS100."
+        description="Run DeepAries baseline on KD4RL feature data for A-share and NAS100."
     )
     parser.add_argument(
         "--markets",
@@ -103,7 +103,7 @@ def parse_args():
         "--fee_rate",
         type=float,
         default=None,
-        help="Default: 0.0 to match AlphaStock portfolio-return evaluation.",
+        help="Default: the market TRANSACTION_COST_RATE (one basis point).",
     )
     parser.add_argument(
         "--initial_amount",
@@ -209,7 +209,7 @@ def effective_alphastock_aligned_settings(args, summary):
         "num_stocks": num_stocks,
         "trade_num_source": _alphastock_trade_num(),
         "initial_amount": args.initial_amount if args.initial_amount is not None else getattr(runtime_config, "initial_amount", 1.0),
-        "fee_rate": args.fee_rate if args.fee_rate is not None else 0.0,
+        "fee_rate": args.fee_rate if args.fee_rate is not None else runtime_config.TRANSACTION_COST_RATE,
         "features": list(runtime_config.dataset.get("features_name", [])),
     }
 
@@ -221,7 +221,7 @@ def build_deeparies_command(args, market, deep_market, run_dir, summary, seed):
 
     train_epochs = args.train_epochs if args.train_epochs is not None else _alphastock_param("num_epoch", 1)
     seq_len = args.seq_len if args.seq_len is not None else _alphastock_param("look_back", 20)
-    fee_rate = args.fee_rate if args.fee_rate is not None else 0.0
+    fee_rate = args.fee_rate if args.fee_rate is not None else runtime_config.TRANSACTION_COST_RATE
     initial_amount = args.initial_amount if args.initial_amount is not None else getattr(runtime_config, "initial_amount", 1.0)
 
     command = [
@@ -336,7 +336,7 @@ def run_market_seed(args, market, run_root, seed):
 
     prefix = f"{market}-s{seed}"
     print(f"\n===== DeepAries baseline: {label} ({market}), seed={seed} =====", flush=True)
-    print(f"[{prefix}] source feature_ssm: {runtime_config.dataset['ssm_data_path']}", flush=True)
+    print(f"[{prefix}] source feature: {runtime_config.dataset['feature_path']}", flush=True)
     print(
         f"[{prefix}] split: train [{runtime_config.train_start_date}, {runtime_config.train_end_date}], "
         f"val [{runtime_config.valid_start_date}, {runtime_config.valid_end_date}], "

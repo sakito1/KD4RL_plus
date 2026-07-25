@@ -6,7 +6,6 @@ from Baseline import(
     baseline_olmar,
     baseline_ucrp,
     baseline_wmamr,
-    baseline_ssm,
 )
 import matplotlib.pyplot as plt
 import os
@@ -15,7 +14,6 @@ import pandas as pd
 from Train.deep_baseline import deep_baseline
 
 def baseline(cun_path, logger, include_deep=True, deep_smoke=False):
-    baseline_ssm(cun_path, logger)
     baseline_anticor(cun_path, logger)
     baseline_BH(cun_path, logger)
     baseline_markowitz(cun_path, logger)

@@ -75,7 +75,7 @@ class _FakeMonitor(nn.Module):
         self.mdd_pred = nn.Parameter(torch.tensor([0.04], dtype=torch.float32))
         self.called = False
 
-    def decision_stats(self, z, h, p, q_bear, q_bull, weights_drift, port_state,
+    def decision_stats(self, weights_drift, port_state,
                        switch_action=None, asset_state=None):
         self.called = True
         batch = weights_drift.shape[0]

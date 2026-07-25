@@ -410,7 +410,7 @@ class PortfolioEnv(object):
                  test_idx,
                  test_end_idx,
                  batch_size,
-                 fee=0.001,
+                 fee=0.0001,
                  time_cost=0.0,
                  window_len=20,
                  trade_len=5,

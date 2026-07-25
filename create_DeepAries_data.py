@@ -18,7 +18,7 @@ def _to_timestamp(value):
 
 
 def infer_market_name():
-    data_path = str(config.dataset.get("ssm_data_path", config.dataset.get("feature_path", ""))).lower()
+    data_path = str(config.dataset.get("feature_path", "")).lower()
     stock_path = str(config.dataset.get("stocks_path", "")).lower()
     if "沪深" in data_path or "sh" in stock_path:
         return "sh"
@@ -93,7 +93,7 @@ def build_deeparies_dataframe(
     end_date=None,
     stocks_limit=None,
 ):
-    feature_path = Path(feature_path or config.dataset.get("ssm_data_path", config.dataset["feature_path"]))
+    feature_path = Path(feature_path or config.dataset["feature_path"])
     stocks_path = stocks_path or config.dataset["stocks_path"]
     start_date = _to_timestamp(start_date or config.train_start_date)
     end_date = _to_timestamp(end_date or config.test_end_date)
@@ -151,7 +151,7 @@ def save_deeparies_data(
 ):
     market = market or infer_market_name()
     output_root = Path(output_root or ROOT / "DeepAries" / "data" / market)
-    source_feature_path = Path(feature_path or config.dataset.get("ssm_data_path", config.dataset["feature_path"]))
+    source_feature_path = Path(feature_path or config.dataset["feature_path"])
     feature_cols = list(config.dataset.get("features_name", DEFAULT_FEATURE_COLS))
     output_root.mkdir(parents=True, exist_ok=True)
     data = build_deeparies_dataframe(
@@ -187,7 +187,7 @@ def main():
     parser.add_argument("--market", default=None, help="DeepAries market name, e.g. nas or sh.")
     parser.add_argument("--output_root", default=None, help="Directory that receives DeepAries CSV files.")
     parser.add_argument("--data_type", default="general", help="DeepAries data type suffix.")
-    parser.add_argument("--feature_path", default=None, help="Override config.dataset['ssm_data_path'].")
+    parser.add_argument("--feature_path", default=None, help="Override config.dataset['feature_path'].")
     parser.add_argument("--stocks_path", default=None, help="Override config.dataset['stocks_path'].")
     parser.add_argument("--start_date", default=None, help="Default: config.train_start_date.")
     parser.add_argument("--end_date", default=None, help="Default: config.test_end_date.")

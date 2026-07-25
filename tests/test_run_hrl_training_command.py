@@ -4,11 +4,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import torch
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import run_hrl_training
+from agent.PPO_agent import HRL_Buffer
 
 
 class RunHrlTrainingCommandTests(unittest.TestCase):
@@ -246,6 +249,107 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
 
         self.assertIn("--test_skip_fixed_scenarios", command)
         self.assertEqual(command[command.index("--test_max_days") + 1], "240")
+
+    def test_reward_modes_are_forwarded_to_child_command(self):
+        args = self._args_from_cli([
+            "--markets", "nas",
+            "--outer_reward_mode",
+            "segment_sharpe",
+            "--controller_reward_mode",
+            "relative_return_mdd",
+        ])
+
+        command = run_hrl_training.build_child_command(
+            args,
+            market="nas",
+            run_root=Path("/tmp/hrl-test"),
+            seed=49,
+        )
+
+        self.assertEqual(command[command.index("--outer_reward_mode") + 1], "segment_sharpe")
+        self.assertEqual(command[command.index("--controller_reward_mode") + 1], "relative_return_mdd")
+
+    def test_downside_controller_reward_args_are_forwarded_to_child_command(self):
+        args = self._args_from_cli([
+            "--markets", "nas",
+            "--controller_reward_mode",
+            "relative_downside_mdd",
+            "--controller_downside_coef",
+            "0.5",
+        ])
+
+        command = run_hrl_training.build_child_command(
+            args,
+            market="nas",
+            run_root=Path("/tmp/hrl-test"),
+            seed=50,
+        )
+
+        self.assertEqual(command[command.index("--controller_reward_mode") + 1], "relative_downside_mdd")
+        self.assertEqual(command[command.index("--controller_downside_coef") + 1], "0.5")
+
+    def test_staged_controller_and_inner_flags_are_forwarded_to_child_command(self):
+        args = self._args_from_cli([
+            "--markets", "nas",
+            "--frozen_hrl_checkpoint",
+            "/tmp/stage/outer/best_model.pth",
+            "--controller_only_finetune",
+            "--controller_pg_disable_inner",
+            "--test_controller_no_inner_scenario",
+        ])
+
+        command = run_hrl_training.build_child_command(
+            args,
+            market="nas",
+            run_root=Path("/tmp/hrl-test"),
+            seed=41,
+        )
+
+        self.assertIn("--controller_pg_disable_inner", command)
+        self.assertIn("--test_controller_no_inner_scenario", command)
+
+        inner_args = self._args_from_cli([
+            "--markets", "nas",
+            "--frozen_hrl_checkpoint",
+            "/tmp/stage/controller/best_model.pth",
+            "--inner_only_finetune",
+        ])
+        inner_command = run_hrl_training.build_child_command(
+            inner_args,
+            market="nas",
+            run_root=Path("/tmp/hrl-test"),
+            seed=41,
+        )
+
+        self.assertIn("--inner_only_finetune", inner_command)
+        self.assertNotIn("--controller_only_finetune", inner_command)
+
+    def test_outer_segment_sharpe_reward_mode_uses_segment_returns(self):
+        buffer = HRL_Buffer(
+            capacity=16,
+            device=torch.device("cpu"),
+            gamma=1.0,
+            gae_lambda=1.0,
+            outer_reward_scale=1.0,
+            outer_reward_mode="segment_sharpe",
+        )
+        for idx, ret in enumerate([0.01, 0.03, -0.01]):
+            buffer.store_daily({
+                "rew_mon": torch.tensor(0.0),
+                "rew_alpha": torch.tensor(0.0),
+                "rew_outer_raw": torch.tensor(ret),
+                "val_mon": torch.tensor(0.0),
+                "val_inn": torch.tensor(0.0),
+                "val_out": torch.tensor(0.0),
+                "is_switch": torch.tensor(1 if idx == 0 else 0),
+                "dones": torch.tensor(1 if idx == 2 else 0),
+            })
+
+        buffer.finish_episode({"val_mon": 0.0, "val_inn": 0.0, "val_out": 0.0})
+
+        returns = torch.tensor([0.01, 0.03, -0.01])
+        expected = returns.mean() / (returns.std(unbiased=False) + 1e-8) * (252.0 ** 0.5)
+        self.assertAlmostEqual(buffer.data["ret_out"][0].item(), expected.item(), places=5)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,13 @@ class CounterfactualStats:
     turnover: float
     free_switch_count: int
     segment_count: int
+    trading_days: int = 252
+    downside_loss: float = 0.0
+
+    def calmar_ratio(self, eps: float = 1e-8) -> float:
+        days = max(1, int(self.trading_days))
+        annualized_return = float(self.log_return) / float(days) * 252.0
+        return annualized_return / max(float(self.max_drawdown), float(eps))
 
 
 def segment_budget_allows_switch(
@@ -52,8 +59,12 @@ def controller_reward(
         baseline: CounterfactualStats,
         controlled: CounterfactualStats,
         *,
+        reward_mode: str = "return_uplift",
         mdd_coef: float = 2.0,
+        downside_coef: float = 0.0,
         return_coef: float = 0.5,
+        cr_coef: float = 1.0,
+        cr_eps: float = 1e-8,
         count_min: int = 15,
         count_max: int = 25,
         count_penalty_coef: float = 0.5,
@@ -62,15 +73,54 @@ def controller_reward(
         switch_coef: float = 0.0,
         turnover_coef: float = 0.0,
 ) -> float:
-    """Relative-return controller reward with a normalized max-switch overflow penalty.
+    """Controller reward with opt-in risk-aware modes and max-switch overflow penalty.
 
     Legacy keyword arguments are accepted for compatibility, but the current
-    controller objective intentionally ignores MDD, turnover, and minimum-count
-    penalties. Forced max-hold switches already provide the lower switch bound.
+    default objective intentionally ignores MDD, turnover, and minimum-count
+    penalties. ``relative_cr`` compares controlled and trained-HRL baseline
+    Calmar ratios. ``relative_return_mdd`` uses relative return uplift as the
+    main signal and relative MDD improvement as a smaller stabilizing signal.
+    ``relative_downside_mdd`` additionally rewards reducing cumulative negative
+    daily log returns, while leaving return uplift as the dominant policy term.
     Overflow is divided by ``max_switch_count ** 2`` so the switch term stays on
     a similar scale to log-return uplift across different rollout lengths.
     """
-    return_uplift = float(controlled.log_return) - float(baseline.log_return)
+    mode = str(reward_mode)
+    if mode in ("return_uplift", "return"):
+        base_reward = float(return_coef) * (float(controlled.log_return) - float(baseline.log_return))
+    elif mode in ("relative_cr", "cr", "calmar"):
+        base_reward = float(cr_coef) * (
+            controlled.calmar_ratio(cr_eps) - baseline.calmar_ratio(cr_eps)
+        )
+    elif mode in ("relative_return_mdd", "relative_ret_mdd", "relative_uplift"):
+        relative_return_uplift = (
+            float(controlled.log_return) - float(baseline.log_return)
+        ) / max(abs(float(baseline.log_return)), float(cr_eps))
+        relative_mdd_uplift = (
+            float(baseline.max_drawdown) - float(controlled.max_drawdown)
+        ) / max(abs(float(baseline.max_drawdown)), float(cr_eps))
+        base_reward = (
+            float(return_coef) * relative_return_uplift
+            + float(mdd_coef) * relative_mdd_uplift
+        )
+    elif mode in ("relative_downside_mdd", "relative_downside", "downside_uplift"):
+        relative_return_uplift = (
+            float(controlled.log_return) - float(baseline.log_return)
+        ) / max(abs(float(baseline.log_return)), float(cr_eps))
+        relative_downside_uplift = (
+            float(baseline.downside_loss) - float(controlled.downside_loss)
+        ) / max(abs(float(baseline.downside_loss)), float(cr_eps))
+        relative_mdd_uplift = (
+            float(baseline.max_drawdown) - float(controlled.max_drawdown)
+        ) / max(abs(float(baseline.max_drawdown)), float(cr_eps))
+        base_reward = (
+            float(return_coef) * relative_return_uplift
+            + float(downside_coef) * relative_downside_uplift
+            + float(mdd_coef) * relative_mdd_uplift
+        )
+    else:
+        raise ValueError(f"Unknown controller reward mode: {reward_mode}")
+
     allowed = int(count_max if max_switch_count is None else max_switch_count)
     penalty_coef = float(count_penalty_coef if max_switch_penalty_coef is None else max_switch_penalty_coef)
     overflow_penalty = max_switch_overflow_penalty(
@@ -78,10 +128,7 @@ def controller_reward(
         max_switch_count=allowed,
     )
     normalized_overflow_penalty = overflow_penalty / float(max(1, allowed) ** 2)
-    return (
-        float(return_coef) * return_uplift
-        - penalty_coef * normalized_overflow_penalty
-    )
+    return base_reward - penalty_coef * normalized_overflow_penalty
 
 
 def controller_pg_loss(

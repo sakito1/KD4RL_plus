@@ -46,7 +46,7 @@ def deeptrader_files(
     relation    : (N, N) identity matrix
     """
     dataset = config.dataset
-    file_paths = dataset.get('ssm_data_path', dataset['feature_path'])
+    file_paths = dataset['feature_path']
     with open(dataset['stocks_path']) as f:
         stocks = [i.strip() for i in f.readlines()]
     feature_cols = dataset['features_name']

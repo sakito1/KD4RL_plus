@@ -80,7 +80,7 @@ def run(func_args):
                            in_features=func_args.in_features, val_idx=val_idx, test_idx=test_idx,test_end_idx = test_end_idx,
                            batch_size=func_args.batch_size, window_len=func_args.window_len, trade_len=func_args.trade_len,
                            max_steps=func_args.max_steps, mode=func_args.mode, norm_type=func_args.norm_type,
-                           allow_short=allow_short)
+                           allow_short=allow_short, fee=func_args.fee)
 
         supports = [A]
         actor = RLActor(supports, func_args).to(func_args.device)

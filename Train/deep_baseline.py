@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _market_name():
-    data_path = str(config.dataset.get("ssm_data_path", "")).lower()
+    data_path = str(config.dataset.get("feature_path", "")).lower()
     return "sh" if ("沪深" in data_path or "sh" in data_path) else "nas"
 
 
@@ -49,9 +49,6 @@ def _run_alphastock(cun_path, logger, smoke):
     old_dates = {name: getattr(config, name) for name in date_names}
     try:
         config.dataset = copy.deepcopy(config.dataset)
-        # The SSM feature files contain the seven adjusted-price fields used
-        # by current baseline models in both markets.
-        config.dataset["feature_path"] = config.dataset["ssm_data_path"]
         if smoke:
             config.alphastcok = copy.deepcopy(config.alphastcok)
             config.alphastcok.update(
@@ -70,13 +67,14 @@ def _run_alphastock(cun_path, logger, smoke):
 
 def _run_deeptrader(cun_path, logger, market, smoke):
     logger.info(
-        "Preparing DeepTrader input from feature_ssm: %s",
-        config.dataset.get("ssm_data_path"),
+        "Preparing DeepTrader input from feature: %s",
+        config.dataset.get("feature_path"),
     )
     deeptrader_files()
     source_config = ROOT / "DeepTrader" / "src" / ("hyper_SH.json" if market == "sh" else "hyper_NAS.json")
     with source_config.open() as fh:
         settings = json.load(fh)
+    settings["fee"] = float(config.TRANSACTION_COST_RATE)
     if smoke:
         settings.update(epochs=1, max_batches=1, use_gpu=False, batch_size=8, max_steps=2)
     output_dir = Path(cun_path) / "DeepTrader" / market
@@ -117,7 +115,7 @@ def _run_deeparies(cun_path, logger, market, smoke):
     deeparies_train_epochs = int(alphastock_param.get("num_epoch", 1))
     deeparies_seq_len = int(alphastock_param.get("look_back", 20))
     deeparies_initial_amount = float(getattr(config, "initial_amount", 1.0))
-    deeparies_fee_rate = 0.0
+    deeparies_fee_rate = float(config.TRANSACTION_COST_RATE)
     logger.info(
         "Prepared DeepAries input: %s stocks, %s dates, %s ~ %s",
         summary["stocks"], summary["dates"], summary["start"], summary["end"],

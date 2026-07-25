@@ -49,8 +49,14 @@ CONTROLLER_EVAL_SWITCH_THRESHOLD="${CONTROLLER_EVAL_SWITCH_THRESHOLD:-0.5}"
 CONTROLLER_EVAL_DIAGNOSTICS="${CONTROLLER_EVAL_DIAGNOSTICS:-1}"
 CONTROLLER_EVAL_DIAG_THRESHOLDS="${CONTROLLER_EVAL_DIAG_THRESHOLDS:-0.5}"
 CONTROLLER_RETURN_COEF="${CONTROLLER_RETURN_COEF:-1.0}"
+CONTROLLER_DOWNSIDE_COEF="${CONTROLLER_DOWNSIDE_COEF:-0.0}"
+CONTROLLER_MDD_COEF="${CONTROLLER_MDD_COEF:-0.0}"
+OUTER_REWARD_MODE="${OUTER_REWARD_MODE:-return}"
+CONTROLLER_REWARD_MODE="${CONTROLLER_REWARD_MODE:-return_uplift}"
+CONTROLLER_DISABLE_INNER="${CONTROLLER_DISABLE_INNER:-0}"
 CONTROLLER_MAX_SWITCHES="${CONTROLLER_MAX_SWITCHES:-30}"
 CONTROLLER_MAX_SWITCH_PENALTY_COEF="${CONTROLLER_MAX_SWITCH_PENALTY_COEF:-0.001}"
+CONTROLLER_HARD_MAX_SWITCHES="${CONTROLLER_HARD_MAX_SWITCHES:-0}"
 CONTROLLER_EXPECTED_SWITCH_PENALTY_COEF="${CONTROLLER_EXPECTED_SWITCH_PENALTY_COEF:-0.0}"
 CONTROLLER_OVERFLOW_ACTION_PENALTY_COEF="${CONTROLLER_OVERFLOW_ACTION_PENALTY_COEF:-0.0}"
 CONTROLLER_VALUE_COEF="${CONTROLLER_VALUE_COEF:-0.0}"
@@ -124,7 +130,8 @@ echo "Aux warmup: epochs=$CONTROLLER_SUP_PRETRAIN_EPOCHS, offpolicy=$CONTROLLER_
 echo "Local advantage: coef=$CONTROLLER_LOCAL_ADV_COEF, scale=$CONTROLLER_LOCAL_ADV_SCALE, clip=$CONTROLLER_LOCAL_ADV_CLIP, margin=$CONTROLLER_LOCAL_ADV_MARGIN, loss=$CONTROLLER_LOCAL_ADV_LOSS_TYPE, balance_classes=$CONTROLLER_LOCAL_ADV_BALANCE_CLASSES"
 echo "PG curriculum: decision_mode=$CONTROLLER_DECISION_MODE, eval_mode=$CONTROLLER_EVAL_DECISION_MODE, decision_stride_schedule=$CONTROLLER_DECISION_STRIDE_SCHEDULE, eval_stride=$CONTROLLER_EVAL_DECISION_STRIDE, logprob_reduction=$CONTROLLER_PG_LOGPROB_REDUCTION, value_coef=$CONTROLLER_VALUE_COEF, entropy_coef=$CONTROLLER_ENTROPY_COEF"
 echo "Controller eval: eval_threshold=$CONTROLLER_EVAL_SWITCH_THRESHOLD, diagnostics=$CONTROLLER_EVAL_DIAGNOSTICS, diag_thresholds=$CONTROLLER_EVAL_DIAG_THRESHOLDS"
-echo "Constraints: no min-hold, eval forced max_hold=$MAX_HOLD switch, controller_train_max_hold=$CONTROLLER_TRAIN_MAX_HOLD, train_record_max_duration=$CONTROLLER_TRAIN_RECORD_MAX_DURATION, controller_eval_max_hold=$CONTROLLER_EVAL_MAX_HOLD, max switches=$CONTROLLER_MAX_SWITCHES, max_switch_penalty=$CONTROLLER_MAX_SWITCH_PENALTY_COEF, expected_switch_penalty=$CONTROLLER_EXPECTED_SWITCH_PENALTY_COEF, overflow_action_penalty=$CONTROLLER_OVERFLOW_ACTION_PENALTY_COEF, fixed_pool_limit=$CONTROLLER_FIXED_POOL_LIMIT, skip_fixed_scenarios=$TEST_SKIP_FIXED_SCENARIOS, test_max_days=$TEST_MAX_DAYS"
+echo "Rewards: outer_reward_mode=$OUTER_REWARD_MODE, controller_reward_mode=$CONTROLLER_REWARD_MODE, controller_return_coef=$CONTROLLER_RETURN_COEF, controller_downside_coef=$CONTROLLER_DOWNSIDE_COEF, controller_mdd_coef=$CONTROLLER_MDD_COEF, disable_inner=$CONTROLLER_DISABLE_INNER"
+echo "Constraints: no min-hold, eval forced max_hold=$MAX_HOLD switch, controller_train_max_hold=$CONTROLLER_TRAIN_MAX_HOLD, train_record_max_duration=$CONTROLLER_TRAIN_RECORD_MAX_DURATION, controller_eval_max_hold=$CONTROLLER_EVAL_MAX_HOLD, max switches=$CONTROLLER_MAX_SWITCHES, hard_max_switches=$CONTROLLER_HARD_MAX_SWITCHES, max_switch_penalty=$CONTROLLER_MAX_SWITCH_PENALTY_COEF, expected_switch_penalty=$CONTROLLER_EXPECTED_SWITCH_PENALTY_COEF, overflow_action_penalty=$CONTROLLER_OVERFLOW_ACTION_PENALTY_COEF, fixed_pool_limit=$CONTROLLER_FIXED_POOL_LIMIT, skip_fixed_scenarios=$TEST_SKIP_FIXED_SCENARIOS, test_max_days=$TEST_MAX_DAYS"
 
 CONTROLLER_SKIP_VAL_ARGS=()
 if [[ "$CONTROLLER_SKIP_VAL" == "1" ]]; then
@@ -164,6 +171,11 @@ fi
 CONTROLLER_EVAL_DIAGNOSTICS_ARGS=()
 if [[ "$CONTROLLER_EVAL_DIAGNOSTICS" == "1" ]]; then
   CONTROLLER_EVAL_DIAGNOSTICS_ARGS=(--controller_eval_diagnostics --controller_eval_diag_thresholds $CONTROLLER_EVAL_DIAG_THRESHOLDS)
+fi
+
+CONTROLLER_DISABLE_INNER_ARGS=()
+if [[ "$CONTROLLER_DISABLE_INNER" == "1" ]]; then
+  CONTROLLER_DISABLE_INNER_ARGS=(--controller_pg_disable_inner --test_controller_no_inner_scenario)
 fi
 
 run_one_seed() {
@@ -218,11 +230,15 @@ run_one_seed() {
     --controller_hidden_dim "$CONTROLLER_HIDDEN_DIM" \
     --controller_init_exit_bias "$CONTROLLER_INIT_EXIT_BIAS" \
     --controller_return_coef "$CONTROLLER_RETURN_COEF" \
-    --controller_mdd_coef 0.0 \
+    --controller_downside_coef "$CONTROLLER_DOWNSIDE_COEF" \
+    --outer_reward_mode "$OUTER_REWARD_MODE" \
+    --controller_reward_mode "$CONTROLLER_REWARD_MODE" \
+    --controller_mdd_coef "$CONTROLLER_MDD_COEF" \
     --controller_count_min 0 \
     --controller_count_max 0 \
     --controller_max_switches "$CONTROLLER_MAX_SWITCHES" \
     --controller_max_switch_penalty_coef "$CONTROLLER_MAX_SWITCH_PENALTY_COEF" \
+    --controller_hard_max_switches "$CONTROLLER_HARD_MAX_SWITCHES" \
     --controller_expected_switch_penalty_coef "$CONTROLLER_EXPECTED_SWITCH_PENALTY_COEF" \
     --controller_overflow_action_penalty_coef "$CONTROLLER_OVERFLOW_ACTION_PENALTY_COEF" \
     --controller_value_coef "$CONTROLLER_VALUE_COEF" \
@@ -249,6 +265,7 @@ run_one_seed() {
     "${CONTROLLER_LOCAL_ADV_BALANCE_ARGS[@]}" \
     --controller_selection_metric return \
     --controller_no_hold_constraints \
+    "${CONTROLLER_DISABLE_INNER_ARGS[@]}" \
     --controller_decision_mode "$CONTROLLER_DECISION_MODE" \
     --controller_eval_decision_mode "$CONTROLLER_EVAL_DECISION_MODE" \
     --controller_decision_stride_schedule $CONTROLLER_DECISION_STRIDE_SCHEDULE \

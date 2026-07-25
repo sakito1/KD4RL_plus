@@ -440,10 +440,8 @@ class MonitorAC(nn.Module):
     """
     Hold-exit controller.
 
-    It keeps the old public signature so existing training code can call it,
-    but the preferred input is asset_state=[B,N,T,F] from outer_state. The
-    controller only uses the last controller_window days of that z-scored raw
-    feature window for the hold-quality decision.
+    The controller uses the last controller_window days of the normalized
+    feature window in asset_state=[B,N,T,F].
     """
 
     def __init__(
@@ -558,11 +556,7 @@ class MonitorAC(nn.Module):
         overlap = torch.sum(torch.minimum(hold_weights, switch_weights), dim=1, keepdim=True)
         return torch.cat([turnover, switch_concentration, overlap], dim=-1)
 
-    def _encode_asset_sequence(self, asset_state, z, h):
-        if asset_state is None:
-            token = z if z is not None else h
-            return self.fallback_projection(token).unsqueeze(2)
-
+    def _encode_asset_sequence(self, asset_state):
         x = asset_state
         if x.dim() == 3:
             x = x.unsqueeze(0)
@@ -596,17 +590,12 @@ class MonitorAC(nn.Module):
 
     def decision_stats(
             self,
-            z,
-            h,
-            p,
-            q_bear,
-            q_bull,
             weights_drift,
             port_state,
             switch_action=None,
             asset_state=None,
     ):
-        asset_seq = self._encode_asset_sequence(asset_state, z, h)
+        asset_seq = self._encode_asset_sequence(asset_state)
         hold_weights = self._soft_hold_weights(weights_drift)
         switch_weights = self._soft_hold_weights(switch_action) if switch_action is not None else hold_weights
 
@@ -670,17 +659,17 @@ class MonitorAC(nn.Module):
             "value_feat": value_feat,
         }
 
-    def encode(self, z, h, p, q_bear, q_bull, weights_drift, port_state,
+    def encode(self, weights_drift, port_state,
                switch_action=None, asset_state=None):
         return self.decision_stats(
-            z, h, p, q_bear, q_bull, weights_drift, port_state,
+            weights_drift, port_state,
             switch_action=switch_action, asset_state=asset_state
         )["value_feat"]
 
-    def pi(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None,
+    def pi(self, weights_drift, port_state, switch_action=None,
            deterministic=False, asset_state=None):
         stats = self.decision_stats(
-            z, h, p, q_bear, q_bull, weights_drift, port_state,
+            weights_drift, port_state,
             switch_action=switch_action, asset_state=asset_state
         )
         zeros = torch.zeros_like(stats["policy_logit"])
@@ -691,17 +680,17 @@ class MonitorAC(nn.Module):
         entropy = dist.entropy().mean()
         return action, log_prob, entropy, logits
 
-    def value(self, z, h, p, q_bear, q_bull, weights_drift, port_state,
+    def value(self, weights_drift, port_state,
               switch_action=None, asset_state=None):
         return self.decision_stats(
-            z, h, p, q_bear, q_bull, weights_drift, port_state,
+            weights_drift, port_state,
             switch_action=switch_action, asset_state=asset_state
         )["value"]
 
-    def forward(self, z, h, p, q_bear, q_bull, weights_drift, port_state, switch_action=None,
+    def forward(self, weights_drift, port_state, switch_action=None,
                 deterministic=False, asset_state=None):
         stats = self.decision_stats(
-            z, h, p, q_bear, q_bull, weights_drift, port_state,
+            weights_drift, port_state,
             switch_action=switch_action, asset_state=asset_state
         )
         zeros = torch.zeros_like(stats["policy_logit"])

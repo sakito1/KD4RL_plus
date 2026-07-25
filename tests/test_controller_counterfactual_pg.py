@@ -25,7 +25,10 @@ class _FakeControllerMonitor:
     def __init__(self, policy_logit=0.25):
         self.policy_logit = float(policy_logit)
 
-    def decision_stats(self, z, h, p, q_bear, q_bull, weights_drift, port_state,
+    def train(self):
+        return self
+
+    def decision_stats(self, weights_drift, port_state,
                        switch_action=None, asset_state=None):
         return {
             "policy_logit": torch.tensor([self.policy_logit], requires_grad=True),
@@ -81,6 +84,87 @@ class _FakeSwitchAdvEnv:
         return torch.sum(weights * torch.tensor([0.04, -0.02])), torch.tensor(0.0)
 
 
+class _FakeAlwaysSwitchOuter:
+    def eval(self):
+        return self
+
+    def pi(self, outer_state, weights_drift, deterministic=True):
+        del outer_state, deterministic
+        return weights_drift.clone(), None, None, None, None
+
+
+class _FakeAlwaysSwitchInner:
+    def eval(self):
+        return self
+
+
+class _FakeAlwaysSwitchAgent:
+    def __init__(self):
+        self.net = SimpleNamespace(
+            outer=_FakeAlwaysSwitchOuter(),
+            inner=_FakeAlwaysSwitchInner(),
+            mon=_FakeControllerMonitor(policy_logit=10.0),
+        )
+
+    def get_action(self, obs, mode="eval", force_switch=None, force_inner_zero=False, force_locked=True):
+        del mode, force_inner_zero, force_locked
+        act_out = obs["base_drift"].clone()
+        act_mon = torch.tensor([int(force_switch or 0)])
+        return {
+            "act_out": act_out,
+            "act_mon": act_mon,
+            "base_used": act_out if bool(act_mon.item()) else obs["base_drift"].clone(),
+        }
+
+
+class _FakeControllerPGWindowEnv:
+    transaction_cost_pct = 0.0
+
+    def __init__(self, length=6):
+        self.length = int(length)
+        self.step_idx = 0
+        self.portfolio_value = torch.tensor(1.0)
+        self.switches = []
+
+    def reset_at(self, start_idx, stop_idx):
+        del start_idx
+        self.length = max(1, int(stop_idx))
+        self.step_idx = 0
+        self.portfolio_value = torch.tensor(1.0)
+        self.switches = []
+        return self._obs()
+
+    def _obs(self):
+        weights = torch.tensor([[0.5, 0.5]])
+        return {
+            "weights_drift": weights.clone(),
+            "base_drift": weights.clone(),
+            "outer_state": torch.zeros(1, 2),
+            "port_state": torch.zeros(1, 2),
+            "ssm": {
+                "z": torch.zeros(1, 2),
+                "h": torch.zeros(1, 2),
+                "p": torch.zeros(1, 1),
+                "q_bear": torch.zeros(1, 1),
+                "q_bull": torch.zeros(1, 1),
+            },
+        }
+
+    def step(self, weights_exec, base_used, outer_action=None, is_switch=False):
+        del weights_exec, base_used, outer_action
+        self.switches.append(bool(is_switch))
+        self.step_idx += 1
+        self.portfolio_value = torch.tensor(1.0 + 0.01 * self.step_idx)
+        done = self.step_idx >= self.length
+        info = {
+            "portfolio_value": float(self.portfolio_value.item()),
+            "controller_hold_return_target": torch.tensor([0.0]),
+            "controller_hold_mdd_target": torch.tensor([0.0]),
+            "controller_switch_advantage": torch.tensor([0.0]),
+        }
+        return self._obs(), torch.tensor(0.0), done, info
+
+
 class ControllerCounterfactualPGTests(unittest.TestCase):
     def test_segment_budget_keeps_rollout_within_max_segments(self):
         self.assertTrue(segment_budget_allows_switch(
@@ -127,6 +211,140 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         )
         expected = 0.08 - 0.10
         self.assertAlmostEqual(reward, expected)
+
+    def test_controller_reward_return_uplift_mode_preserves_current_behavior(self):
+        baseline = CounterfactualStats(
+            log_return=0.10,
+            max_drawdown=0.10,
+            turnover=0.40,
+            free_switch_count=0,
+            segment_count=10,
+            trading_days=252,
+        )
+        controlled = CounterfactualStats(
+            log_return=0.20,
+            max_drawdown=0.50,
+            turnover=0.55,
+            free_switch_count=3,
+            segment_count=10,
+            trading_days=252,
+        )
+
+        reward = controller_reward(
+            baseline,
+            controlled,
+            reward_mode="return_uplift",
+            return_coef=2.0,
+            max_switch_count=30,
+            max_switch_penalty_coef=0.0,
+        )
+
+        self.assertAlmostEqual(reward, 2.0 * (0.20 - 0.10))
+
+    def test_controller_reward_relative_cr_mode_uses_calmar_uplift(self):
+        baseline = CounterfactualStats(
+            log_return=0.10,
+            max_drawdown=0.20,
+            turnover=0.40,
+            free_switch_count=0,
+            segment_count=10,
+            trading_days=252,
+        )
+        controlled = CounterfactualStats(
+            log_return=0.18,
+            max_drawdown=0.12,
+            turnover=0.55,
+            free_switch_count=3,
+            segment_count=34,
+            trading_days=252,
+        )
+
+        reward = controller_reward(
+            baseline,
+            controlled,
+            reward_mode="relative_cr",
+            max_switch_count=30,
+            max_switch_penalty_coef=0.5,
+        )
+
+        expected_cr_uplift = (0.18 / 0.12) - (0.10 / 0.20)
+        expected_penalty = 0.5 * ((34 - 30) / 30) ** 2
+        self.assertAlmostEqual(reward, expected_cr_uplift - expected_penalty)
+
+    def test_controller_reward_relative_return_mdd_mode_uses_weighted_relative_uplifts(self):
+        baseline = CounterfactualStats(
+            log_return=0.10,
+            max_drawdown=0.20,
+            turnover=0.40,
+            free_switch_count=0,
+            segment_count=10,
+        )
+        controlled = CounterfactualStats(
+            log_return=0.15,
+            max_drawdown=0.16,
+            turnover=0.55,
+            free_switch_count=3,
+            segment_count=34,
+        )
+
+        reward = controller_reward(
+            baseline,
+            controlled,
+            reward_mode="relative_return_mdd",
+            return_coef=1.0,
+            mdd_coef=0.3,
+            max_switch_count=30,
+            max_switch_penalty_coef=0.5,
+        )
+
+        expected_return_uplift = (0.15 - 0.10) / 0.10
+        expected_mdd_uplift = (0.20 - 0.16) / 0.20
+        expected_penalty = 0.5 * ((34 - 30) / 30) ** 2
+        self.assertAlmostEqual(
+            reward,
+            expected_return_uplift + 0.3 * expected_mdd_uplift - expected_penalty,
+        )
+
+    def test_controller_reward_relative_downside_mdd_keeps_return_dominant(self):
+        baseline = CounterfactualStats(
+            log_return=0.10,
+            max_drawdown=0.20,
+            turnover=0.40,
+            free_switch_count=0,
+            segment_count=10,
+            downside_loss=0.30,
+        )
+        controlled = CounterfactualStats(
+            log_return=0.16,
+            max_drawdown=0.15,
+            turnover=0.55,
+            free_switch_count=3,
+            segment_count=36,
+            downside_loss=0.21,
+        )
+
+        reward = controller_reward(
+            baseline,
+            controlled,
+            reward_mode="relative_downside_mdd",
+            return_coef=1.0,
+            downside_coef=0.5,
+            mdd_coef=0.3,
+            max_switch_count=30,
+            max_switch_penalty_coef=0.1,
+        )
+
+        expected_return_uplift = (0.16 - 0.10) / 0.10
+        expected_downside_uplift = (0.30 - 0.21) / 0.30
+        expected_mdd_uplift = (0.20 - 0.15) / 0.20
+        expected_penalty = 0.1 * ((36 - 30) / 30) ** 2
+        self.assertAlmostEqual(
+            reward,
+            expected_return_uplift
+            + 0.5 * expected_downside_uplift
+            + 0.3 * expected_mdd_uplift
+            - expected_penalty,
+        )
 
     def test_controller_reward_penalizes_only_actual_switch_overflow(self):
         baseline = CounterfactualStats(
@@ -179,6 +397,48 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
 
         self.assertAlmostEqual(reward, (0.13 - 0.05) - 0.001 * ((34 - 30) / 30) ** 2)
 
+    def test_counterfactual_stats_records_cumulative_downside_loss(self):
+        stats = HRL_Trainer._counterfactual_stats(
+            [100.0, 90.0, 99.0, 79.2],
+            turnover_sum=0.2,
+            free_switch_count=2,
+            segment_count=3,
+        )
+
+        expected_downside = -torch.log(torch.tensor(90.0 / 100.0)).item()
+        expected_downside += -torch.log(torch.tensor(79.2 / 99.0)).item()
+        self.assertAlmostEqual(stats.downside_loss, expected_downside, places=6)
+
+    def test_controller_pg_exec_weights_can_bypass_inner_actor(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        called = {"inner": False}
+
+        def fake_inner_exec(obs, base_used, weights_drift):
+            del obs, weights_drift
+            called["inner"] = True
+            return base_used + 1.0
+
+        trainer._deterministic_inner_exec = fake_inner_exec
+        base_used = torch.tensor([[0.25, 0.75]])
+        weights_drift = torch.tensor([[0.50, 0.50]])
+
+        disabled = trainer._controller_exec_weights(
+            obs={},
+            base_used=base_used,
+            weights_drift=weights_drift,
+            disable_inner=True,
+        )
+        enabled = trainer._controller_exec_weights(
+            obs={},
+            base_used=base_used,
+            weights_drift=weights_drift,
+            disable_inner=False,
+        )
+
+        self.assertTrue(torch.equal(disabled, base_used))
+        self.assertTrue(called["inner"])
+        self.assertTrue(torch.equal(enabled, base_used + 1.0))
+
     def test_no_hold_constraints_do_not_hard_cap_switches_at_penalty_threshold(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
         trainer.cfg = SimpleNamespace(
@@ -209,6 +469,69 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
 
         self.assertIsNone(force_switch)
         self.assertFalse(force_locked)
+
+    def test_optional_hard_max_switches_force_hold_after_cap(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.cfg = SimpleNamespace(
+            controller_no_hold_constraints=True,
+            controller_decision_mode="daily",
+            controller_max_switches=40,
+            controller_hard_max_switches=40,
+            min_hold=30,
+        )
+        spec = PhaseSpec(
+            use_schedule=False,
+            inner_always_zero=False,
+            monitor_always_forced=False,
+            mask_monitor_update=False,
+            use_hold_constraints=True,
+        )
+
+        force_switch, force_locked = trainer._compute_force_switch_locked(
+            spec=spec,
+            phase="joint",
+            step_idx=500,
+            duration=1,
+            is_train=True,
+            switch_schedule=None,
+            fixed_cycle=None,
+            current_segments=40,
+            rollout_len=600,
+        )
+
+        self.assertEqual(force_switch, 0)
+        self.assertTrue(force_locked)
+
+    def test_controller_pg_window_enforces_hard_max_switches_during_sampling(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.cfg = SimpleNamespace(
+            controller_no_hold_constraints=True,
+            controller_decision_mode="daily",
+            controller_hard_max_switches=2,
+            controller_train_max_hold=0,
+            controller_rollout_len=6,
+            controller_pg_disable_inner=True,
+            controller_train_record_max_duration=0,
+            controller_aux_return_coef=0.0,
+            controller_aux_mdd_coef=0.0,
+            controller_aux_switch_adv_coef=0.0,
+            controller_local_adv_coef=0.0,
+            controller_compute_switch_advantage=False,
+            min_hold=30,
+            max_hold=30,
+        )
+        trainer.device = torch.device("cpu")
+        trainer.agent = _FakeAlwaysSwitchAgent()
+        trainer._controller_exec_weights = (
+            lambda obs, base_used, weights_drift, disable_inner=False: base_used.clone()
+        )
+        env = _FakeControllerPGWindowEnv(length=6)
+
+        result = trainer._run_controller_pg_window(env, 0, 6, fixed_cycle=30)
+
+        self.assertEqual(result["stats"].segment_count, 2)
+        self.assertEqual(result["stats"].free_switch_count, 1)
+        self.assertEqual(env.switches, [True, True, False, False, False, False])
 
     def test_stride_decision_mode_only_allows_decisions_on_stride_days(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
@@ -275,7 +598,7 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertIsNone(force_switch)
         self.assertFalse(force_locked)
 
-    def test_daily_no_hold_constraints_still_force_switch_at_max_hold(self):
+    def test_daily_no_hold_constraints_train_max_hold_zero_disables_forced_switch(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
         trainer.cfg = SimpleNamespace(
             controller_no_hold_constraints=True,
@@ -299,6 +622,37 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
             is_train=True,
             switch_schedule=None,
             fixed_cycle=None,
+            rollout_len=600,
+        )
+
+        self.assertIsNone(force_switch)
+        self.assertFalse(force_locked)
+
+    def test_daily_no_hold_constraints_positive_train_max_hold_forces_switch(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.cfg = SimpleNamespace(
+            controller_no_hold_constraints=True,
+            controller_decision_mode="daily",
+            controller_train_max_hold=30,
+            max_hold=60,
+        )
+        spec = PhaseSpec(
+            use_schedule=False,
+            inner_always_zero=False,
+            monitor_always_forced=False,
+            mask_monitor_update=False,
+            use_hold_constraints=True,
+        )
+
+        force_switch, force_locked = trainer._compute_force_switch_locked(
+            spec=spec,
+            phase="joint",
+            step_idx=30,
+            duration=30,
+            is_train=True,
+            switch_schedule=None,
+            fixed_cycle=None,
+            rollout_len=600,
         )
 
         self.assertEqual(force_switch, 1)
@@ -1247,8 +1601,8 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
             segment_count=12,
         )
 
-        def fake_fixed_window(env, start_idx, stop_idx, fixed_cycle):
-            calls.append((start_idx, stop_idx, fixed_cycle))
+        def fake_fixed_window(env, start_idx, stop_idx, fixed_cycle, disable_inner=False):
+            calls.append((start_idx, stop_idx, fixed_cycle, disable_inner))
             return expected, [1.0]
 
         trainer._run_fixed_hrl_window = fake_fixed_window
@@ -1258,7 +1612,13 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
 
         self.assertIs(first, expected)
         self.assertIs(second, expected)
-        self.assertEqual(calls, [(100, 700, 30)])
+        self.assertEqual(calls, [(100, 700, 30, False)])
+
+        trainer.cfg.controller_pg_disable_inner = True
+        third = trainer._get_controller_baseline_stats(100, 700, 30)
+
+        self.assertIs(third, expected)
+        self.assertEqual(calls, [(100, 700, 30, False), (100, 700, 30, True)])
 
     def test_controller_skip_val_disables_final_pg_validation(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)

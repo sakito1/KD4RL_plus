@@ -104,6 +104,5 @@ class EndToEndHrlControllerJointScriptTests(unittest.TestCase):
         self.assertIn("Refusing to write", result.stdout)
         self.assertIn("results/end", result.stdout)
 
-
 if __name__ == "__main__":
     unittest.main()

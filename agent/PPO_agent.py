@@ -26,18 +26,37 @@ class HRL_Buffer:
     4. Must be cleared after every update.
     """
 
-    def __init__(self, capacity, device, gamma=0.99, gae_lambda=0.95, outer_reward_scale=1.0):
+    def __init__(
+            self,
+            capacity,
+            device,
+            gamma=0.99,
+            gae_lambda=0.95,
+            outer_reward_scale=1.0,
+            outer_reward_mode="return",
+    ):
         self.device = device
         self.capacity = capacity
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.outer_reward_scale = float(outer_reward_scale)
+        self.outer_reward_mode = str(outer_reward_mode)
         self.clear()
+
+    def _outer_segment_reward(self, segment_returns):
+        mode = str(getattr(self, "outer_reward_mode", "return"))
+        if mode == "return":
+            return torch.sum(segment_returns)
+        if mode == "segment_sharpe":
+            mean = segment_returns.mean()
+            std = segment_returns.std(unbiased=False)
+            return mean / (std + 1e-8) * (252.0 ** 0.5)
+        raise ValueError(f"Unknown outer reward mode: {mode}")
 
     def clear(self):
         # Initialize storage lists
         self.data = {
-            'ssm': [], 'outer_state': [], 'inner_state': [],
+            'outer_state': [], 'inner_state': [],
             'inner_base_used': [], 'inner_weights_drift': [], 'inner_indices': [],
             'port_state': [], 'weights_drift': [], 'base_drift': [],
             'base_used': [], 'weights_exec': [],
@@ -67,12 +86,7 @@ class HRL_Buffer:
         """Store a single step's data."""
         for k, v in transition.items():
             if k in self.data:
-                if k == 'ssm' and isinstance(v, dict):
-                    # Store dict references (detached)
-                    val = {sk: sv.detach() for sk, sv in v.items()}
-                else:
-                    # Store tensors (detached)
-                    val = v.detach() if isinstance(v, torch.Tensor) else torch.tensor(v, device=self.device)
+                val = v.detach() if isinstance(v, torch.Tensor) else torch.tensor(v, device=self.device)
                 self.data[k].append(val)
 
     def mark_episode_start(self):
@@ -166,7 +180,7 @@ class HRL_Buffer:
             start = boundaries[i]
             end = boundaries[i + 1]
 
-            segment_rew = torch.sum(rew_out[start:end]) * self.outer_reward_scale
+            segment_rew = self._outer_segment_reward(rew_out[start:end]) * self.outer_reward_scale
 
             last_step = end - 1
             if last_step >= 0 and dones[last_step] > 0.5:
@@ -190,16 +204,7 @@ class HRL_Buffer:
         for k, v in self.data.items():
             if len(v) == 0: continue
 
-            if k == 'ssm':
-                # Reconstruct SSM dictionary of tensors
-                # v is a list of dicts: [{z:.., h:..}, {z:.., h:..}]
-                first_key = list(v[0].keys())[0]  # e.g. 'z'
-                res['ssm'] = {}
-                for sk in v[0].keys():
-                    # stack (T, 1, D) -> squeeze -> (T, D)
-                    res['ssm'][sk] = torch.stack([x[sk] for x in v]).squeeze(1)
-
-            elif k == 'outer_state':
+            if k == 'outer_state':
                 # [FIX] Do NOT stack outer_state, keeps huge memory savings
                 res[k] = v  # Keep as list of tensors (or list of individual tensors)
 
@@ -377,8 +382,6 @@ class HRL_PPO_Agent:
             is_locked = torch.full((B,), is_locked_val, dtype=torch.long, device=self.device)
         else:
             act_mon_samp, logp_mon_samp, _, _, val_mon = self.net.mon(
-                obs['ssm']['z'], obs['ssm']['h'], obs['ssm']['p'],
-                obs['ssm']['q_bear'], obs['ssm']['q_bull'],
                 weight_drift, obs['port_state'], switch_action=act_out,
                 deterministic=(not is_train),
                 asset_state=obs.get('outer_state'),
@@ -707,10 +710,8 @@ class HRL_PPO_Agent:
     def _update_monitor(self, data, mask):
         self.opt_mon.zero_grad()
 
-        ssm = {k: v[mask] for k, v in data['ssm'].items()}
         asset_state = self._select_outer_state_batch(data.get('outer_state'), mask)
         stats = self.net.mon.decision_stats(
-            ssm['z'], ssm['h'], ssm['p'], ssm['q_bear'], ssm['q_bull'],
             data['weights_drift'][mask],
             data['port_state'][mask],
             switch_action=data['act_out'][mask],

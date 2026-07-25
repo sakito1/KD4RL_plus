@@ -26,6 +26,10 @@ from paper_experiments.plot_end_to_end_explain import (
     _save,
 )
 from paper_experiments.table_end_to_end_explain import METHOD_NAMES, _filter_display_rows
+from paper_experiments.run_paper_experiments_final import (
+    inner_cost_benefit_columns,
+    summarize_inner_cost_benefit,
+)
 
 
 class PaperExperimentHelperTests(unittest.TestCase):
@@ -65,6 +69,34 @@ class PaperExperimentHelperTests(unittest.TestCase):
         self.assertAlmostEqual(summary["cumulative_inner_alpha"], 0.007)
         self.assertAlmostEqual(summary["positive_inner_alpha_ratio"], 2 / 3)
         self.assertGreater(summary["inner_alpha_per_turnover"], 0.0)
+
+    def test_inner_cost_benefit_compares_component_uplift_to_cost_proxy(self):
+        full = pd.DataFrame(
+            {
+                "portfolio_value_before": [100.0, 110.0],
+                "portfolio_value": [110.0, 130.0],
+                "cost_rate": [0.001, 0.002],
+                "turnover": [0.2, 0.4],
+            }
+        )
+        outer = pd.DataFrame(
+            {
+                "portfolio_value_before": [100.0, 105.0],
+                "portfolio_value": [105.0, 112.0],
+                "cost_rate": [0.001, 0.001],
+                "turnover": [0.2, 0.2],
+            }
+        )
+
+        summary = summarize_inner_cost_benefit("nas", full, outer)
+
+        self.assertAlmostEqual(summary["full_controller_total_return"], 0.30)
+        self.assertAlmostEqual(summary["outer_controller_total_return"], 0.12)
+        self.assertAlmostEqual(summary["inner_component_return_uplift"], 0.18)
+        self.assertAlmostEqual(summary["full_transaction_cost_proxy"], 0.003)
+        self.assertAlmostEqual(summary["incremental_transaction_cost"], 0.001)
+        self.assertGreater(summary["uplift_to_full_cost_ratio"], 1.0)
+        self.assertTrue(summary["cost_covered_by_uplift"])
 
     def test_discover_runs_reports_missing_checkpoints(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,8 +249,8 @@ class PaperExperimentHelperTests(unittest.TestCase):
             _paper_title("Switch Event Study", "nas"),
         ]
 
-        self.assertEqual(_market_label("sh"), "SH Market")
-        self.assertEqual(_market_label("nas"), "NASDAQ Market")
+        self.assertEqual(_market_label("sh"), "CSI-300")
+        self.assertEqual(_market_label("nas"), "Nasdaq-100")
         for title in titles:
             lower = title.lower()
             self.assertNotIn("seed", lower)

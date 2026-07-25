@@ -204,3 +204,65 @@ Regenerate and replace exactly these six stable manuscript assets:
 Validation must compare the revised Matplotlib font settings with the current
 settings, confirm the Inner canvas width is unchanged and its height is larger,
 and visually inspect all six final assets for clipping and overlap.
+
+## Approved Shorter, Heavier Case-Figure Revision (2026-07-15)
+
+This revision supersedes the prior case-figure height requirements. Preserve the
+same four selected Controller/Inner cases, data, paths, colors, and LaTeX widths,
+but redraw the source assets with lower canvases and heavier typography.
+
+- Controller cases: keep width `7.2 in`, reduce height to at most `7.0 in`, use
+  at least 34pt bold figure titles and 25pt bold panel titles, and make axes and
+  key annotations semibold or bold.
+- Inner-Actor cases: keep width `11.5 in`, reduce height to at most `10.8 in`,
+  use at least 38pt bold figure titles and 27pt bold row titles, and enlarge and
+  strengthen asset labels, colorbars, axes, summary text, and bar annotations.
+- Reduce unused title/legend/subplot gaps rather than removing evidence panels.
+- Regenerate from cached traces only; do not train, evaluate new checkpoints,
+  select new cases, or change the manuscript `\includegraphics` widths.
+
+## Approved Reference-Like Typography Correction (2026-07-15)
+
+This correction supersedes only the oversized typography requirements in the
+two preceding case-figure revisions. It does not change figure content.
+
+- Preserve every Controller and Inner-Actor panel, curve, heatmap, bar,
+  annotation, statistic, color, selected case, selected window, output path,
+  and current canvas size.
+- Match the restrained sans-serif hierarchy of the user-provided reference:
+  regular-weight ticks and axis labels, semibold titles and key statistics,
+  and no poster-style heavy typography.
+- Use 18pt semibold figure titles, 13pt semibold panel/row titles, 11pt regular
+  axis and colorbar labels, 10pt regular ticks, legends, asset codes, and
+  colorbar ticks, and 11pt semibold endpoint/statistical annotations.
+- Regenerate the same four case assets from cached traces only. Do not retrain,
+  reevaluate, change cases, change data, or edit manuscript figure content.
+
+## Approved Compact-Spacing Correction (2026-07-15)
+
+This correction supersedes the prior `current canvas size` requirement while
+preserving the approved reference-like typography and every piece of figure
+content in the same four case figures.
+
+- Controller cases: keep the `7.2 in` width, reduce height from `6.8 in` to
+  approximately `5.6 in`, place the title, legend, and first panel closer
+  together, and reduce the two-panel vertical spacing from `0.55` to
+  approximately `0.34`.
+- Inner-Actor cases: keep the `11.5 in` width, reduce height from `10.5 in` to
+  approximately `8.8 in`, reduce the four-row spacing from `0.58` to
+  approximately `0.32`, and move the alignment summary only as needed to keep
+  it clear of the fourth-row title and axes.
+- Do not change titles, labels, annotations, curves, heatmaps, bars, colors,
+  statistics, selected cases/windows, or output paths.
+- Regenerate from the existing cached traces and inspect all four outputs for
+  overlap, clipping, and balanced whitespace.
+
+## Approved Nasdaq Endpoint-Label Clearance Correction (2026-07-15)
+
+- Adjust only the Nasdaq-100 Controller return-panel endpoint labels: move the
+  Switch label from `+5 pt` to `+12 pt` and the Hold label from `-14 pt` to
+  `-22 pt` relative to their endpoints.
+- Keep the current horizontal offsets, typography, text, values, curves,
+  compact geometry, and all CSI-300 label positions unchanged.
+- Regenerate the Nasdaq-100 Controller case from the existing cached trace and
+  verify that both labels remain inside the axes and visibly clear the curves.

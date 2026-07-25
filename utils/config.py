@@ -75,7 +75,7 @@ wmamr_window_size=90
 markowitz_window_size=30
 anticor_window_size=90
 
-TRANSACTION_COST_RATE=5e-5
+TRANSACTION_COST_RATE=1e-4
 
 # Monitor reward: include transaction cost when switching
 monitor_use_transaction_cost = True
@@ -179,10 +179,8 @@ HierAgent = dict(
 # 输入env的数据参数，包括数据来源，特征，投资组合股票
 dataset = dict(
     type = "PortfolioManagementDataset",
-    ssm_data_path="Dataset/Nas100数据/feature_ssm", # 用于HRL训练的数据(参数+feature)
     raw_path="Dataset/Nas100数据/raw",
-    feature_path = 'Dataset/Nas100数据/feature', # 用于普通强化学习训练的数据(防止过拟合的特征)
-    ssm_feature = "Dataset/Nas100数据/ssm_feature",# 用于SSM训练的数据
+    feature_path = 'Dataset/Nas100数据/feature',
     market_path="占位符",
     stocks_path ="utils/NAS100_pool.txt",
     prices_name = ['open', 'high', 'low', 'close'],

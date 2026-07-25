@@ -449,8 +449,6 @@ class HRL_Trainer:
                 )
                 if controller_eval_diag_enabled and force_switch is None:
                     diag_stats = self.agent.net.mon.decision_stats(
-                        obs['ssm']['z'], obs['ssm']['h'], obs['ssm']['p'],
-                        obs['ssm']['q_bear'], obs['ssm']['q_bull'],
                         obs['weights_drift'], obs['port_state'],
                         switch_action=out['act_out'],
                         asset_state=obs.get('outer_state'),
@@ -514,7 +512,6 @@ class HRL_Trainer:
 
             if is_train:
                 transition = {
-                    'ssm': obs['ssm'],
                     'outer_state': obs['outer_state'],
                     'inner_state': out.get('inner_state_used', obs['inner_state']),
                     'inner_base_used': out.get('inner_base_used', base_used),
@@ -703,8 +700,11 @@ class HRL_Trainer:
             return 1, True
 
         if spec.use_hold_constraints and bool(getattr(self.cfg, "controller_no_hold_constraints", False)):
+            hard_max_switches = int(getattr(self.cfg, "controller_hard_max_switches", 0) or 0)
+            if hard_max_switches > 0 and int(current_segments) >= hard_max_switches:
+                return 0, True
             max_hold = (
-                int(getattr(self.cfg, "max_hold", 60))
+                self._controller_train_max_hold(fixed_cycle=fixed_cycle, rollout_len=rollout_len)
                 if is_train
                 else self._controller_eval_max_hold()
             )
@@ -787,12 +787,17 @@ class HRL_Trainer:
         peaks = np.maximum.accumulate(values)
         max_dd = float(np.max((peaks - values) / (peaks + 1e-12))) if values.size > 0 else 0.0
         log_return = float(np.log(values[-1] / values[0])) if values.size > 1 else 0.0
+        daily_log_returns = np.diff(np.log(values)) if values.size > 1 else np.asarray([], dtype=np.float64)
+        downside_loss = float(np.maximum(-daily_log_returns, 0.0).sum()) if daily_log_returns.size > 0 else 0.0
+        trading_days = max(1, int(values.size) - 1)
         return CounterfactualStats(
             log_return=log_return,
             max_drawdown=max_dd,
             turnover=float(turnover_sum),
             free_switch_count=int(free_switch_count),
             segment_count=int(segment_count),
+            trading_days=trading_days,
+            downside_loss=downside_loss,
         )
 
     @staticmethod
@@ -951,7 +956,12 @@ class HRL_Trainer:
         w_new_sel = adjusted / (adjusted.sum(dim=1, keepdim=True) + 1e-12)
         return self.agent._scatter_selected_weights(w_new_sel, inner_indices, base_used.shape[1])
 
-    def _run_fixed_hrl_window(self, env, start_idx: int, stop_idx: int, fixed_cycle: int):
+    def _controller_exec_weights(self, obs, base_used, weights_drift, *, disable_inner: bool = False):
+        if bool(disable_inner):
+            return base_used.detach()
+        return self._deterministic_inner_exec(obs, base_used, weights_drift)
+
+    def _run_fixed_hrl_window(self, env, start_idx: int, stop_idx: int, fixed_cycle: int, disable_inner: bool = False):
         obs = env.reset_at(start_idx, stop_idx)
         history = [env.portfolio_value.item()]
         turnover_sum = 0.0
@@ -968,7 +978,7 @@ class HRL_Trainer:
                     obs,
                     mode="eval",
                     force_switch=force_switch,
-                    force_inner_zero=False,
+                    force_inner_zero=bool(disable_inner),
                     force_locked=True,
                 )
                 is_switch = bool(out["act_mon"].item() == 1)
@@ -1008,7 +1018,6 @@ class HRL_Trainer:
                                   sup_label=None, sup_weight=None, free_switch_index=0,
                                   switch_advantage=None):
         return {
-            "ssm": {k: v.detach() for k, v in obs["ssm"].items()},
             "weights_drift": obs["weights_drift"].detach(),
             "port_state": obs["port_state"].detach(),
             "asset_state": obs.get("outer_state").detach() if isinstance(obs.get("outer_state"), torch.Tensor) else obs.get("outer_state"),
@@ -1025,7 +1034,8 @@ class HRL_Trainer:
     def _controller_train_max_hold(self, fixed_cycle: int, rollout_len: int) -> int:
         override = int(getattr(self.cfg, "controller_train_max_hold", -1))
         if override == 0:
-            return max(1, int(rollout_len) + 1)
+            fallback_len = getattr(self.cfg, "controller_rollout_len", getattr(self.cfg, "max_hold", 60))
+            return max(1, int(rollout_len if rollout_len is not None else fallback_len) + 1)
         if override > 0:
             return override
         fallback = fixed_cycle if fixed_cycle is not None else getattr(self.cfg, "max_hold", 60)
@@ -1072,6 +1082,7 @@ class HRL_Trainer:
         min_hold = int(getattr(self.cfg, "min_hold", 10))
         max_hold = self._controller_train_max_hold(fixed_cycle=fixed_cycle, rollout_len=rollout_len)
         max_segments = self._controller_max_allowed_switches(rollout_len, min_hold)
+        disable_inner = bool(getattr(self.cfg, "controller_pg_disable_inner", False))
 
         turnover_sum = 0.0
         free_switch_count = 0
@@ -1096,6 +1107,11 @@ class HRL_Trainer:
 
             if step_idx == 0:
                 force_switch = 1
+                forced = True
+            elif int(getattr(self.cfg, "controller_hard_max_switches", 0) or 0) > 0 and (
+                    segment_count >= int(getattr(self.cfg, "controller_hard_max_switches", 0) or 0)
+            ):
+                force_switch = 0
                 forced = True
             elif duration >= max_hold:
                 force_switch = 1
@@ -1160,8 +1176,6 @@ class HRL_Trainer:
                         deterministic=True,
                     )
                     stats = self.agent.net.mon.decision_stats(
-                        obs["ssm"]["z"], obs["ssm"]["h"], obs["ssm"]["p"],
-                        obs["ssm"]["q_bear"], obs["ssm"]["q_bull"],
                         weights_drift, obs["port_state"],
                         switch_action=act_out,
                         asset_state=obs.get("outer_state"),
@@ -1193,11 +1207,19 @@ class HRL_Trainer:
                             obs["base_drift"].detach(),
                             weights_drift,
                         )
-                        switch_exec = self._deterministic_inner_exec(
+                        switch_exec = self._controller_exec_weights(
                             obs,
                             act_out.detach(),
                             weights_drift,
+                            disable_inner=disable_inner,
                         )
+                        if disable_inner:
+                            hold_exec = self._controller_exec_weights(
+                                obs,
+                                obs["base_drift"].detach(),
+                                weights_drift,
+                                disable_inner=True,
+                            )
                     precomputed_weights_exec = switch_exec if is_switch else hold_exec
                     inner_adjusted_switch_advantage = self._controller_inner_adjusted_switch_advantage(
                         env,
@@ -1211,7 +1233,7 @@ class HRL_Trainer:
                         obs,
                         mode="eval",
                         force_switch=force_switch,
-                        force_inner_zero=False,
+                        force_inner_zero=disable_inner,
                         force_locked=True,
                     )
                     act_out = out["act_out"]
@@ -1223,7 +1245,12 @@ class HRL_Trainer:
                 weights_exec = (
                     precomputed_weights_exec
                     if precomputed_weights_exec is not None
-                    else self._deterministic_inner_exec(obs, base_used.detach(), weights_drift)
+                    else self._controller_exec_weights(
+                        obs,
+                        base_used.detach(),
+                        weights_drift,
+                        disable_inner=disable_inner,
+                    )
                 )
 
             if is_switch:
@@ -1355,7 +1382,8 @@ class HRL_Trainer:
 
     def _get_controller_baseline_stats(self, start_idx: int, stop_idx: int, fixed_cycle: int):
         use_cache = bool(getattr(self.cfg, "controller_cache_baseline_stats", True))
-        key = (int(start_idx), int(stop_idx), int(fixed_cycle))
+        disable_inner = bool(getattr(self.cfg, "controller_pg_disable_inner", False))
+        key = (int(start_idx), int(stop_idx), int(fixed_cycle), bool(disable_inner))
         if use_cache:
             cache = getattr(self, "_controller_baseline_cache", None)
             if cache is None:
@@ -1366,7 +1394,13 @@ class HRL_Trainer:
         baseline_env = copy.deepcopy(self.env)
         baseline_env.logger = None
         baseline_env.mode = "train"
-        baseline_stats, _ = self._run_fixed_hrl_window(baseline_env, start_idx, stop_idx, fixed_cycle)
+        baseline_stats, _ = self._run_fixed_hrl_window(
+            baseline_env,
+            start_idx,
+            stop_idx,
+            fixed_cycle,
+            disable_inner=disable_inner,
+        )
         if use_cache:
             self._controller_baseline_cache[key] = baseline_stats
         return baseline_stats
@@ -1468,8 +1502,6 @@ class HRL_Trainer:
                             switch_exec,
                         )
                     stats = self.agent.net.mon.decision_stats(
-                        obs["ssm"]["z"], obs["ssm"]["h"], obs["ssm"]["p"],
-                        obs["ssm"]["q_bear"], obs["ssm"]["q_bull"],
                         weights_drift, obs["port_state"],
                         switch_action=act_out,
                         asset_state=obs.get("outer_state"),
@@ -1599,15 +1631,10 @@ class HRL_Trainer:
         for segment in episode_segments:
             record_logps = []
             for record in segment:
-                ssm = {
-                    k: v.to(self.device)
-                    for k, v in record["ssm"].items()
-                }
                 asset_state = record.get("asset_state")
                 if isinstance(asset_state, torch.Tensor):
                     asset_state = asset_state.to(self.device)
                 stats = self.agent.net.mon.decision_stats(
-                    ssm["z"], ssm["h"], ssm["p"], ssm["q_bear"], ssm["q_bull"],
                     record["weights_drift"].to(self.device),
                     record["port_state"].to(self.device),
                     switch_action=record["switch_action"].to(self.device),
@@ -2223,7 +2250,13 @@ class HRL_Trainer:
         def _validate_controller(epoch_idx: int):
             self.env.set_mode("val")
             self.agent.net.eval()
-            ret_stats = self.run_episode(self.env, mode="eval", phase="joint", fixed_cycle=None)
+            ret_stats = self.run_episode(
+                self.env,
+                mode="eval",
+                phase="joint",
+                fixed_cycle=None,
+                disable_inner=bool(getattr(self.cfg, "controller_pg_disable_inner", False)),
+            )
             metrics = self._compute_metrics(ret_stats["history"])
             score = self._validation_score(metrics, self.cfg, phase="controller")
             self.env.set_mode("train")
@@ -2363,7 +2396,10 @@ class HRL_Trainer:
             reward = controller_reward(
                 baseline_stats,
                 ctrl_stats,
+                reward_mode=str(getattr(self.cfg, "controller_reward_mode", "return_uplift")),
                 return_coef=float(getattr(self.cfg, "controller_return_coef", 1.0)),
+                downside_coef=float(getattr(self.cfg, "controller_downside_coef", 0.0)),
+                mdd_coef=float(getattr(self.cfg, "controller_mdd_coef", 0.0)),
                 max_switch_count=max_allowed_switches,
                 max_switch_penalty_coef=float(getattr(
                     self.cfg,
@@ -2467,7 +2503,13 @@ class HRL_Trainer:
                     if fixed_episode_pool
                     else [
                         (
-                            self._run_fixed_hrl_window(self.env, windows[0][0], windows[0][1], fixed_cycle)[0],
+                            self._run_fixed_hrl_window(
+                                self.env,
+                                windows[0][0],
+                                windows[0][1],
+                                fixed_cycle,
+                                disable_inner=bool(getattr(self.cfg, "controller_pg_disable_inner", False)),
+                            )[0],
                             self._run_controller_pg_window(
                                 self.env,
                                 windows[0][0],
@@ -2725,6 +2767,7 @@ class HRL_Trainer:
             gamma=getattr(self.buffer, "gamma", 0.99),
             gae_lambda=getattr(self.buffer, "gae_lambda", 0.95),
             outer_reward_scale=getattr(self.buffer, "outer_reward_scale", 1.0),
+            outer_reward_mode=getattr(self.buffer, "outer_reward_mode", "return"),
         )
 
     @staticmethod
@@ -3156,6 +3199,21 @@ class HRL_Trainer:
         pd.DataFrame(ret_stats_3['history'], columns=['value']).to_csv(
             os.path.join(self.run_dir, "test_s3_AllModules.csv"), index=False
         )
+
+        if bool(getattr(self.cfg, "test_controller_no_inner_scenario", False)):
+            self.logger.info("Running Scenario 5: Controller + Outer, Inner bypassed...")
+            ret_stats_5 = self.run_episode(
+                self.env,
+                mode='eval',
+                phase='joint',
+                disable_inner=True,
+                explicit_episode_window=test_episode_window,
+            )
+            metrics_5 = self._compute_metrics(ret_stats_5['history'])
+            self._print_report("Scenario 5 (Controller No Inner)", ret_stats_5, metrics_5)
+            pd.DataFrame(ret_stats_5['history'], columns=['value']).to_csv(
+                os.path.join(self.run_dir, "test_s5_ControllerNoInner.csv"), index=False
+            )
 
         thresholds = getattr(self.cfg, "controller_test_thresholds", None)
         if thresholds:
@@ -3655,9 +3713,10 @@ def train_warmup_then_joint_with_monitor(trainer,
                 joint_lrs.get("monitor", 0.0),
                 joint_lrs.get("outer", 0.0),
                 joint_lrs.get("inner", 0.0),
-            )
+        )
 
         joint_update_steps = _rollout_update_steps_for("joint")
+        disable_inner_joint = bool(getattr(trainer.cfg, "controller_pg_disable_inner", False))
         for ep in range(controller_joint_epochs):
             if joint_single_full_episode:
                 previous = trainer._apply_train_episode_config(
@@ -3676,6 +3735,7 @@ def train_warmup_then_joint_with_monitor(trainer,
                         rollout_update_steps=joint_update_steps,
                         auto_update_phase="joint",
                         train_monitor=train_monitor,
+                        disable_inner=disable_inner_joint,
                     )
                 finally:
                     trainer._restore_train_episode_config(previous)
@@ -3689,6 +3749,7 @@ def train_warmup_then_joint_with_monitor(trainer,
                     rollout_update_steps=joint_update_steps,
                     auto_update_phase="joint",
                     train_monitor=train_monitor,
+                    disable_inner=disable_inner_joint,
                 )
             loss = ret.get("loss_log", {})
             trainer.logger.info(
@@ -3711,6 +3772,7 @@ def train_warmup_then_joint_with_monitor(trainer,
                     phase="joint",
                     fixed_cycle=None,
                     use_rule_switch=False,
+                    disable_inner=disable_inner_joint,
                 )
                 metrics = trainer._compute_metrics(val_ret["history"])
                 score = trainer._validation_score(metrics, trainer.cfg, phase="controller")
@@ -3858,12 +3920,14 @@ def train_controller_then_joint_finetune(trainer,
     def _validate_joint(epoch_idx: int):
         trainer.env.set_mode("val")
         trainer.agent.net.eval()
+        disable_inner = bool(getattr(trainer.cfg, "controller_pg_disable_inner", False))
         ret_stats = trainer.run_episode(
             trainer.env,
             mode="eval",
             phase="joint",
             fixed_cycle=None,
             use_rule_switch=False,
+            disable_inner=disable_inner,
         )
         metrics = trainer._compute_metrics(ret_stats["history"])
         score = trainer._validation_score(metrics, trainer.cfg, phase="controller")
@@ -3897,6 +3961,7 @@ def train_controller_then_joint_finetune(trainer,
         final_best_ckpt=final_best_ckpt,
         controller_pg_result=controller_pg_result,
     )
+    disable_inner_joint = bool(getattr(trainer.cfg, "controller_pg_disable_inner", False))
 
     for ep in range(max(0, joint_loop_count)):
         if joint_single_full_episode:
@@ -3916,6 +3981,7 @@ def train_controller_then_joint_finetune(trainer,
                     rollout_update_steps=joint_update_steps,
                     auto_update_phase="joint",
                     train_monitor=train_monitor,
+                    disable_inner=disable_inner_joint,
                 )
             finally:
                 trainer._restore_train_episode_config(previous)
@@ -3929,6 +3995,7 @@ def train_controller_then_joint_finetune(trainer,
                 rollout_update_steps=joint_update_steps,
                 auto_update_phase="joint",
                 train_monitor=train_monitor,
+                disable_inner=disable_inner_joint,
             )
         loss = ret.get("loss_log", {})
         trainer.logger.info(
@@ -4055,6 +4122,127 @@ def train_controller_only_from_frozen(trainer,
     }
 
 
+def train_inner_only_from_frozen(trainer,
+                                 inner_episodes: int,
+                                 fixed_cycle: int,
+                                 val_interval: int = None,
+                                 train_monitor: bool = True,
+                                 save_prefix: str = "inner_only"):
+    """Train only Inner while using already-loaded frozen Outer and Controller."""
+    import os
+    import numpy as np
+
+    if val_interval is None:
+        val_interval = int(getattr(trainer.cfg, "val_interval", 10))
+    train_episodes_per_epoch = max(
+        1,
+        int(getattr(trainer.cfg, "train_episodes_per_epoch", getattr(trainer.cfg, "train_episode_count", 1))),
+    )
+    if int(inner_episodes) % train_episodes_per_epoch != 0:
+        raise ValueError(
+            "inner_episodes must be a complete number of train epochs with "
+            f"episodes_per_epoch={train_episodes_per_epoch}."
+        )
+
+    final_best_ckpt = "best_model.pth"
+    final_last_ckpt = "last_model.pth"
+    frozen_controller_ckpt = "controller_frozen_input.pth"
+    trainer.save_model(frozen_controller_ckpt)
+    trainer.agent.set_module_status("inner")
+
+    def _rollout_update_steps_for_inner() -> int:
+        inner_steps = int(getattr(trainer.cfg, "inner_rollout_update_steps", 0) or 0)
+        if inner_steps > 0:
+            return inner_steps
+        by_stage = getattr(trainer.cfg, "rollout_update_steps_by_stage", None)
+        if isinstance(by_stage, dict) and "warmup_inner" in by_stage:
+            return int(by_stage["warmup_inner"])
+        return int(getattr(trainer.cfg, "rollout_update_steps", 0) or 0)
+
+    def _validate_inner(epoch_idx: int):
+        trainer.env.set_mode("val")
+        trainer.agent.net.eval()
+        ret_stats = trainer.run_episode(
+            trainer.env,
+            mode="eval",
+            phase="joint",
+            fixed_cycle=None,
+            use_rule_switch=False,
+        )
+        metrics = trainer._compute_metrics(ret_stats["history"])
+        score = trainer._validation_score(metrics, trainer.cfg, phase="warmup_inner")
+        trainer.env.set_mode("train")
+        trainer.agent.net.train()
+        trainer.logger.info(
+            "   >>> [VAL inner_only ep=%s] select=%s score=%.4f Sharpe=%.4f Ret=%.2f%% MDD=%.2f%% switches=%s",
+            epoch_idx,
+            getattr(trainer.cfg, "inner_selection_metric", "return"),
+            score,
+            metrics["sharpe"],
+            metrics["total_ret"] * 100.0,
+            metrics["max_dd"] * 100.0,
+            ret_stats.get("switch_count", 0),
+        )
+        return score
+
+    best_score = -np.inf
+    loop_count = max(0, int(inner_episodes))
+    update_steps = _rollout_update_steps_for_inner()
+    trainer.logger.info(
+        "### INNER-ONLY FROM FROZEN OUTER+CONTROLLER: %s episodes, controller active, update_every=%s steps ###",
+        loop_count,
+        update_steps,
+    )
+    for ep in range(loop_count):
+        ret = trainer.run_episode(
+            trainer.env,
+            mode="train",
+            phase="round_inner",
+            fixed_cycle=None,
+            use_rule_switch=False,
+            rollout_update_steps=update_steps,
+            auto_update_phase="round_inner",
+            train_monitor=train_monitor,
+        )
+        loss = ret.get("loss_log", {})
+        trainer.logger.info(
+            "[%s] Inner-Only %s/%s | Updates:%s L_in:%0.3f L_in_pred:%0.3f",
+            save_prefix,
+            ep + 1,
+            loop_count,
+            ret.get("update_count", 0),
+            loss.get("inn_pi", 0.0),
+            loss.get("inn_pred", 0.0),
+        )
+        if (ep + 1) % max(1, int(val_interval)) == 0 or (ep + 1) == loop_count:
+            score = _validate_inner(ep + 1)
+            if score > best_score:
+                best_score = score
+                trainer.save_model(final_best_ckpt)
+                trainer.logger.info("       (New Inner-Only Best: %.4f)", best_score)
+
+    if os.path.exists(os.path.join(trainer.model_dir, final_best_ckpt)):
+        trainer._load_model(final_best_ckpt)
+        trainer.logger.info("   ↺ Inner-only finished. Loaded best final model.")
+    else:
+        trainer.save_model(final_best_ckpt)
+    trainer.save_model(final_last_ckpt)
+    return {
+        "fixed_cycle": fixed_cycle,
+        "best_sharpe": float(best_score if np.isfinite(best_score) else 0.0),
+        "best_selection_score": float(best_score if np.isfinite(best_score) else 0.0),
+        "model_selection_metric": str(getattr(trainer.cfg, "inner_selection_metric", "return")),
+        "best_ckpt": final_best_ckpt,
+        "controller_frozen_input_ckpt": frozen_controller_ckpt,
+        "inner_only": {
+            "episodes": int(loop_count),
+            "controller_active": True,
+            "outer_controller_frozen": True,
+            "selection_metric": str(getattr(trainer.cfg, "inner_selection_metric", "return")),
+        },
+    }
+
+
 # ==============================================================================
 # 4. 主程序入口
 # ==============================================================================
@@ -4119,6 +4307,7 @@ def main(cun_path, logger_ignored, seed_list=None):
             capacity=3000,
             device=device,
             outer_reward_scale=getattr(cfg, 'reward_scale_outer', 1.0),
+            outer_reward_mode=getattr(cfg, 'outer_reward_mode', 'return'),
         )
 
         trainer = HRL_Trainer(agent, env, buffer, cfg, local_logger)
@@ -4215,6 +4404,7 @@ def run_single_seed_single_threshold(
         capacity=3000,
         device=device,
         outer_reward_scale=getattr(cfg, 'reward_scale_outer', 1.0),
+        outer_reward_mode=getattr(cfg, 'outer_reward_mode', 'return'),
     )
 
     trainer = HRL_Trainer(agent, env, buffer, cfg, logger)

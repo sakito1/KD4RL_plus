@@ -41,6 +41,7 @@ INNER_PPO_EPOCHS="${INNER_PPO_EPOCHS:-1}"
 OUTER_PRED_COEF="${OUTER_PRED_COEF:-0.1}"
 INNER_PRED_COEF="${INNER_PRED_COEF:-0.05}"
 INNER_PRED_TARGET_SCALE="${INNER_PRED_TARGET_SCALE:-10}"
+OUTER_REWARD_MODE="${OUTER_REWARD_MODE:-return}"
 
 TRAIN_EPISODES_PER_EPOCH="${TRAIN_EPISODES_PER_EPOCH:-5}"
 TRAIN_START_STRIDE_DAYS="${TRAIN_START_STRIDE_DAYS:-1}"
@@ -71,6 +72,8 @@ CONTROLLER_EVAL_SWITCH_THRESHOLD="${CONTROLLER_EVAL_SWITCH_THRESHOLD:-0.5}"
 CONTROLLER_EVAL_DIAGNOSTICS="${CONTROLLER_EVAL_DIAGNOSTICS:-1}"
 CONTROLLER_EVAL_DIAG_THRESHOLDS="${CONTROLLER_EVAL_DIAG_THRESHOLDS:-0.5}"
 CONTROLLER_RETURN_COEF="${CONTROLLER_RETURN_COEF:-1.0}"
+CONTROLLER_MDD_COEF="${CONTROLLER_MDD_COEF:-0.0}"
+CONTROLLER_REWARD_MODE="${CONTROLLER_REWARD_MODE:-return_uplift}"
 CONTROLLER_MAX_SWITCHES="${CONTROLLER_MAX_SWITCHES:-30}"
 CONTROLLER_MAX_SWITCH_PENALTY_COEF="${CONTROLLER_MAX_SWITCH_PENALTY_COEF:-0.001}"
 CONTROLLER_EXPECTED_SWITCH_PENALTY_COEF="${CONTROLLER_EXPECTED_SWITCH_PENALTY_COEF:-0.0}"
@@ -442,6 +445,7 @@ run_fixed_hrl_seed() {
     --inner_episode_parallel_workers "$INNER_EPISODE_PARALLEL_WORKERS" \
     --inner_rollout_update_steps "$INNER_ROLLOUT_UPDATE_STEPS" \
     --inner_ppo_epochs "$INNER_PPO_EPOCHS" \
+    --outer_reward_mode "$OUTER_REWARD_MODE" \
     --model_selection_metric sharpe \
     --inner_selection_metric return \
     --no_train_controller \
@@ -546,7 +550,8 @@ run_controller_seed() {
     --controller_hidden_dim "$CONTROLLER_HIDDEN_DIM" \
     --controller_init_exit_bias "$CONTROLLER_INIT_EXIT_BIAS" \
     --controller_return_coef "$CONTROLLER_RETURN_COEF" \
-    --controller_mdd_coef 0.0 \
+    --controller_mdd_coef "$CONTROLLER_MDD_COEF" \
+    --controller_reward_mode "$CONTROLLER_REWARD_MODE" \
     --controller_count_min 0 \
     --controller_count_max 0 \
     --controller_max_switches "$CONTROLLER_MAX_SWITCHES" \
@@ -585,6 +590,7 @@ run_controller_seed() {
     "${eval_diagnostics_args[@]}" \
     --joint_epochs "$JOINT_EPOCHS" \
     --ppo_epochs "$PPO_EPOCHS" \
+    --outer_reward_mode "$OUTER_REWARD_MODE" \
     --outer_pred_coef "$OUTER_PRED_COEF" \
     --inner_pred_coef "$INNER_PRED_COEF" \
     --inner_pred_target_scale "$INNER_PRED_TARGET_SCALE" \
@@ -612,6 +618,7 @@ echo "  Controller output: $CONTROLLER_RUN_ROOT"
 echo "  CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo "  NAS seeds: $NAS_SEEDS"
 echo "  SH seeds: $SH_SEEDS"
+echo "  Reward modes: outer=$OUTER_REWARD_MODE controller=$CONTROLLER_REWARD_MODE"
 echo "  Controller epochs: $CONTROLLER_EPOCHS"
 echo "  Controller recipe: pool=$CONTROLLER_FIXED_POOL_LIMIT, batch=$CONTROLLER_EPISODE_BATCH_SIZE, workers=$CONTROLLER_EPISODE_PARALLEL_WORKERS, init_exit_bias=$CONTROLLER_INIT_EXIT_BIAS, threshold=$CONTROLLER_EVAL_SWITCH_THRESHOLD"
 if [[ "$USE_ARCHIVED_BEST_FLOOR" == "1" ]]; then

@@ -16,7 +16,7 @@
     "use_gpu": true,
     "addaptiveadj":true,
     "trade_mode": "M",
-    "fee": 0.001,
+    "fee": 0.0001,
     "theta": 0.15,
     "sigma": 0.5,
     "in_features": [
