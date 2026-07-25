@@ -33,7 +33,7 @@ def test_three_gpu_outer_inner_seed_sweep_dry_run():
     assert "--markets nas --seeds 11" in result.stdout
     assert "--markets sh --seeds 21" in result.stdout
     assert "--warmup_outer_epochs 4" in result.stdout
-    assert "--warmup_inner_epochs 1" in result.stdout
-    assert "--joint_epochs 1" in result.stdout
+    assert "--warmup_inner_epochs 3" in result.stdout
+    assert "--joint_epochs 2" in result.stdout
     assert "--trade_num 5" in result.stdout
     assert "--no_train_controller" in result.stdout

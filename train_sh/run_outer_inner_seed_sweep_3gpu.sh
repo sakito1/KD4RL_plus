@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-/home/tongwenxuan/conda/envs/xuangu/bin/python}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-results/outer_inner_seed_sweep_k5}"
-RUN_NAME="${RUN_NAME:-outer_inner_4_1_1_k5}"
+RUN_NAME="${RUN_NAME:-outer_inner_4_3_2_k5}"
 DRY_RUN="${DRY_RUN:-0}"
 
 GPU0="${GPU0:-0}"
@@ -37,8 +37,8 @@ COMMON_ARGS=(
   --train_episodes_per_epoch 5
   --train_start_stride_days 1
   --warmup_outer_epochs 4
-  --warmup_inner_epochs 1
-  --joint_epochs 1
+  --warmup_inner_epochs 3
+  --joint_epochs 2
   --joint_single_full_episode
   --inner_train_fixed_episodes
   --inner_episode_len 600
@@ -119,7 +119,7 @@ fi
 
 echo "Outer+Inner seed sweep"
 echo "Output: $OUTPUT_ROOT/$RUN_NAME"
-echo "Schedule: Outer 4 -> Inner 1 -> Joint 1"
+echo "Schedule: Outer 4 -> Inner 3 -> Joint 2"
 echo "Top-K: 5; transaction cost is read from config as 1e-4"
 echo "NAS seeds: ${NAS_SEED_LIST[*]:-(none)}"
 echo "SH seeds: ${SH_SEED_LIST[*]:-(none)}"
