@@ -1,0 +1,100 @@
+CUDA_VISIBLE_DEVICES=0 \
+OMP_NUM_THREADS=1 \
+MKL_NUM_THREADS=1 \
+MPLCONFIGDIR=/tmp/mpl-cmtflow-sh77 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+/home/tongwenxuan/conda/envs/xuangu/bin/python -u run_hrl_training.py \
+  --markets sh \
+  --seeds 77 78 \
+  --output_root results/cmtflow_5stage_sh77 \
+  --run_name cmtflow_4_2_1_3_1_sh77 \
+  --device cuda \
+  --outer_window 60 \
+  --min_hold 30 \
+  --max_hold 30 \
+  --train_episodes_per_epoch 5 \
+  --train_start_stride_days 1 \
+  --warmup_outer_epochs 4 \
+  --warmup_inner_epochs 1 \
+  --inner_train_fixed_episodes \
+  --inner_episode_len 600 \
+  --inner_train_episodes_per_epoch 30 \
+  --inner_start_stride_days 1 \
+  --inner_episode_batch_size 12 \
+  --inner_episode_parallel_workers 6 \
+  --inner_rollout_update_steps 600 \
+  --inner_ppo_epochs 1 \
+  --controller_epochs 3 \
+  --controller_sup_coef 0.0 \
+  --controller_sup_pretrain_epochs 1 \
+  --controller_sup_pretrain_rollout_len 240 \
+  --controller_aux_pretrain_offpolicy \
+  --controller_aux_replay_epochs 3 \
+  --controller_val_interval_epochs 1 \
+  --controller_rollout_len 600 \
+  --controller_windows_per_epoch 30 \
+  --controller_fixed_pool_limit 12 \
+  --controller_pg_batch_windows 12 \
+  --controller_pg_logprob_reduction mean \
+  --controller_train_fixed_episodes \
+  --controller_episode_batch_size 12 \
+  --controller_episode_parallel_workers 6 \
+  --controller_start_stride_days 5 \
+  --controller_train_max_hold 0 \
+  --controller_train_record_max_duration 0 \
+  --controller_eval_max_hold -1 \
+  --controller_window 30 \
+  --controller_hidden_dim 64 \
+  --controller_init_exit_bias -1.0 \
+  --controller_return_coef 1.0 \
+  --controller_mdd_coef 0.0 \
+  --controller_count_min 0 \
+  --controller_count_max 0 \
+  --controller_max_switches 30 \
+  --controller_max_switch_penalty_coef 0.001 \
+  --controller_expected_switch_penalty_coef 0.0 \
+  --controller_overflow_action_penalty_coef 0.0 \
+  --controller_value_coef 0.0 \
+  --no_controller_value_normalize_advantage \
+  --controller_switch_coef 0.0 \
+  --controller_turnover_coef 0.0 \
+  --controller_entropy_coef 0.0 \
+  --controller_aux_return_coef 0.1 \
+  --controller_aux_mdd_coef 0.1 \
+  --controller_aux_switch_adv_coef 1.0 \
+  --controller_aux_switch_adv_loss_type smooth_l1 \
+  --controller_compute_switch_advantage \
+  --controller_aux_return_target_scale 1.0 \
+  --controller_aux_mdd_target_scale 1.0 \
+  --controller_aux_switch_adv_target_scale 1.0 \
+  --controller_local_adv_coef 0.0 \
+  --controller_local_adv_scale 0.02 \
+  --controller_local_adv_clip 5.0 \
+  --controller_local_adv_margin 0.0 \
+  --controller_local_adv_loss_type weighted_bce \
+  --controller_reward_mode return_uplift \
+  --controller_selection_metric return \
+  --controller_no_hold_constraints \
+  --controller_decision_mode daily \
+  --controller_eval_decision_mode daily \
+  --controller_decision_stride_schedule 15 15 15 10 10 10 5 5 5 \
+  --controller_eval_decision_stride 0 \
+  --controller_eval_switch_threshold 0.5 \
+  --controller_eval_diagnostics \
+  --controller_eval_diag_thresholds 0.5 \
+  --joint_epochs 1 \
+  --joint_single_full_episode \
+  --joint_lr_mult 0.0001 \
+  --controller_joint_epochs 1 \
+  --end_to_end_controller_joint \
+  --ppo_epochs 1 \
+  --outer_pred_coef 0.1 \
+  --inner_pred_coef 0.05 \
+  --inner_pred_target_scale 10 \
+  --outer_reward_mode return \
+  --model_selection_metric sharpe \
+  --inner_selection_metric return \
+  --train_monitor \
+  --test_max_days 0 \
+  --heartbeat_seconds 300 \
+  --continue_on_error

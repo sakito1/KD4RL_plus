@@ -514,16 +514,35 @@ class MonitorAC(nn.Module):
         self.attn2_k = nn.Linear(hidden_dim, hidden_dim)
         self.attn2_v = nn.Linear(hidden_dim, hidden_dim)
 
-        head_in = hidden_dim * 4 + self.state_dim + self.action_state_dim
-        self.head_mlp = nn.Sequential(
-            nn.Linear(head_in, hidden_dim),
+        # The two branches deliberately receive different information.
+        # Risk estimates whether the current holding is becoming unsafe, while
+        # advantage compares the Manager candidate with that current holding.
+        risk_in = hidden_dim * 2 + self.state_dim
+        advantage_in = hidden_dim * 4 + self.action_state_dim
+        self.risk_mlp = nn.Sequential(
+            nn.Linear(risk_in, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+        )
+        self.advantage_mlp = nn.Sequential(
+            nn.Linear(advantage_in, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+        )
+        fusion_in = hidden_dim * 2
+        self.switch_mlp = nn.Sequential(
+            nn.Linear(fusion_in, hidden_dim),
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
         )
         self.value_mlp = nn.Sequential(
-            nn.Linear(head_in, hidden_dim),
+            nn.Linear(fusion_in, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
@@ -619,29 +638,29 @@ class MonitorAC(nn.Module):
         portfolio_ctx = torch.sum(asset_ctx2 * hold_weights.unsqueeze(-1), dim=1)
         switch_ctx = torch.sum(asset_ctx2 * switch_weights.unsqueeze(-1), dim=1)
 
-        value_feat = torch.cat([
+        risk_feat = torch.cat([
+            portfolio_last,
+            portfolio_ctx,
+            state5,
+        ], dim=-1)
+        advantage_feat = torch.cat([
             portfolio_last,
             portfolio_ctx,
             switch_last - portfolio_last,
             switch_ctx - portfolio_ctx,
-            state5,
             action_state,
         ], dim=-1)
-        head = self.head_mlp(value_feat)
-        base_exit_logit = self.exit_head(head).squeeze(-1)
-        switch_advantage_pred = self.switch_adv_head(head).squeeze(-1)
-        if self.switch_adv_logit_coef != 0.0:
-            switch_adv_for_logit = (
-                switch_advantage_pred.detach()
-                if self.switch_adv_logit_detach
-                else switch_advantage_pred
-            )
-            switch_adv_logit = self.switch_adv_logit_coef * torch.tanh(
-                switch_adv_for_logit / self.switch_adv_logit_scale
-            )
-            exit_logit = base_exit_logit + switch_adv_logit
-        else:
-            exit_logit = base_exit_logit
+        risk_embedding = self.risk_mlp(risk_feat)
+        advantage_embedding = self.advantage_mlp(advantage_feat)
+        value_feat = torch.cat([risk_embedding, advantage_embedding], dim=-1)
+        switch_embedding = self.switch_mlp(value_feat)
+
+        # Final switching is learned from both embeddings.  In particular,
+        # switch_advantage_pred is not injected through a fixed coefficient or
+        # detached path; policy gradients therefore reach both branches.
+        exit_logit = self.exit_head(switch_embedding).squeeze(-1)
+        base_exit_logit = exit_logit
+        switch_advantage_pred = self.switch_adv_head(advantage_embedding).squeeze(-1)
         exit_prob = torch.sigmoid(exit_logit).clamp(1e-6, 1.0 - 1e-6)
         value = self.value_mlp(value_feat)
         return {
@@ -652,9 +671,11 @@ class MonitorAC(nn.Module):
             "pi_switch": exit_prob,
             "p_adv": exit_prob,
             "tau": torch.full_like(exit_prob, 0.5),
-            "hold_return_pred": self.return_head(head).squeeze(-1),
-            "hold_risk_pred": self.risk_head(head).squeeze(-1),
+            "hold_return_pred": self.return_head(risk_embedding).squeeze(-1),
+            "hold_risk_pred": self.risk_head(risk_embedding).squeeze(-1),
             "switch_advantage_pred": switch_advantage_pred,
+            "risk_embedding": risk_embedding,
+            "advantage_embedding": advantage_embedding,
             "value": value,
             "value_feat": value_feat,
         }

@@ -153,7 +153,7 @@ HierAgent = dict(
             hidden_dim1=16,
             hidden_dim2=16,
             in_features=None,
-            trade_num=10,  # 每次交易的股票数量
+            trade_num=5,  # CMTFlow Outer Actor 每次选择的 Top-K 资产数量
         ),
         inner_actor = dict(
             num_pool=39,

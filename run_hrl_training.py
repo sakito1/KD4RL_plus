@@ -268,7 +268,7 @@ def parse_args():
         default=16,
         help="Mini-batch size for Outer PPO updates; keep small because each sample runs a long LSTM window.",
     )
-    parser.add_argument("--trade_num", type=int, default=10)
+    parser.add_argument("--trade_num", type=int, default=5)
     parser.add_argument("--ssm_dim", type=int, default=16)
     parser.add_argument(
         "--outer_pred_coef",

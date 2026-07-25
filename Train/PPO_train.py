@@ -4262,7 +4262,7 @@ def main(cun_path, logger_ignored, seed_list=None):
     # PPO 参数
     parser.add_argument('--ppo_epochs', type=int, default=3)
     parser.add_argument('--inner_batch_size', type=int, default=64)
-    parser.add_argument('--trade_num', type=int, default=10)
+    parser.add_argument('--trade_num', type=int, default=5)
     parser.add_argument('--ssm_dim', type=int, default=16)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--outer_pred_coef', type=float, default=0.1)
@@ -4363,7 +4363,7 @@ def run_single_seed_single_threshold(
 
     parser.add_argument('--ppo_epochs', type=int, default=3)
     parser.add_argument('--inner_batch_size', type=int, default=64)
-    parser.add_argument('--trade_num', type=int, default=10)
+    parser.add_argument('--trade_num', type=int, default=5)
     parser.add_argument('--ssm_dim', type=int, default=16)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--outer_pred_coef', type=float, default=0.1)
