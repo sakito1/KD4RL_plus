@@ -166,6 +166,99 @@ class _FakeControllerPGWindowEnv:
 
 
 class ControllerCounterfactualPGTests(unittest.TestCase):
+    def test_controller_pretrain_only_saves_without_running_pg(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        saved = []
+        trainer.env = SimpleNamespace(
+            idx_map={"train": list(range(101))},
+            set_mode=lambda mode: None,
+        )
+        trainer.buffer = SimpleNamespace(clear=lambda: None)
+        trainer.agent = SimpleNamespace(set_module_status=lambda mode: None)
+        trainer.logger = SimpleNamespace(info=lambda *args, **kwargs: None)
+        trainer.cfg = SimpleNamespace(
+            controller_rollout_len=30,
+            controller_windows_per_epoch=1,
+            train_episodes_per_epoch=1,
+            controller_pg_batch_windows=1,
+            controller_train_fixed_episodes=True,
+            controller_episode_batch_size=1,
+            controller_episode_parallel_workers=1,
+            controller_start_stride_days=1,
+            controller_train_record_max_duration=0,
+            controller_compute_switch_advantage=True,
+            controller_sup_pretrain_epochs=1,
+            controller_sup_pretrain_rollout_len=30,
+            controller_aux_replay_epochs=1,
+            controller_aux_return_coef=0.0,
+            controller_aux_mdd_coef=0.1,
+            controller_aux_switch_adv_coef=1.0,
+            controller_guidance_pretrain_coef=1.0,
+            controller_pretrain_only=True,
+            max_hold=30,
+        )
+        trainer._controller_train_start_pool = lambda rollout_len: [0]
+        trainer._controller_train_max_hold = lambda fixed_cycle, rollout_len: 30
+        trainer._run_controller_aux_pretrain_windows = lambda windows, fixed_cycle, epoch: [
+            {"episode_segments": [[{"record": 1}]]}
+        ]
+        trainer._update_controller_aux_replay_batch = lambda segments, replay_epochs: [
+            {
+                "loss": 0.5,
+                "sup_loss": 0.4,
+                "aux_mdd_loss": 0.3,
+                "aux_switch_adv_loss": 0.2,
+                "aux_return_loss": 0.0,
+                "local_adv_loss": 0.0,
+            }
+        ]
+        trainer.save_model = lambda name: saved.append(name)
+        trainer._run_controller_pg_pairs = lambda *args, **kwargs: self.fail(
+            "PG rollout must not run in pretrain-only mode"
+        )
+
+        result = trainer.train_controller_counterfactual_pg(
+            epochs=1,
+            fixed_cycle=30,
+            save_name="controller_best.pth",
+        )
+
+        self.assertTrue(result["pretrain_only"])
+        self.assertEqual(result["updates"], 1)
+        self.assertEqual(saved, ["controller_best.pth"])
+
+    def test_controller_guidance_annotation_labels_all_triggered_records(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.cfg = SimpleNamespace(
+            controller_guidance_risk_threshold=0.05,
+            controller_guidance_advantage_threshold=0.05,
+        )
+        segments = [
+            [
+                {"target_mdd": torch.tensor([0.06]), "switch_advantage": torch.tensor([0.01])},
+                {"target_mdd": torch.tensor([0.07]), "switch_advantage": torch.tensor([0.02])},
+                {"target_mdd": torch.tensor([0.01]), "switch_advantage": torch.tensor([0.01])},
+            ],
+            [
+                {"target_mdd": torch.tensor([0.08]), "switch_advantage": torch.tensor([0.01])},
+            ],
+        ]
+
+        trainer._annotate_controller_guidance_segments(segments)
+
+        labels = [float(record["sup_label"]) for segment in segments for record in segment]
+        weights = [float(record["sup_weight"]) for segment in segments for record in segment]
+        self.assertEqual(labels, [1.0, 1.0, 0.0, 1.0])
+        self.assertGreater(weights[0], 0.0)
+        self.assertGreater(weights[1], 0.0)
+        self.assertGreater(weights[2], 0.0)
+        self.assertGreater(weights[3], 0.0)
+        self.assertAlmostEqual(
+            weights[0] + weights[1] + weights[3],
+            weights[2],
+            delta=1e-6,
+        )
+
     def test_segment_budget_keeps_rollout_within_max_segments(self):
         self.assertTrue(segment_budget_allows_switch(
             day_offset=10,
@@ -1339,7 +1432,7 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertTrue(opt.zero_grad_called)
         self.assertTrue(opt.step_called)
         self.assertAlmostEqual(diagnostics["loss"], 0.2 * 0.5 + 0.3 * 0.25)
-        self.assertNotIn("sup_loss", diagnostics)
+        self.assertEqual(diagnostics["sup_loss"], 0.0)
 
     def test_controller_aux_pretrain_batch_can_update_local_advantage_policy_loss(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
@@ -1362,6 +1455,62 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertTrue(opt.step_called)
         self.assertAlmostEqual(diagnostics["local_adv_loss"], 0.5)
         self.assertAlmostEqual(diagnostics["loss"], 0.1)
+
+    def test_controller_aux_pretrain_uses_full_guidance_risk_advantage_loss(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        opt = _FakeOptimizer()
+        trainer.cfg = SimpleNamespace(
+            controller_aux_return_coef=0.0,
+            controller_aux_mdd_coef=0.1,
+            controller_aux_switch_adv_coef=1.0,
+            controller_local_adv_coef=0.0,
+            controller_guidance_pretrain_coef=1.0,
+            controller_use_switch_supervision=True,
+        )
+        trainer.agent = SimpleNamespace(opt_mon=opt, max_grad_norm=None)
+
+        diagnostics = trainer._update_controller_aux_batch(
+            aux_mdd_losses=[torch.tensor(0.2, requires_grad=True)],
+            aux_switch_adv_losses=[torch.tensor(0.3, requires_grad=True)],
+            sup_losses=[torch.tensor(0.4, requires_grad=True)],
+        )
+
+        self.assertAlmostEqual(diagnostics["loss"], 0.1 * 0.2 + 1.0 * 0.3 + 1.0 * 0.4)
+        self.assertAlmostEqual(diagnostics["sup_weighted_loss"], 0.4)
+
+    def test_controller_pg_uses_guidance_risk_advantage_and_entropy_coefficients(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        opt = _FakeOptimizer()
+        trainer.device = torch.device("cpu")
+        trainer.cfg = SimpleNamespace(
+            controller_entropy_coef=0.01,
+            controller_value_coef=0.0,
+            controller_value_normalize_advantage=False,
+            controller_aux_return_coef=0.0,
+            controller_aux_mdd_coef=0.1,
+            controller_aux_switch_adv_coef=1.0,
+            controller_sup_coef=0.1,
+            controller_use_switch_supervision=True,
+            controller_local_adv_coef=0.0,
+        )
+        trainer.agent = SimpleNamespace(
+            opt_mon=opt,
+            max_grad_norm=None,
+            net=SimpleNamespace(mon=torch.nn.Linear(1, 1)),
+        )
+
+        diagnostics = trainer._update_controller_pg_batch(
+            [torch.tensor(0.0, requires_grad=True)],
+            [0.0],
+            [torch.tensor(0.5, requires_grad=True)],
+            aux_mdd_losses=[torch.tensor(0.2, requires_grad=True)],
+            aux_switch_adv_losses=[torch.tensor(0.3, requires_grad=True)],
+            sup_losses=[torch.tensor(0.4, requires_grad=True)],
+        )
+
+        expected = 0.1 * 0.2 + 1.0 * 0.3 + 0.1 * 0.4 - 0.01 * 0.5
+        self.assertAlmostEqual(diagnostics["loss"], expected, places=6)
+        self.assertAlmostEqual(diagnostics["sup_weighted_loss"], 0.04, places=6)
 
     def test_controller_pg_deterministic_rollout_sampling_ignores_global_rng_order(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
@@ -1403,9 +1552,11 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
             return None, None, None, None, None, None, None, None, loss, None
 
         def fake_update(aux_return_losses=None, aux_mdd_losses=None,
-                        aux_switch_adv_losses=None, local_adv_losses=None):
+                        aux_switch_adv_losses=None, local_adv_losses=None,
+                        sup_losses=None):
             calls["updates"] += 1
             self.assertEqual(len(local_adv_losses), 1)
+            self.assertEqual(sup_losses, [])
             return {"loss": float(local_adv_losses[0].detach().item())}
 
         trainer._controller_episode_terms = fake_terms

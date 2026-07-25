@@ -457,6 +457,37 @@ class PPO_Env(gym.Env):
         drawdown = (running_peak - values) / running_peak
         return torch.log(values[-1].clamp_min(1e-8)), drawdown.max()
 
+    def _future_portfolio_return_and_relative_market_drawdown(
+            self,
+            weights,
+            start_day: int,
+            horizon: int,
+    ):
+        portfolio_return, _ = self._future_portfolio_return_and_max_drawdown(
+            weights,
+            start_day,
+            horizon,
+        )
+        max_h = min(int(horizon), self._episode_ratio_limit() - int(start_day))
+        if max_h <= 0:
+            return portfolio_return, portfolio_return.new_tensor(0.0)
+
+        normalized_weights = self._normalize(weights)
+        growth_path = torch.cumprod(
+            self.ratio[:, start_day:start_day + max_h],
+            dim=1,
+        )
+        hold_path = torch.sum(
+            normalized_weights.unsqueeze(1) * growth_path,
+            dim=0,
+        ).clamp_min(1e-8)
+        equal_weight_market_path = torch.mean(growth_path, dim=0).clamp_min(1e-8)
+        relative_path = (hold_path / equal_weight_market_path).clamp_min(1e-8)
+        relative_values = torch.cat([relative_path.new_ones(1), relative_path])
+        running_peak = torch.cummax(relative_values, dim=0).values.clamp_min(1e-8)
+        relative_drawdown = (running_peak - relative_values) / running_peak
+        return portfolio_return, relative_drawdown.max()
+
     # =====================================================================
     # =====================================================================
     def step(self, real_weight, base_weight=None, outer_action=None, is_switch: bool = False):
@@ -479,10 +510,12 @@ class PPO_Env(gym.Env):
 
         current_holdings_drift = self._normalize(self.prev_base_weight * r_past)
         remaining_hold_horizon = max(1, int(self.max_hold) - int(self.t_held))
-        controller_hold_return_target, controller_hold_mdd_target = self._future_portfolio_return_and_max_drawdown(
+        controller_hold_return_target, controller_hold_mdd_target = (
+            self._future_portfolio_return_and_relative_market_drawdown(
             current_holdings_drift.detach(),
             self.day,
             remaining_hold_horizon,
+        )
         )
 
         # =====================================================================

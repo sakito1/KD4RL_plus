@@ -344,13 +344,12 @@ def parse_args():
         default=120,
         help="Stride between fixed inner warmup episode starts. Default: 120.",
     )
-    parser.add_argument("--controller_sup_coef", type=float, default=0.0)
+    parser.add_argument("--controller_sup_coef", type=float, default=0.1)
     parser.add_argument(
         "--controller_use_switch_supervision",
         action="store_true",
         help=(
-            "Legacy option: train switch head with environment-provided switch labels. "
-            "Default off so switch decisions are learned end-to-end by controller PG."
+            "Train the fused switch logit with economic-event guidance labels."
         ),
     )
     parser.add_argument("--controller_sup_pretrain_epochs", type=int, default=0)
@@ -429,7 +428,24 @@ def parse_args():
             "-1 uses global max_hold; 0 disables forced max-hold; positive values override."
         ),
     )
-    parser.add_argument("--controller_rollout_len", type=int, default=400)
+    parser.add_argument("--controller_rollout_len", type=int, default=300)
+    parser.add_argument("--controller_guidance_risk_threshold", type=float, default=0.05)
+    parser.add_argument("--controller_guidance_advantage_threshold", type=float, default=0.05)
+    parser.add_argument("--controller_guidance_pretrain_coef", type=float, default=1.0)
+    parser.add_argument(
+        "--controller_pretrain_only",
+        action="store_true",
+        help="Run Controller supervised auxiliary pretraining, save it, and exit before policy-gradient rollouts.",
+    )
+    parser.add_argument(
+        "--controller_guidance_probe_only",
+        action="store_true",
+        help=(
+            "Load frozen Outer/Inner parameters, generate Controller Top-K guidance "
+            "labels on train windows, write CSV/Markdown diagnostics, and exit without training."
+        ),
+    )
+    parser.add_argument("--controller_guidance_topk", type=int, default=20)
     parser.add_argument("--controller_max_segments", type=int, default=25)
     parser.add_argument("--controller_pg_batch_windows", type=int, default=4)
     parser.add_argument(
@@ -462,8 +478,8 @@ def parse_args():
     parser.add_argument("--controller_init_exit_bias", type=float, default=None)
     parser.add_argument("--controller_entropy_coef", type=float, default=0.01)
     parser.add_argument("--controller_aux_return_coef", type=float, default=0.0)
-    parser.add_argument("--controller_aux_mdd_coef", type=float, default=0.0)
-    parser.add_argument("--controller_aux_switch_adv_coef", type=float, default=0.0)
+    parser.add_argument("--controller_aux_mdd_coef", type=float, default=0.1)
+    parser.add_argument("--controller_aux_switch_adv_coef", type=float, default=1.0)
     parser.add_argument(
         "--controller_aux_switch_adv_loss_type",
         choices=["smooth_l1", "weighted_bce", "bce"],
@@ -998,6 +1014,14 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_fixed_decision_window),
         "--controller_rollout_len",
         str(args.controller_rollout_len),
+        "--controller_guidance_risk_threshold",
+        str(args.controller_guidance_risk_threshold),
+        "--controller_guidance_advantage_threshold",
+        str(args.controller_guidance_advantage_threshold),
+        "--controller_guidance_pretrain_coef",
+        str(args.controller_guidance_pretrain_coef),
+        "--controller_guidance_topk",
+        str(args.controller_guidance_topk),
         "--controller_max_segments",
         str(args.controller_max_segments),
         "--controller_pg_batch_windows",
@@ -1141,6 +1165,10 @@ def build_child_command(args, market, run_root, seed):
         cmd.append("--controller_deterministic_rollout_sampling")
     if args.controller_pg_disable_inner:
         cmd.append("--controller_pg_disable_inner")
+    if args.controller_guidance_probe_only:
+        cmd.append("--controller_guidance_probe_only")
+    if args.controller_pretrain_only:
+        cmd.append("--controller_pretrain_only")
     if args.frozen_hrl_checkpoint:
         cmd.extend(["--frozen_hrl_checkpoint", str(args.frozen_hrl_checkpoint)])
     if args.controller_first_joint_finetune:
@@ -1257,6 +1285,20 @@ def set_runtime_training_args(args, market_root, seed):
     )
     runtime_config.controller_fixed_decision_window = max(0, int(args.controller_fixed_decision_window))
     runtime_config.controller_rollout_len = int(args.controller_rollout_len)
+    runtime_config.controller_guidance_risk_threshold = max(
+        0.0,
+        float(args.controller_guidance_risk_threshold),
+    )
+    runtime_config.controller_guidance_advantage_threshold = max(
+        0.0,
+        float(args.controller_guidance_advantage_threshold),
+    )
+    runtime_config.controller_guidance_pretrain_coef = max(
+        0.0,
+        float(args.controller_guidance_pretrain_coef),
+    )
+    runtime_config.controller_pretrain_only = bool(args.controller_pretrain_only)
+    runtime_config.controller_guidance_topk = max(0, int(args.controller_guidance_topk))
     runtime_config.controller_max_segments = int(args.controller_max_segments)
     runtime_config.controller_pg_batch_windows = int(args.controller_pg_batch_windows)
     runtime_config.controller_pg_disable_inner = bool(args.controller_pg_disable_inner)
@@ -1464,6 +1506,9 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "controller_decision_stride_schedule": getattr(runtime_config, "controller_decision_stride_schedule", None),
             "controller_fixed_decision_window": getattr(runtime_config, "controller_fixed_decision_window", None),
             "controller_rollout_len": getattr(runtime_config, "controller_rollout_len", None),
+            "controller_guidance_risk_threshold": getattr(runtime_config, "controller_guidance_risk_threshold", None),
+            "controller_guidance_advantage_threshold": getattr(runtime_config, "controller_guidance_advantage_threshold", None),
+            "controller_guidance_pretrain_coef": getattr(runtime_config, "controller_guidance_pretrain_coef", None),
             "controller_max_segments": getattr(runtime_config, "controller_max_segments", None),
             "controller_pg_batch_windows": getattr(runtime_config, "controller_pg_batch_windows", None),
             "controller_pg_disable_inner": getattr(runtime_config, "controller_pg_disable_inner", None),
@@ -1646,10 +1691,13 @@ def run_child(args):
         getattr(runtime_config, "controller_selection_metric", "risk_return"),
     )
     logger.info(
-        "Controller policy: %s, switch_sup=%s, sup_coef=%s, check_stride_days=%s",
+        "Controller policy: %s, switch_sup=%s, sup_coef=%s, guidance=(risk:%.4f, advantage:%.4f, pretrain:%.2f), check_stride_days=%s",
         "counterfactual PG controller" if runtime_config.train_monitor_enabled else "forced hold/switch constraints only",
         getattr(runtime_config, "controller_use_switch_supervision", False),
         getattr(runtime_config, "controller_sup_coef", None),
+        getattr(runtime_config, "controller_guidance_risk_threshold", 0.05),
+        getattr(runtime_config, "controller_guidance_advantage_threshold", 0.05),
+        getattr(runtime_config, "controller_guidance_pretrain_coef", 1.0),
         getattr(runtime_config, "controller_check_stride_days", None),
     )
     logger.info(
@@ -1715,6 +1763,30 @@ def run_child(args):
         with (market_root / f"seed_{args.seed}_train_result.json").open("w", encoding="utf-8") as fh:
             json.dump(result, fh, ensure_ascii=False, indent=2)
         logger.info("HRL test-only completed: %s", result)
+        return
+
+    if args.controller_guidance_probe_only:
+        if not args.frozen_hrl_checkpoint:
+            raise ValueError(
+                "--controller_guidance_probe_only requires --frozen_hrl_checkpoint."
+            )
+        checkpoint_path = Path(args.frozen_hrl_checkpoint).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"Frozen HRL checkpoint not found: {checkpoint_path}"
+            )
+        trainer.load_frozen_hrl_checkpoint(str(checkpoint_path))
+        result = trainer.analyze_controller_guidance_labels(
+            fixed_cycle=fixed_cycle,
+            rollout_len=int(args.controller_rollout_len),
+            window_count=int(args.controller_windows_per_epoch),
+            topk=int(args.controller_guidance_topk),
+        )
+        with (market_root / f"seed_{args.seed}_train_result.json").open(
+                "w", encoding="utf-8"
+        ) as file:
+            json.dump(result, file, ensure_ascii=False, indent=2)
+        logger.info("Controller guidance probe completed: %s", result)
         return
 
     finetune_modes = [

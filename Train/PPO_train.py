@@ -27,6 +27,12 @@ try:
         overflow_switch_policy_loss,
         segment_budget_allows_switch,
     )
+    from Train.controller_guidance import (
+        analyze_guidance_windows,
+        balanced_guidance_weights,
+        build_economic_guidance_labels,
+        render_guidance_report,
+    )
 except ModuleNotFoundError:
     from controller_pg import (
         CounterfactualStats,
@@ -34,6 +40,12 @@ except ModuleNotFoundError:
         controller_reward,
         overflow_switch_policy_loss,
         segment_budget_allows_switch,
+    )
+    from controller_guidance import (
+        analyze_guidance_windows,
+        balanced_guidance_weights,
+        build_economic_guidance_labels,
+        render_guidance_report,
     )
 import utils.config as config
 
@@ -1031,6 +1043,61 @@ class HRL_Trainer:
             "switch_advantage": switch_advantage.detach().view(-1) if isinstance(switch_advantage, torch.Tensor) else None,
         }
 
+    def _annotate_controller_guidance_segments(self, episode_segments):
+        annotated_records = []
+        labels_parts = []
+        masks_parts = []
+        risk_threshold = float(getattr(
+            self.cfg,
+            "controller_guidance_risk_threshold",
+            0.05,
+        ))
+        advantage_threshold = float(getattr(
+            self.cfg,
+            "controller_guidance_advantage_threshold",
+            0.05,
+        ))
+        for segment in episode_segments:
+            valid_records = [
+                record
+                for record in segment
+                if isinstance(record.get("target_mdd"), torch.Tensor)
+                and isinstance(record.get("switch_advantage"), torch.Tensor)
+            ]
+            if not valid_records:
+                continue
+            risk = torch.cat([
+                record["target_mdd"].detach().view(-1).cpu()
+                for record in valid_records
+            ])
+            advantage = torch.cat([
+                record["switch_advantage"].detach().view(-1).cpu()
+                for record in valid_records
+            ])
+            guidance = build_economic_guidance_labels(
+                risk,
+                advantage,
+                risk_threshold=risk_threshold,
+                advantage_threshold=advantage_threshold,
+            )
+            if guidance.labels.numel() != len(valid_records):
+                raise ValueError("Controller guidance currently expects one target per decision record.")
+            annotated_records.extend(valid_records)
+            labels_parts.append(guidance.labels)
+            masks_parts.append(guidance.mask)
+
+        if not annotated_records:
+            return episode_segments
+
+        labels = torch.cat(labels_parts)
+        masks = torch.cat(masks_parts)
+        weights = balanced_guidance_weights(labels, masks)
+        for record, label, weight in zip(annotated_records, labels, weights):
+            target = record["target_mdd"]
+            record["sup_label"] = target.new_tensor([float(label)])
+            record["sup_weight"] = target.new_tensor([float(weight)])
+        return episode_segments
+
     def _controller_train_max_hold(self, fixed_cycle: int, rollout_len: int) -> int:
         override = int(getattr(self.cfg, "controller_train_max_hold", -1))
         if override == 0:
@@ -1312,6 +1379,7 @@ class HRL_Trainer:
         else:
             episode_logprob = None
         entropy_mean = torch.stack(entropies).mean() if entropies else None
+        self._annotate_controller_guidance_segments(episode_segment_logps)
         return {
             "stats": stats,
             "history": history,
@@ -1444,6 +1512,7 @@ class HRL_Trainer:
         step_idx = 0
         free_switch_index = 0
         current_records = []
+        episode_segments = []
         switch_advantage_values = []
         switch_advantage_exit_probs = []
 
@@ -1473,15 +1542,18 @@ class HRL_Trainer:
                     weights_drift,
                     deterministic=True,
                 )
-                hold_exec = self._deterministic_inner_exec(
+                disable_inner = bool(getattr(self.cfg, "controller_pg_disable_inner", False))
+                hold_exec = self._controller_exec_weights(
                     obs,
                     obs["base_drift"].detach(),
                     weights_drift,
+                    disable_inner=disable_inner,
                 )
-                switch_exec = self._deterministic_inner_exec(
+                switch_exec = self._controller_exec_weights(
                     obs,
                     act_out.detach(),
                     weights_drift,
+                    disable_inner=disable_inner,
                 )
                 base_used = act_out.detach() if force_switch else obs["base_drift"].detach()
                 weights_exec = switch_exec if force_switch else hold_exec
@@ -1515,6 +1587,9 @@ class HRL_Trainer:
                 is_switch=bool(force_switch),
             )
             if force_switch:
+                if current_records:
+                    episode_segments.append(current_records)
+                    current_records = []
                 last_switch_step = step_idx
             elif free_decision:
                 free_switch_index += 1
@@ -1548,8 +1623,11 @@ class HRL_Trainer:
             obs = next_obs
             step_idx += 1
 
+        if current_records:
+            episode_segments.append(current_records)
+        self._annotate_controller_guidance_segments(episode_segments)
         return {
-            "episode_segments": [current_records] if current_records else [],
+            "episode_segments": episode_segments,
             "switch_advantage_summary": self._controller_switch_advantage_summary(
                 switch_advantage_values,
                 exit_probs=switch_advantage_exit_probs,
@@ -1576,6 +1654,94 @@ class HRL_Trainer:
         if bool(getattr(self.cfg, "controller_aux_pretrain_offpolicy", False)):
             return self._run_controller_aux_fixed_windows(windows, fixed_cycle, epoch=epoch)
         return self._run_controller_pg_controlled_windows(windows, fixed_cycle, epoch=epoch)
+
+    def analyze_controller_guidance_labels(
+            self,
+            *,
+            fixed_cycle: int,
+            rollout_len: int = 300,
+            window_count: int = 12,
+            topk: int = 20,
+    ):
+        rollout_len = max(2, int(rollout_len))
+        window_count = max(1, int(window_count))
+        topk = max(0, int(topk))
+        starts = self._controller_train_start_pool(rollout_len)[:window_count]
+        train_end = int(self.env.idx_map["train"][-1])
+        windows = [
+            (int(start), min(int(start) + rollout_len, train_end))
+            for start in starts
+            if min(int(start) + rollout_len, train_end) - int(start) >= max(2, int(fixed_cycle))
+        ]
+        if not windows:
+            raise RuntimeError("No valid train windows are available for Controller guidance probe.")
+
+        self.logger.info(
+            "Controller guidance probe: split=train rollout_len=%s windows=%s topk=%s disable_inner=%s",
+            rollout_len,
+            len(windows),
+            topk,
+            bool(getattr(self.cfg, "controller_pg_disable_inner", False)),
+        )
+        controlled_results = self._run_controller_aux_fixed_windows(
+            windows,
+            fixed_cycle,
+            epoch=0,
+        )
+        guidance_windows = []
+        for window_id, ((start, _), controlled) in enumerate(zip(windows, controlled_results)):
+            records = [
+                record
+                for segment in controlled.get("episode_segments", [])
+                for record in segment
+            ]
+            risk_values = []
+            advantage_values = []
+            for record in records:
+                risk = record.get("target_mdd")
+                advantage = record.get("switch_advantage")
+                if not isinstance(risk, torch.Tensor) or not isinstance(advantage, torch.Tensor):
+                    continue
+                risk_values.extend(risk.detach().view(-1).cpu().tolist())
+                advantage_values.extend(advantage.detach().view(-1).cpu().tolist())
+            if risk_values and len(risk_values) == len(advantage_values):
+                guidance_windows.append({
+                    "window_id": window_id,
+                    "start_index": int(start),
+                    "risk": torch.tensor(risk_values, dtype=torch.float32),
+                    "advantage": torch.tensor(advantage_values, dtype=torch.float32),
+                })
+        if not guidance_windows:
+            raise RuntimeError("Controller guidance probe collected no valid risk/advantage pairs.")
+
+        detail_rows, summary = analyze_guidance_windows(
+            guidance_windows,
+            topk=topk,
+        )
+        csv_path = os.path.join(self.run_dir, "controller_guidance_probe.csv")
+        report_path = os.path.join(self.run_dir, "controller_guidance_probe.md")
+        pd.DataFrame(detail_rows).to_csv(csv_path, index=False)
+        with open(report_path, "w", encoding="utf-8") as file:
+            file.write(render_guidance_report(
+                summary,
+                topk=topk,
+                rollout_len=rollout_len,
+            ))
+        self.logger.info(
+            "Controller guidance probe completed: decisions=%s switch_labels=%s rate=%.4f "
+            "adjacent_rate=%.4f report=%s",
+            summary["decision_count"],
+            summary["switch_label_count"],
+            summary["switch_label_rate"],
+            summary["selected_adjacent_gap_rate"],
+            report_path,
+        )
+        return {
+            "guidance_probe_only": True,
+            "report": report_path,
+            "csv": csv_path,
+            "summary": summary,
+        }
 
     def _controller_switch_supervision_enabled(self) -> bool:
         return (
@@ -2101,30 +2267,45 @@ class HRL_Trainer:
         return diagnostics
 
     def _update_controller_aux_batch(self, aux_return_losses=None, aux_mdd_losses=None,
-                                     aux_switch_adv_losses=None, local_adv_losses=None):
+                                     aux_switch_adv_losses=None, local_adv_losses=None,
+                                     sup_losses=None):
         aux_return_losses = aux_return_losses or []
         aux_mdd_losses = aux_mdd_losses or []
         aux_switch_adv_losses = aux_switch_adv_losses or []
         local_adv_losses = local_adv_losses or []
+        sup_losses = sup_losses or []
         aux_return_coef = float(getattr(self.cfg, "controller_aux_return_coef", 0.0))
         aux_mdd_coef = float(getattr(self.cfg, "controller_aux_mdd_coef", 0.0))
         aux_switch_adv_coef = float(getattr(self.cfg, "controller_aux_switch_adv_coef", 0.0))
         local_adv_coef = float(getattr(self.cfg, "controller_local_adv_coef", 0.0))
+        guidance_coef = (
+            float(getattr(self.cfg, "controller_guidance_pretrain_coef", 1.0))
+            if bool(getattr(self.cfg, "controller_use_switch_supervision", False))
+            else 0.0
+        )
         if (
                 (aux_return_coef <= 0.0 or not aux_return_losses)
                 and (aux_mdd_coef <= 0.0 or not aux_mdd_losses)
                 and (aux_switch_adv_coef <= 0.0 or not aux_switch_adv_losses)
                 and (local_adv_coef <= 0.0 or not local_adv_losses)
+                and (guidance_coef <= 0.0 or not sup_losses)
         ):
             return {}
 
         self.agent.opt_mon.zero_grad(set_to_none=True)
-        ref = (aux_return_losses or aux_mdd_losses or aux_switch_adv_losses or local_adv_losses)[0]
+        ref = (
+            aux_return_losses
+            or aux_mdd_losses
+            or aux_switch_adv_losses
+            or local_adv_losses
+            or sup_losses
+        )[0]
         loss = ref.new_tensor(0.0)
         aux_return_loss = ref.new_tensor(0.0)
         aux_mdd_loss = ref.new_tensor(0.0)
         aux_switch_adv_loss = ref.new_tensor(0.0)
         local_adv_loss = ref.new_tensor(0.0)
+        sup_loss = ref.new_tensor(0.0)
         if aux_return_coef > 0.0 and aux_return_losses:
             aux_return_loss = torch.stack(aux_return_losses).mean()
             loss = loss + aux_return_coef * aux_return_loss
@@ -2137,6 +2318,9 @@ class HRL_Trainer:
         if local_adv_coef > 0.0 and local_adv_losses:
             local_adv_loss = torch.stack(local_adv_losses).mean()
             loss = loss + local_adv_coef * local_adv_loss
+        if guidance_coef > 0.0 and sup_losses:
+            sup_loss = torch.stack(sup_losses).mean()
+            loss = loss + guidance_coef * sup_loss
         loss.backward()
         if self.agent.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(list(self.agent.net.mon.parameters()), self.agent.max_grad_norm)
@@ -2151,6 +2335,8 @@ class HRL_Trainer:
             "aux_switch_adv_weighted_loss": float((aux_switch_adv_coef * aux_switch_adv_loss).detach().cpu().item()),
             "local_adv_loss": float(local_adv_loss.detach().cpu().item()),
             "local_adv_weighted_loss": float((local_adv_coef * local_adv_loss).detach().cpu().item()),
+            "sup_loss": float(sup_loss.detach().cpu().item()),
+            "sup_weighted_loss": float((guidance_coef * sup_loss).detach().cpu().item()),
         }
 
     def _controller_aux_losses_from_episode_segments_batch(self, episode_segments_batch):
@@ -2158,6 +2344,7 @@ class HRL_Trainer:
         aux_mdd_losses = []
         aux_switch_adv_losses = []
         local_adv_losses = []
+        sup_losses = []
         for episode_segments in episode_segments_batch:
             terms = self._controller_episode_terms(episode_segments)
             (
@@ -2168,7 +2355,7 @@ class HRL_Trainer:
                 aux_mdd_loss,
                 aux_switch_adv_loss,
                 _,
-                _,
+                sup_loss,
                 local_adv_loss,
                 _,
             ) = terms
@@ -2180,7 +2367,15 @@ class HRL_Trainer:
                 aux_switch_adv_losses.append(aux_switch_adv_loss)
             if local_adv_loss is not None:
                 local_adv_losses.append(local_adv_loss)
-        return aux_return_losses, aux_mdd_losses, aux_switch_adv_losses, local_adv_losses
+            if sup_loss is not None:
+                sup_losses.append(sup_loss)
+        return (
+            aux_return_losses,
+            aux_mdd_losses,
+            aux_switch_adv_losses,
+            local_adv_losses,
+            sup_losses,
+        )
 
     def _update_controller_aux_replay_batch(self, episode_segments_batch, replay_epochs=None):
         if not episode_segments_batch:
@@ -2232,6 +2427,7 @@ class HRL_Trainer:
         batch_windows = max(1, batch_windows)
         best_score = -np.inf
         update_count = 0
+        pretrain_update_count = 0
 
         pending_episode_segments = []
         pending_segment_rewards = []
@@ -2299,16 +2495,25 @@ class HRL_Trainer:
             )
 
         sup_pretrain_epochs = int(getattr(self.cfg, "controller_sup_pretrain_epochs", 0) or 0)
+        pretrain_only = bool(getattr(self.cfg, "controller_pretrain_only", False))
+        if pretrain_only and (sup_pretrain_epochs <= 0 or not fixed_episode_pool):
+            raise ValueError(
+                "controller_pretrain_only requires controller_sup_pretrain_epochs > 0 "
+                "and controller_train_fixed_episodes."
+            )
         if sup_pretrain_epochs > 0 and fixed_episode_pool:
             sup_rollout_len = int(getattr(self.cfg, "controller_sup_pretrain_rollout_len", 0) or 0)
             sup_rollout_len = rollout_len if sup_rollout_len <= 0 else max(2, sup_rollout_len)
             aux_replay_epochs = max(1, int(getattr(self.cfg, "controller_aux_replay_epochs", 1) or 1))
             self.logger.info(
-                "   [Controller Aux] pretrain epochs=%s, replay_epochs=%s, return_coef=%s, mdd_coef=%s, episode_len=%s",
+                "   [Controller Aux] pretrain epochs=%s, replay_epochs=%s, return_coef=%s, "
+                "risk_coef=%s, advantage_coef=%s, label_coef=%s, episode_len=%s",
                 sup_pretrain_epochs,
                 aux_replay_epochs,
                 float(getattr(self.cfg, "controller_aux_return_coef", 0.0)),
                 float(getattr(self.cfg, "controller_aux_mdd_coef", 0.0)),
+                float(getattr(self.cfg, "controller_aux_switch_adv_coef", 0.0)),
+                float(getattr(self.cfg, "controller_guidance_pretrain_coef", 1.0)),
                 sup_rollout_len,
             )
             for sup_epoch in range(sup_pretrain_epochs):
@@ -2341,9 +2546,10 @@ class HRL_Trainer:
                         )
                         for replay_idx, diag in enumerate(diags, start=1):
                             sup_updates += 1
+                            pretrain_update_count += 1
                             self.logger.info(
                                 "[CTRL-AUX] update=%s epoch=%s replay=%s/%s windows=%s/%s "
-                                "loss=%.4f aux_ret=%.4f aux_mdd=%.4f aux_sw=%.4f local_adv=%.4f",
+                                "loss=%.4f label=%.4f risk=%.4f advantage=%.4f aux_ret=%.4f local_adv=%.4f",
                                 sup_updates,
                                 sup_epoch + 1,
                                 replay_idx,
@@ -2351,9 +2557,10 @@ class HRL_Trainer:
                                 min(batch_start + len(batch_starts), len(starts)),
                                 len(starts),
                                 diag.get("loss", 0.0),
-                                diag.get("aux_return_loss", 0.0),
+                                diag.get("sup_loss", 0.0),
                                 diag.get("aux_mdd_loss", 0.0),
                                 diag.get("aux_switch_adv_loss", 0.0),
+                                diag.get("aux_return_loss", 0.0),
                                 diag.get("local_adv_loss", 0.0),
                             )
                         aux_pretrain_segments = []
@@ -2364,17 +2571,19 @@ class HRL_Trainer:
                     )
                     for replay_idx, diag in enumerate(diags, start=1):
                         sup_updates += 1
+                        pretrain_update_count += 1
                         self.logger.info(
                             "[CTRL-AUX] update=%s epoch=%s final-batch replay=%s/%s "
-                            "loss=%.4f aux_ret=%.4f aux_mdd=%.4f aux_sw=%.4f local_adv=%.4f",
+                            "loss=%.4f label=%.4f risk=%.4f advantage=%.4f aux_ret=%.4f local_adv=%.4f",
                             sup_updates,
                             sup_epoch + 1,
                             replay_idx,
                             aux_replay_epochs,
                             diag.get("loss", 0.0),
-                            diag.get("aux_return_loss", 0.0),
+                            diag.get("sup_loss", 0.0),
                             diag.get("aux_mdd_loss", 0.0),
                             diag.get("aux_switch_adv_loss", 0.0),
+                            diag.get("aux_return_loss", 0.0),
                             diag.get("local_adv_loss", 0.0),
                         )
             pending_logprobs, pending_rewards, pending_entropies = [], [], []
@@ -2385,6 +2594,25 @@ class HRL_Trainer:
             pending_expected_switch_losses = []
             pending_episode_values = []
             pending_episode_segments, pending_segment_rewards = [], []
+
+        if pretrain_only:
+            self.save_model(save_name)
+            self.logger.info(
+                "   ↺ Controller supervised pretraining finished after %s updates; "
+                "saved %s and skipped policy-gradient rollouts.",
+                pretrain_update_count,
+                save_name,
+            )
+            return {
+                "best_score": 0.0,
+                "updates": int(pretrain_update_count),
+                "selection_metric": str(getattr(
+                    self.cfg,
+                    "controller_selection_metric",
+                    "return",
+                )),
+                "pretrain_only": True,
+            }
 
         def _record_controlled_result(baseline_stats, controlled, start, stop):
             ctrl_stats = controlled["stats"]

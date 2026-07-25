@@ -93,6 +93,32 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
 
         self.assertIn("--controller_deterministic_rollout_sampling", command)
 
+    def test_controller_guidance_probe_is_forwarded_with_topk(self):
+        args = self._args_from_cli([
+            "--markets", "sh",
+            "--frozen_hrl_checkpoint", "/tmp/outer.pth",
+            "--controller_guidance_probe_only",
+            "--controller_guidance_topk", "20",
+            "--controller_rollout_len", "300",
+        ])
+
+        command = run_hrl_training.build_child_command(
+            args,
+            market="sh",
+            run_root=Path("/tmp/hrl-test"),
+            seed=77,
+        )
+
+        self.assertIn("--controller_guidance_probe_only", command)
+        self.assertEqual(
+            command[command.index("--controller_guidance_topk") + 1],
+            "20",
+        )
+        self.assertEqual(
+            command[command.index("--controller_rollout_len") + 1],
+            "300",
+        )
+
     def test_frozen_hrl_checkpoint_is_forwarded_to_child_command(self):
         args = self._args_from_cli([
             "--markets", "sh",
@@ -229,6 +255,51 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
         )
 
         self.assertIn("--controller_use_switch_supervision", command)
+
+    def test_economic_guidance_configuration_is_forwarded_to_child(self):
+        args = self._args_from_cli([
+            "--markets", "sh",
+            "--controller_guidance_risk_threshold", "0.05",
+            "--controller_guidance_advantage_threshold", "0.05",
+            "--controller_guidance_pretrain_coef", "1.0",
+            "--controller_sup_coef", "0.1",
+            "--controller_use_switch_supervision",
+            "--controller_sup_pretrain_rollout_len", "300",
+            "--controller_rollout_len", "300",
+            "--controller_aux_mdd_coef", "0.1",
+            "--controller_aux_switch_adv_coef", "1.0",
+            "--controller_entropy_coef", "0.01",
+        ])
+
+        command = run_hrl_training.build_child_command(
+            args,
+            market="sh",
+            run_root=Path("/tmp/hrl-test"),
+            seed=77,
+        )
+
+        self.assertEqual(command[command.index("--controller_guidance_risk_threshold") + 1], "0.05")
+        self.assertEqual(command[command.index("--controller_guidance_advantage_threshold") + 1], "0.05")
+        self.assertEqual(command[command.index("--controller_guidance_pretrain_coef") + 1], "1.0")
+        self.assertIn("--controller_use_switch_supervision", command)
+        self.assertEqual(command[command.index("--controller_sup_coef") + 1], "0.1")
+        self.assertEqual(command[command.index("--controller_sup_pretrain_rollout_len") + 1], "300")
+        self.assertEqual(command[command.index("--controller_rollout_len") + 1], "300")
+
+    def test_controller_pretrain_only_is_forwarded_to_child(self):
+        args = self._args_from_cli([
+            "--markets", "sh",
+            "--controller_pretrain_only",
+        ])
+
+        command = run_hrl_training.build_child_command(
+            args,
+            market="sh",
+            run_root=Path("/tmp/hrl-test"),
+            seed=77,
+        )
+
+        self.assertIn("--controller_pretrain_only", command)
 
     def test_test_skip_fixed_scenarios_is_forwarded_to_child_command(self):
         args = self._args_from_cli([

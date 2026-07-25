@@ -6,9 +6,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "train_sh" / "run_end_to_end_hrl_controller_joint_nas49_sh90.sh"
+SUPERVISED_SCRIPT = ROOT / "train_sh" / "controller_5pct_outer_sh77_quick.sh"
 
 
 class EndToEndHrlControllerJointScriptTests(unittest.TestCase):
+    def test_controller_quick_script_runs_normalized_supervised_pretrain_only(self):
+        text = SUPERVISED_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("--controller_pretrain_only", text)
+        self.assertIn("--controller_sup_pretrain_epochs 1", text)
+        self.assertIn("--controller_aux_replay_epochs 50", text)
+        self.assertIn("--controller_aux_mdd_target_scale 20.0", text)
+        self.assertIn("--controller_aux_switch_adv_target_scale 20.0", text)
+        self.assertIn("--controller_init_exit_bias 0.0", text)
+
     def test_script_uses_safe_end_to_end_output_and_no_frozen_source(self):
         env = os.environ.copy()
         for key in [

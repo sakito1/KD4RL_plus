@@ -117,6 +117,31 @@ def _agent_with_module(module_name, module):
 
 
 class ActorScoreSupervisionTests(unittest.TestCase):
+    def test_relative_market_risk_tracks_drawdown_of_hold_to_pool_wealth(self):
+        env = PPO_Env.__new__(PPO_Env)
+        env.device = torch.device("cpu")
+        env.stop_step = 3
+        env.total_days = 4
+        env.ratio = torch.tensor(
+            [
+                [1.10, 0.90, 1.00],
+                [1.20, 1.10, 1.00],
+            ],
+            dtype=torch.float32,
+        )
+
+        _, relative_risk = env._future_portfolio_return_and_relative_market_drawdown(
+            torch.tensor([1.0, 0.0]),
+            start_day=0,
+            horizon=2,
+        )
+
+        held_path = torch.tensor([1.10, 0.99])
+        market_path = torch.tensor([(1.10 + 1.20) / 2, (0.99 + 1.32) / 2])
+        relative_path = held_path / market_path
+        expected = 1.0 - relative_path[1]
+        torch.testing.assert_close(relative_risk, expected)
+
     def test_outer_supervision_uses_sampled_full_score_before_topk(self):
         mu = torch.tensor([[0.0, 0.4, -0.2]], requires_grad=True)
         std = torch.full_like(mu, 0.25)
@@ -312,7 +337,7 @@ class ActorScoreSupervisionTests(unittest.TestCase):
         )
 
         expected_return = torch.log(torch.tensor(0.995, dtype=torch.float32))
-        expected_mdd = torch.tensor(0.05, dtype=torch.float32)
+        expected_mdd = torch.tensor(1.0 - 0.95 / ((0.80 + 1.10 + 1.00) / 3.0))
         expected_switch_advantage = torch.log(torch.tensor(1.0, dtype=torch.float32)) - expected_return
         torch.testing.assert_close(info["controller_hold_return_target"], expected_return)
         torch.testing.assert_close(info["controller_hold_mdd_target"], expected_mdd)
@@ -361,7 +386,7 @@ class ActorScoreSupervisionTests(unittest.TestCase):
         )
 
         expected_return = torch.log(torch.tensor(0.995, dtype=torch.float32))
-        expected_mdd = torch.tensor(0.05, dtype=torch.float32)
+        expected_mdd = torch.tensor(1.0 - 0.95 / ((0.80 + 1.10 + 1.00) / 3.0))
         torch.testing.assert_close(info["controller_hold_return_target"], expected_return)
         torch.testing.assert_close(info["controller_hold_mdd_target"], expected_mdd)
         torch.testing.assert_close(info["controller_switch_advantage"], torch.tensor(0.0))
