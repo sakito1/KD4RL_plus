@@ -14,6 +14,7 @@ def test_three_gpu_outer_inner_seed_sweep_dry_run():
         "PYTHON_BIN": "/bin/echo",
         "NAS_SEEDS": "11 12 13 14",
         "SH_SEEDS": "21 22",
+        "JOBS_PER_GPU": "2",
     })
 
     result = subprocess.run(
@@ -27,9 +28,12 @@ def test_three_gpu_outer_inner_seed_sweep_dry_run():
     )
 
     assert result.returncode == 0, result.stdout
-    assert "GPU 0 queue: nas:11 nas:14" in result.stdout
-    assert "GPU 1 queue: nas:12 sh:21" in result.stdout
-    assert "GPU 2 queue: nas:13 sh:22" in result.stdout
+    assert "GPU 0 lane 0 queue: nas:11" in result.stdout
+    assert "GPU 1 lane 0 queue: nas:12" in result.stdout
+    assert "GPU 2 lane 0 queue: nas:13" in result.stdout
+    assert "GPU 0 lane 1 queue: nas:14" in result.stdout
+    assert "GPU 1 lane 1 queue: sh:21" in result.stdout
+    assert "GPU 2 lane 1 queue: sh:22" in result.stdout
     assert "--markets nas --seeds 11" in result.stdout
     assert "--markets sh --seeds 21" in result.stdout
     assert "--warmup_outer_epochs 4" in result.stdout

@@ -12,6 +12,7 @@ DRY_RUN="${DRY_RUN:-0}"
 GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
 GPU2="${GPU2:-2}"
+JOBS_PER_GPU="${JOBS_PER_GPU:-1}"
 NAS_SEEDS="${NAS_SEEDS-42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60}"
 SH_SEEDS="${SH_SEEDS-42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60}"
 
@@ -93,14 +94,18 @@ run_job() {
 
 run_queue() {
   local gpu="$1"
-  local queue_name="$2"
-  local -n queue_ref="$queue_name"
+  local lane="$2"
+  local queue_text="$3"
+  local queue_ref=()
   local job
   local market
   local seed
   local queue_status=0
 
-  echo "GPU ${gpu} queue: ${queue_ref[*]:-(empty)}"
+  if [[ -n "$queue_text" ]]; then
+    read -r -a queue_ref <<<"$queue_text"
+  fi
+  echo "GPU ${gpu} lane ${lane} queue: ${queue_ref[*]:-(empty)}"
   for job in "${queue_ref[@]}"; do
     market="${job%%:*}"
     seed="${job#*:}"
@@ -116,11 +121,16 @@ if [[ "$DRY_RUN" != "1" && ! -x "$PYTHON_BIN" ]]; then
   echo "Python executable not found: $PYTHON_BIN" >&2
   exit 1
 fi
+if ! [[ "$JOBS_PER_GPU" =~ ^[1-9][0-9]*$ ]]; then
+  echo "JOBS_PER_GPU must be a positive integer: $JOBS_PER_GPU" >&2
+  exit 1
+fi
 
 echo "Outer+Inner seed sweep"
 echo "Output: $OUTPUT_ROOT/$RUN_NAME"
 echo "Schedule: Outer 4 -> Inner 3 -> Joint 2"
 echo "Top-K: 5; transaction cost is read from config as 1e-4"
+echo "Concurrent jobs per GPU: $JOBS_PER_GPU"
 echo "NAS seeds: ${NAS_SEED_LIST[*]:-(none)}"
 echo "SH seeds: ${SH_SEED_LIST[*]:-(none)}"
 
@@ -136,31 +146,25 @@ if [[ "${#jobs[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-GPU0_QUEUE=()
-GPU1_QUEUE=()
-GPU2_QUEUE=()
+GPU_IDS=("$GPU0" "$GPU1" "$GPU2")
+slot_count=$((3 * JOBS_PER_GPU))
+SLOT_QUEUES=()
 for index in "${!jobs[@]}"; do
-  case $((index % 3)) in
-    0) GPU0_QUEUE+=("${jobs[$index]}") ;;
-    1) GPU1_QUEUE+=("${jobs[$index]}") ;;
-    2) GPU2_QUEUE+=("${jobs[$index]}") ;;
-  esac
+  slot=$((index % slot_count))
+  SLOT_QUEUES[$slot]="${SLOT_QUEUES[$slot]:-}${SLOT_QUEUES[$slot]:+ }${jobs[$index]}"
 done
 
 pids=()
 names=()
 
-run_queue "$GPU0" GPU0_QUEUE &
-pids+=("$!")
-names+=("gpu${GPU0}")
-
-run_queue "$GPU1" GPU1_QUEUE &
-pids+=("$!")
-names+=("gpu${GPU1}")
-
-run_queue "$GPU2" GPU2_QUEUE &
-pids+=("$!")
-names+=("gpu${GPU2}")
+for ((slot = 0; slot < slot_count; slot++)); do
+  gpu_index=$((slot % 3))
+  lane=$((slot / 3))
+  gpu="${GPU_IDS[$gpu_index]}"
+  run_queue "$gpu" "$lane" "${SLOT_QUEUES[$slot]:-}" &
+  pids+=("$!")
+  names+=("gpu${gpu}-lane${lane}")
+done
 
 status=0
 for index in "${!pids[@]}"; do
