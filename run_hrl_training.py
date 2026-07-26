@@ -459,7 +459,7 @@ def parse_args():
         default="mean",
         help=(
             "How to reduce controller action log-probs inside one episode. "
-            "'mean' preserves legacy behavior; 'sum' uses trajectory PG over all controller decisions."
+            "'mean' averages all daily free decisions; 'sum' uses their trajectory sum."
         ),
     )
     parser.add_argument("--controller_windows_per_epoch", type=int, default=5)
@@ -482,8 +482,8 @@ def parse_args():
     parser.add_argument("--controller_aux_switch_adv_coef", type=float, default=1.0)
     parser.add_argument(
         "--controller_aux_switch_adv_loss_type",
-        choices=["smooth_l1", "weighted_bce", "bce"],
-        default="smooth_l1",
+        choices=["mse"],
+        default="mse",
     )
     parser.add_argument("--controller_switch_adv_logit_coef", type=float, default=0.0)
     parser.add_argument("--controller_switch_adv_logit_scale", type=float, default=0.02)
@@ -503,6 +503,10 @@ def parse_args():
     )
     parser.add_argument("--controller_local_adv_balance_classes", action="store_true")
     parser.add_argument("--controller_expected_switch_penalty_coef", type=float, default=0.0)
+    parser.add_argument("--controller_switch_rate_penalty_coef", type=float, default=0.0)
+    parser.add_argument("--controller_switch_rate_min", type=float, default=0.05)
+    parser.add_argument("--controller_switch_rate_max", type=float, default=0.15)
+    parser.add_argument("--controller_switch_rate_margin", type=float, default=0.1)
     parser.add_argument("--controller_overflow_action_penalty_coef", type=float, default=0.0)
     parser.add_argument("--controller_value_coef", type=float, default=0.0)
     parser.add_argument(
@@ -1080,6 +1084,14 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_local_adv_loss_type),
         "--controller_expected_switch_penalty_coef",
         str(args.controller_expected_switch_penalty_coef),
+        "--controller_switch_rate_penalty_coef",
+        str(args.controller_switch_rate_penalty_coef),
+        "--controller_switch_rate_min",
+        str(args.controller_switch_rate_min),
+        "--controller_switch_rate_max",
+        str(args.controller_switch_rate_max),
+        "--controller_switch_rate_margin",
+        str(args.controller_switch_rate_margin),
         "--controller_overflow_action_penalty_coef",
         str(args.controller_overflow_action_penalty_coef),
         "--controller_value_coef",
@@ -1337,6 +1349,20 @@ def set_runtime_training_args(args, market_root, seed):
     runtime_config.controller_local_adv_loss_type = str(args.controller_local_adv_loss_type)
     runtime_config.controller_local_adv_balance_classes = bool(args.controller_local_adv_balance_classes)
     runtime_config.controller_expected_switch_penalty_coef = max(0.0, float(args.controller_expected_switch_penalty_coef))
+    switch_rate_min = min(1.0, max(0.0, float(args.controller_switch_rate_min)))
+    switch_rate_max = min(1.0, max(0.0, float(args.controller_switch_rate_max)))
+    if switch_rate_min > switch_rate_max:
+        parser.error("--controller_switch_rate_min must not exceed --controller_switch_rate_max")
+    runtime_config.controller_switch_rate_penalty_coef = max(
+        0.0,
+        float(args.controller_switch_rate_penalty_coef),
+    )
+    runtime_config.controller_switch_rate_min = switch_rate_min
+    runtime_config.controller_switch_rate_max = switch_rate_max
+    runtime_config.controller_switch_rate_margin = max(
+        0.0,
+        float(args.controller_switch_rate_margin),
+    )
     runtime_config.controller_overflow_action_penalty_coef = max(0.0, float(args.controller_overflow_action_penalty_coef))
     runtime_config.controller_value_coef = max(0.0, float(args.controller_value_coef))
     runtime_config.controller_value_normalize_advantage = bool(args.controller_value_normalize_advantage)
@@ -1544,6 +1570,10 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "controller_local_adv_loss_type": getattr(runtime_config, "controller_local_adv_loss_type", None),
             "controller_local_adv_balance_classes": getattr(runtime_config, "controller_local_adv_balance_classes", None),
             "controller_expected_switch_penalty_coef": getattr(runtime_config, "controller_expected_switch_penalty_coef", None),
+            "controller_switch_rate_penalty_coef": getattr(runtime_config, "controller_switch_rate_penalty_coef", None),
+            "controller_switch_rate_min": getattr(runtime_config, "controller_switch_rate_min", None),
+            "controller_switch_rate_max": getattr(runtime_config, "controller_switch_rate_max", None),
+            "controller_switch_rate_margin": getattr(runtime_config, "controller_switch_rate_margin", None),
             "controller_overflow_action_penalty_coef": getattr(runtime_config, "controller_overflow_action_penalty_coef", None),
             "controller_value_coef": getattr(runtime_config, "controller_value_coef", None),
             "controller_value_normalize_advantage": getattr(runtime_config, "controller_value_normalize_advantage", None),

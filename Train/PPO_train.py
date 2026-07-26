@@ -7,6 +7,7 @@ import numpy as np
 import argparse
 import random
 import json
+import math
 import pandas as pd
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
@@ -29,7 +30,6 @@ try:
     )
     from Train.controller_guidance import (
         analyze_guidance_windows,
-        balanced_guidance_weights,
         build_economic_guidance_labels,
         render_guidance_report,
     )
@@ -43,7 +43,6 @@ except ModuleNotFoundError:
     )
     from controller_guidance import (
         analyze_guidance_windows,
-        balanced_guidance_weights,
         build_economic_guidance_labels,
         render_guidance_report,
     )
@@ -464,6 +463,9 @@ class HRL_Trainer:
                         obs['weights_drift'], obs['port_state'],
                         switch_action=out['act_out'],
                         asset_state=obs.get('outer_state'),
+                        hold_exec_weights=out.get('controller_hold_exec'),
+                        switch_exec_weights=out.get('controller_switch_exec'),
+                        remaining_horizon=out.get('controller_remaining_horizon'),
                     )
                     controller_eval_probs.extend(
                         diag_stats["exit_prob"].detach().view(-1).cpu().tolist()
@@ -635,12 +637,13 @@ class HRL_Trainer:
                     threshold_bits.append(f"{key}={value}")
             self.logger.info(
                 "Controller eval exit_prob: count=%s mean=%.6f p50=%.6f p75=%.6f p95=%.6f "
-                "max=%.6f %s",
+                "hard_switch_rate=%.4f max=%.6f %s",
                 summary.get("count", 0),
                 summary.get("mean", 0.0),
                 summary.get("p50", 0.0),
                 summary.get("p75", 0.0),
                 summary.get("p95", 0.0),
+                summary.get("hard_switch_rate", 0.0),
                 summary.get("max", 0.0),
                 " ".join(threshold_bits),
             )
@@ -833,6 +836,7 @@ class HRL_Trainer:
             "p75": float(np.percentile(values, 75)),
             "p95": float(np.percentile(values, 95)),
             "max": float(np.max(values)),
+            "hard_switch_rate": float(np.mean(values > 0.5)),
         }
         for threshold in thresholds:
             threshold = float(threshold)
@@ -889,16 +893,13 @@ class HRL_Trainer:
                 or float(getattr(self.cfg, "controller_local_adv_coef", 0.0)) > 0.0
         )
 
-    def _controller_inner_adjusted_switch_advantage(self, env, obs, hold_exec, switch_exec):
-        current = obs["weights_drift"].detach().view(-1)
+    def _controller_actual_holdings_switch_advantage(self, env, obs, switch_exec):
+        actual_hold = obs["weights_drift"].detach().view(-1)
         if hasattr(env, "_normalize"):
-            current = env._normalize(current)
-            hold_weights = env._normalize(hold_exec.detach().view(-1))
+            actual_hold = env._normalize(actual_hold)
             switch_weights = env._normalize(switch_exec.detach().view(-1))
         else:
-            current = current / current.sum().clamp_min(1e-8)
-            hold_weights = hold_exec.detach().view(-1)
-            hold_weights = hold_weights / hold_weights.sum().clamp_min(1e-8)
+            actual_hold = actual_hold / actual_hold.sum().clamp_min(1e-8)
             switch_weights = switch_exec.detach().view(-1)
             switch_weights = switch_weights / switch_weights.sum().clamp_min(1e-8)
 
@@ -908,7 +909,7 @@ class HRL_Trainer:
         horizon = max(1, max_hold - t_held)
         start_day = int(getattr(env, "day", 0))
         hold_return, _ = env._future_portfolio_return_and_max_drawdown(
-            hold_weights.detach(),
+            actual_hold.detach(),
             start_day,
             horizon,
         )
@@ -917,10 +918,9 @@ class HRL_Trainer:
             start_day,
             horizon,
         )
-        hold_turnover = torch.sum(torch.abs(hold_weights - current))
-        switch_turnover = torch.sum(torch.abs(switch_weights - current))
+        switch_turnover = torch.sum(torch.abs(switch_weights - actual_hold))
         transaction_cost = float(getattr(env, "transaction_cost_pct", 0.0))
-        return switch_return - hold_return - (switch_turnover - hold_turnover) * transaction_cost
+        return switch_return - hold_return - switch_turnover * transaction_cost
 
     def _controller_decision_stride(self, *, is_train: bool, epoch: int = None) -> int:
         if is_train:
@@ -1028,7 +1028,8 @@ class HRL_Trainer:
     @staticmethod
     def _detach_controller_record(obs, act_out, act_mon, target_return=None, target_mdd=None,
                                   sup_label=None, sup_weight=None, free_switch_index=0,
-                                  switch_advantage=None):
+                                  switch_advantage=None, hold_exec_weights=None,
+                                  switch_exec_weights=None, remaining_horizon=None):
         return {
             "weights_drift": obs["weights_drift"].detach(),
             "port_state": obs["port_state"].detach(),
@@ -1041,7 +1042,74 @@ class HRL_Trainer:
             "sup_label": sup_label.detach().view(-1) if isinstance(sup_label, torch.Tensor) else None,
             "sup_weight": sup_weight.detach().view(-1) if isinstance(sup_weight, torch.Tensor) else None,
             "switch_advantage": switch_advantage.detach().view(-1) if isinstance(switch_advantage, torch.Tensor) else None,
+            "hold_exec_weights": (
+                hold_exec_weights.detach()
+                if isinstance(hold_exec_weights, torch.Tensor)
+                else None
+            ),
+            "switch_exec_weights": (
+                switch_exec_weights.detach()
+                if isinstance(switch_exec_weights, torch.Tensor)
+                else None
+            ),
+            "remaining_horizon": (
+                remaining_horizon.detach().view(-1)
+                if isinstance(remaining_horizon, torch.Tensor)
+                else None
+            ),
         }
+
+    @staticmethod
+    def _controller_remaining_horizon(env, *, dtype, device):
+        max_hold = max(1, int(getattr(env, "max_hold", 1)))
+        held = max(0, int(getattr(env, "t_held", 0)))
+        remaining = max(1, max_hold - held)
+        return torch.tensor(
+            [float(remaining) / float(max_hold)],
+            dtype=dtype,
+            device=device,
+        )
+
+    @staticmethod
+    def _controller_top_tail_rate_loss(
+            policy_logits,
+            *,
+            min_rate,
+            max_rate,
+            margin=0.1,
+    ):
+        if isinstance(policy_logits, torch.Tensor):
+            logits = policy_logits.view(-1)
+        else:
+            logits = torch.cat([logit.view(-1) for logit in policy_logits]).view(-1)
+        if logits.numel() == 0:
+            raise ValueError("policy_logits must contain at least one free-decision logit")
+        min_rate = float(min_rate)
+        max_rate = float(max_rate)
+        if not 0.0 <= min_rate <= max_rate <= 1.0:
+            raise ValueError("switch-rate bounds must satisfy 0 <= min_rate <= max_rate <= 1")
+        margin = float(margin)
+        if margin < 0.0:
+            raise ValueError("switch-rate margin must be non-negative")
+
+        sorted_logits = torch.sort(logits, descending=True).values
+        count = int(sorted_logits.numel())
+        k_min = min(count, int(math.ceil(min_rate * count))) if min_rate > 0.0 else 0
+        k_max = min(count, int(math.floor(max_rate * count)))
+        k_max = max(k_min, k_max)
+
+        lower_loss = logits.sum() * 0.0
+        if k_min > 0:
+            lower_loss = torch.relu(
+                logits.new_tensor(margin) - sorted_logits[:k_min]
+            ).pow(2).mean()
+        upper_loss = logits.sum() * 0.0
+        if k_max < count:
+            upper_loss = torch.relu(
+                logits.new_tensor(margin) + sorted_logits[k_max:]
+            ).pow(2).mean()
+        hard_rate = (logits > 0.0).to(dtype=logits.dtype).mean()
+        return lower_loss + upper_loss, hard_rate.detach()
 
     def _annotate_controller_guidance_segments(self, episode_segments):
         annotated_records = []
@@ -1091,7 +1159,9 @@ class HRL_Trainer:
 
         labels = torch.cat(labels_parts)
         masks = torch.cat(masks_parts)
-        weights = balanced_guidance_weights(labels, masks)
+        # Preserve the naturally sparse economic label distribution.  Every
+        # valid free decision contributes once to ordinary BCE.
+        weights = masks
         for record, label, weight in zip(annotated_records, labels, weights):
             target = record["target_mdd"]
             record["sup_label"] = target.new_tensor([float(label)])
@@ -1233,7 +1303,7 @@ class HRL_Trainer:
             pending_record = None
             free_switch_index = 0
             precomputed_weights_exec = None
-            inner_adjusted_switch_advantage = None
+            actual_holdings_switch_advantage = None
             free_exit_probs = None
             if free_decision:
                 with torch.no_grad():
@@ -1242,10 +1312,44 @@ class HRL_Trainer:
                         weights_drift,
                         deterministic=True,
                     )
+                    actual_hold = weights_drift.detach()
+                    if disable_inner:
+                        inner_hold_exec = self._controller_exec_weights(
+                            obs,
+                            obs["base_drift"].detach(),
+                            weights_drift,
+                            disable_inner=True,
+                        )
+                        switch_exec = self._controller_exec_weights(
+                            obs,
+                            act_out.detach(),
+                            weights_drift,
+                            disable_inner=True,
+                        )
+                    else:
+                        inner_hold_exec = self._deterministic_inner_exec(
+                            obs,
+                            obs["base_drift"].detach(),
+                            weights_drift,
+                        )
+                        switch_exec = self._controller_exec_weights(
+                            obs,
+                            act_out.detach(),
+                            weights_drift,
+                            disable_inner=False,
+                        )
+                    remaining_horizon = self._controller_remaining_horizon(
+                        env,
+                        dtype=weights_drift.dtype,
+                        device=weights_drift.device,
+                    )
                     stats = self.agent.net.mon.decision_stats(
                         weights_drift, obs["port_state"],
                         switch_action=act_out,
                         asset_state=obs.get("outer_state"),
+                        hold_exec_weights=actual_hold,
+                        switch_exec_weights=switch_exec,
+                        remaining_horizon=remaining_horizon,
                     )
                     zeros = torch.zeros_like(stats["policy_logit"])
                     logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
@@ -1265,34 +1369,23 @@ class HRL_Trainer:
                 if is_switch:
                     free_switch_count += 1
                     free_switch_index = free_switch_count
-                if record_train_decision:
-                    pending_record = (obs, act_out, act_mon, free_switch_index, free_exit_probs)
                 if record_train_decision and self._controller_uses_switch_advantage_targets():
-                    with torch.no_grad():
-                        hold_exec = self._deterministic_inner_exec(
-                            obs,
-                            obs["base_drift"].detach(),
-                            weights_drift,
-                        )
-                        switch_exec = self._controller_exec_weights(
-                            obs,
-                            act_out.detach(),
-                            weights_drift,
-                            disable_inner=disable_inner,
-                        )
-                        if disable_inner:
-                            hold_exec = self._controller_exec_weights(
-                                obs,
-                                obs["base_drift"].detach(),
-                                weights_drift,
-                                disable_inner=True,
-                            )
-                    precomputed_weights_exec = switch_exec if is_switch else hold_exec
-                    inner_adjusted_switch_advantage = self._controller_inner_adjusted_switch_advantage(
+                    precomputed_weights_exec = switch_exec if is_switch else inner_hold_exec
+                    actual_holdings_switch_advantage = self._controller_actual_holdings_switch_advantage(
                         env,
                         obs,
-                        hold_exec,
                         switch_exec,
+                    )
+                if record_train_decision:
+                    pending_record = (
+                        obs,
+                        act_out,
+                        act_mon,
+                        free_switch_index,
+                        free_exit_probs,
+                        actual_hold,
+                        switch_exec,
+                        remaining_horizon,
                     )
             else:
                 with torch.no_grad():
@@ -1334,10 +1427,19 @@ class HRL_Trainer:
                 is_switch=is_switch,
             )
             if free_decision and pending_record is not None:
-                rec_obs, rec_act_out, rec_act_mon, rec_free_switch_index, rec_exit_probs = pending_record
+                (
+                    rec_obs,
+                    rec_act_out,
+                    rec_act_mon,
+                    rec_free_switch_index,
+                    rec_exit_probs,
+                    rec_hold_exec,
+                    rec_switch_exec,
+                    rec_remaining_horizon,
+                ) = pending_record
                 switch_advantage = (
-                    inner_adjusted_switch_advantage
-                    if inner_adjusted_switch_advantage is not None
+                    actual_holdings_switch_advantage
+                    if actual_holdings_switch_advantage is not None
                     else info.get("controller_switch_advantage")
                 )
                 current_segment_logps.append(self._detach_controller_record(
@@ -1350,6 +1452,9 @@ class HRL_Trainer:
                     sup_weight=info.get("controller_sup_weight"),
                     free_switch_index=rec_free_switch_index,
                     switch_advantage=switch_advantage,
+                    hold_exec_weights=rec_hold_exec,
+                    switch_exec_weights=rec_switch_exec,
+                    remaining_horizon=rec_remaining_horizon,
                 ))
                 if isinstance(switch_advantage, torch.Tensor):
                     switch_advantages = switch_advantage.detach().view(-1).cpu().numpy().astype(float).tolist()
@@ -1567,16 +1672,23 @@ class HRL_Trainer:
                 exit_probs = None
                 if free_decision:
                     if self._controller_uses_switch_advantage_targets():
-                        switch_advantage = self._controller_inner_adjusted_switch_advantage(
+                        switch_advantage = self._controller_actual_holdings_switch_advantage(
                             env,
                             obs,
-                            hold_exec,
                             switch_exec,
                         )
+                    remaining_horizon = self._controller_remaining_horizon(
+                        env,
+                        dtype=weights_drift.dtype,
+                        device=weights_drift.device,
+                    )
                     stats = self.agent.net.mon.decision_stats(
                         weights_drift, obs["port_state"],
                         switch_action=act_out,
                         asset_state=obs.get("outer_state"),
+                        hold_exec_weights=weights_drift.detach(),
+                        switch_exec_weights=switch_exec,
+                        remaining_horizon=remaining_horizon,
                     )
                     exit_probs = stats["exit_prob"].detach().view(-1).cpu().numpy().astype(float).tolist()
 
@@ -1608,6 +1720,9 @@ class HRL_Trainer:
                     sup_weight=info.get("controller_sup_weight"),
                     free_switch_index=free_switch_index,
                     switch_advantage=switch_advantage,
+                    hold_exec_weights=weights_drift.detach(),
+                    switch_exec_weights=switch_exec,
+                    remaining_horizon=remaining_horizon,
                 ))
                 if isinstance(switch_advantage, torch.Tensor):
                     switch_advantages = switch_advantage.detach().view(-1).cpu().numpy().astype(float).tolist()
@@ -1754,8 +1869,7 @@ class HRL_Trainer:
             return False
         return int(epoch) % max(1, int(val_interval)) == 0 or int(epoch) == int(epochs)
 
-    def _controller_episode_terms(self, episode_segments):
-        segment_logps = []
+    def _controller_episode_terms(self, episode_segments, *, return_policy_logits=False):
         entropies = []
         aux_return_losses = []
         aux_mdd_losses = []
@@ -1770,14 +1884,12 @@ class HRL_Trainer:
         local_adv_bce_neg_weights = []
         episode_values = []
         expected_switch_probs = []
+        policy_logits = []
         overflow_switch_logps = []
         overflow_switch_orders = []
         aux_return_coef = float(getattr(self.cfg, "controller_aux_return_coef", 0.0))
         aux_mdd_coef = float(getattr(self.cfg, "controller_aux_mdd_coef", 0.0))
         aux_switch_adv_coef = float(getattr(self.cfg, "controller_aux_switch_adv_coef", 0.0))
-        aux_switch_adv_loss_type = str(
-            getattr(self.cfg, "controller_aux_switch_adv_loss_type", "smooth_l1")
-        ).lower()
         local_adv_coef = float(getattr(self.cfg, "controller_local_adv_coef", 0.0))
         local_adv_scale = max(float(getattr(self.cfg, "controller_local_adv_scale", 0.05)), 1e-8)
         local_adv_clip = max(float(getattr(self.cfg, "controller_local_adv_clip", 10.0)), 0.0)
@@ -1795,16 +1907,27 @@ class HRL_Trainer:
         max_free_switches = max(0, max_switches - 1) if max_switches > 0 else 0
         episode_record_logps = []
         for segment in episode_segments:
-            record_logps = []
             for record in segment:
                 asset_state = record.get("asset_state")
                 if isinstance(asset_state, torch.Tensor):
                     asset_state = asset_state.to(self.device)
+                hold_exec_weights = record.get("hold_exec_weights")
+                if isinstance(hold_exec_weights, torch.Tensor):
+                    hold_exec_weights = hold_exec_weights.to(self.device)
+                switch_exec_weights = record.get("switch_exec_weights")
+                if isinstance(switch_exec_weights, torch.Tensor):
+                    switch_exec_weights = switch_exec_weights.to(self.device)
+                remaining_horizon = record.get("remaining_horizon")
+                if isinstance(remaining_horizon, torch.Tensor):
+                    remaining_horizon = remaining_horizon.to(self.device)
                 stats = self.agent.net.mon.decision_stats(
                     record["weights_drift"].to(self.device),
                     record["port_state"].to(self.device),
                     switch_action=record["switch_action"].to(self.device),
                     asset_state=asset_state,
+                    hold_exec_weights=hold_exec_weights,
+                    switch_exec_weights=switch_exec_weights,
+                    remaining_horizon=remaining_horizon,
                 )
                 zeros = torch.zeros_like(stats["policy_logit"])
                 logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
@@ -1812,9 +1935,9 @@ class HRL_Trainer:
                 action = record["action"].to(self.device).long().view(-1)
                 log_prob = dist.log_prob(action).view(-1).mean()
                 exit_prob = stats["exit_prob"].view(-1).mean()
-                record_logps.append(log_prob)
                 episode_record_logps.append(log_prob)
                 expected_switch_probs.append(exit_prob)
+                policy_logits.append(stats["policy_logit"].view(-1).mean())
                 entropies.append(dist.entropy().mean())
                 if stats.get("value") is not None:
                     episode_values.append(stats["value"].view(-1).mean())
@@ -1850,7 +1973,7 @@ class HRL_Trainer:
                         1.0,
                     ))
                     aux_mdd_losses.append(
-                        F.smooth_l1_loss(stats["hold_risk_pred"].view(-1), target_mdd.view(-1))
+                        F.mse_loss(stats["hold_risk_pred"].view(-1), target_mdd.view(-1))
                     )
                 if (
                         aux_switch_adv_coef > 0.0
@@ -1872,28 +1995,9 @@ class HRL_Trainer:
                     if torch.count_nonzero(valid_switch_adv).item() > 0:
                         pred_switch_adv = pred_switch_adv[valid_switch_adv]
                         target_switch_adv = target_switch_adv[valid_switch_adv]
-                        if aux_switch_adv_loss_type in {"weighted_bce", "bce"}:
-                            effective_adv = target_switch_adv - local_adv_margin
-                            labels = (effective_adv > 0).to(dtype=pred_switch_adv.dtype)
-                            pred_logits = pred_switch_adv / local_adv_scale
-                            raw_bce = F.binary_cross_entropy_with_logits(
-                                pred_logits,
-                                labels,
-                                reduction="none",
-                            )
-                            if aux_switch_adv_loss_type == "weighted_bce":
-                                weights = (effective_adv / local_adv_scale).abs().clamp(
-                                    max=local_adv_clip,
-                                ).detach()
-                                aux_switch_adv_losses.append(
-                                    (raw_bce * weights).sum() / weights.sum().clamp_min(1e-8)
-                                )
-                            else:
-                                aux_switch_adv_losses.append(raw_bce.mean())
-                        else:
-                            aux_switch_adv_losses.append(
-                                F.smooth_l1_loss(pred_switch_adv, target_switch_adv)
-                            )
+                        aux_switch_adv_losses.append(
+                            F.mse_loss(pred_switch_adv, target_switch_adv)
+                        )
                 if sup_coef > 0.0 and record.get("sup_label") is not None and record.get("sup_weight") is not None:
                     label = record["sup_label"].to(device=self.device, dtype=stats["policy_logit"].dtype).view(-1)
                     weight = record["sup_weight"].to(device=self.device, dtype=stats["policy_logit"].dtype).view(-1)
@@ -1941,14 +2045,15 @@ class HRL_Trainer:
                             local_adv_losses.append(
                                 -(scaled_adv.detach() * stats["exit_prob"].view(-1)[valid_adv]).mean()
                             )
-            if record_logps:
-                segment_logps.append(torch.stack(record_logps).mean())
         if not episode_record_logps:
-            return None, None, None, None, None, None, None, None, None, None
+            empty_terms = (None, None, None, None, None, None, None, None, None, None)
+            if return_policy_logits:
+                return empty_terms, None
+            return empty_terms
         if logprob_reduction == "sum":
             episode_logprob = torch.stack(episode_record_logps).sum()
         else:
-            episode_logprob = torch.stack(segment_logps).mean()
+            episode_logprob = torch.stack(episode_record_logps).mean()
         entropy = torch.stack(entropies).mean() if entropies else episode_logprob.new_tensor(0.0)
         episode_value = torch.stack(episode_values).mean() if episode_values else None
         aux_return_loss = torch.stack(aux_return_losses).mean() if aux_return_losses else None
@@ -1992,7 +2097,7 @@ class HRL_Trainer:
             )
         else:
             overflow_action_loss = episode_logprob.new_tensor(0.0)
-        return (
+        terms = (
             episode_logprob,
             entropy,
             episode_value,
@@ -2004,6 +2109,9 @@ class HRL_Trainer:
             local_adv_loss,
             expected_switch_loss,
         )
+        if return_policy_logits:
+            return terms, torch.stack(policy_logits)
+        return terms
 
     def _update_controller_pg_batch(self, episode_logprobs, rewards, entropies,
                                     aux_return_losses=None, aux_mdd_losses=None,
@@ -2138,6 +2246,11 @@ class HRL_Trainer:
             else 0.0
         )
         local_adv_coef = float(getattr(self.cfg, "controller_local_adv_coef", 0.0))
+        switch_rate_coef = float(getattr(
+            self.cfg,
+            "controller_switch_rate_penalty_coef",
+            0.0,
+        ))
 
         self.agent.opt_mon.zero_grad(set_to_none=True)
         diagnostics = {
@@ -2166,12 +2279,20 @@ class HRL_Trainer:
             "local_adv_loss": 0.0,
             "local_adv_weighted_loss": 0.0,
             "expected_switch_loss": 0.0,
+            "switch_rate_loss": 0.0,
+            "switch_rate_weighted_loss": 0.0,
+            "hard_switch_rate": 0.0,
             "episode_count": int(len(episode_segments_batch)),
         }
         valid_episodes = 0
+        batch_loss = None
+        batch_policy_logits = []
 
         for episode_idx, episode_segments in enumerate(episode_segments_batch):
-            terms = self._controller_episode_terms(episode_segments)
+            terms, episode_policy_logits = self._controller_episode_terms(
+                episode_segments,
+                return_policy_logits=True,
+            )
             if terms is None:
                 continue
             (
@@ -2189,6 +2310,8 @@ class HRL_Trainer:
             if episode_logprob is None:
                 continue
             valid_episodes += 1
+            if episode_policy_logits is not None:
+                batch_policy_logits.append(episode_policy_logits)
             denom = float(batch_size)
             episode_reward = reward_tensor[episode_idx].to(
                 device=episode_logprob.device,
@@ -2253,13 +2376,28 @@ class HRL_Trainer:
                 episode_loss = episode_loss + weighted
                 diagnostics["expected_switch_loss"] += float(weighted.detach().cpu().item())
 
-            diagnostics["loss"] += float(episode_loss.detach().cpu().item())
-            diagnostics["loss_abs"] += float(episode_loss.detach().abs().cpu().item())
-            episode_loss.backward()
+            batch_loss = episode_loss if batch_loss is None else batch_loss + episode_loss
 
         if valid_episodes == 0:
             self.agent.opt_mon.zero_grad(set_to_none=True)
             return {}
+        if switch_rate_coef > 0.0 and batch_policy_logits:
+            switch_rate_loss, hard_switch_rate = self._controller_top_tail_rate_loss(
+                torch.cat(batch_policy_logits),
+                min_rate=float(getattr(self.cfg, "controller_switch_rate_min", 0.05)),
+                max_rate=float(getattr(self.cfg, "controller_switch_rate_max", 0.15)),
+                margin=float(getattr(self.cfg, "controller_switch_rate_margin", 0.1)),
+            )
+            switch_rate_weighted_loss = switch_rate_coef * switch_rate_loss
+            batch_loss = batch_loss + switch_rate_weighted_loss
+            diagnostics["switch_rate_loss"] = float(switch_rate_loss.detach().cpu().item())
+            diagnostics["switch_rate_weighted_loss"] = float(
+                switch_rate_weighted_loss.detach().cpu().item()
+            )
+            diagnostics["hard_switch_rate"] = float(hard_switch_rate.cpu().item())
+        diagnostics["loss"] = float(batch_loss.detach().cpu().item())
+        diagnostics["loss_abs"] = float(batch_loss.detach().abs().cpu().item())
+        batch_loss.backward()
         if self.agent.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(list(self.agent.net.mon.parameters()), self.agent.max_grad_norm)
         self.agent.opt_mon.step()
@@ -2268,27 +2406,37 @@ class HRL_Trainer:
 
     def _update_controller_aux_batch(self, aux_return_losses=None, aux_mdd_losses=None,
                                      aux_switch_adv_losses=None, local_adv_losses=None,
-                                     sup_losses=None):
+                                     sup_losses=None, switch_rate_losses=None):
         aux_return_losses = aux_return_losses or []
         aux_mdd_losses = aux_mdd_losses or []
         aux_switch_adv_losses = aux_switch_adv_losses or []
         local_adv_losses = local_adv_losses or []
         sup_losses = sup_losses or []
+        switch_rate_losses = switch_rate_losses or []
         aux_return_coef = float(getattr(self.cfg, "controller_aux_return_coef", 0.0))
         aux_mdd_coef = float(getattr(self.cfg, "controller_aux_mdd_coef", 0.0))
         aux_switch_adv_coef = float(getattr(self.cfg, "controller_aux_switch_adv_coef", 0.0))
         local_adv_coef = float(getattr(self.cfg, "controller_local_adv_coef", 0.0))
+        use_guidance_pretrain = bool(getattr(
+            self.cfg,
+            "controller_use_switch_supervision",
+            False,
+        ))
         guidance_coef = (
             float(getattr(self.cfg, "controller_guidance_pretrain_coef", 1.0))
-            if bool(getattr(self.cfg, "controller_use_switch_supervision", False))
+            if use_guidance_pretrain
             else 0.0
         )
+        risk_coef = guidance_coef if use_guidance_pretrain else aux_mdd_coef
+        advantage_coef = guidance_coef if use_guidance_pretrain else aux_switch_adv_coef
+        rate_coef = guidance_coef
         if (
                 (aux_return_coef <= 0.0 or not aux_return_losses)
-                and (aux_mdd_coef <= 0.0 or not aux_mdd_losses)
-                and (aux_switch_adv_coef <= 0.0 or not aux_switch_adv_losses)
+                and (risk_coef <= 0.0 or not aux_mdd_losses)
+                and (advantage_coef <= 0.0 or not aux_switch_adv_losses)
                 and (local_adv_coef <= 0.0 or not local_adv_losses)
                 and (guidance_coef <= 0.0 or not sup_losses)
+                and (rate_coef <= 0.0 or not switch_rate_losses)
         ):
             return {}
 
@@ -2299,6 +2447,7 @@ class HRL_Trainer:
             or aux_switch_adv_losses
             or local_adv_losses
             or sup_losses
+            or switch_rate_losses
         )[0]
         loss = ref.new_tensor(0.0)
         aux_return_loss = ref.new_tensor(0.0)
@@ -2306,21 +2455,25 @@ class HRL_Trainer:
         aux_switch_adv_loss = ref.new_tensor(0.0)
         local_adv_loss = ref.new_tensor(0.0)
         sup_loss = ref.new_tensor(0.0)
+        switch_rate_loss = ref.new_tensor(0.0)
         if aux_return_coef > 0.0 and aux_return_losses:
             aux_return_loss = torch.stack(aux_return_losses).mean()
             loss = loss + aux_return_coef * aux_return_loss
-        if aux_mdd_coef > 0.0 and aux_mdd_losses:
+        if risk_coef > 0.0 and aux_mdd_losses:
             aux_mdd_loss = torch.stack(aux_mdd_losses).mean()
-            loss = loss + aux_mdd_coef * aux_mdd_loss
-        if aux_switch_adv_coef > 0.0 and aux_switch_adv_losses:
+            loss = loss + risk_coef * aux_mdd_loss
+        if advantage_coef > 0.0 and aux_switch_adv_losses:
             aux_switch_adv_loss = torch.stack(aux_switch_adv_losses).mean()
-            loss = loss + aux_switch_adv_coef * aux_switch_adv_loss
+            loss = loss + advantage_coef * aux_switch_adv_loss
         if local_adv_coef > 0.0 and local_adv_losses:
             local_adv_loss = torch.stack(local_adv_losses).mean()
             loss = loss + local_adv_coef * local_adv_loss
         if guidance_coef > 0.0 and sup_losses:
             sup_loss = torch.stack(sup_losses).mean()
             loss = loss + guidance_coef * sup_loss
+        if rate_coef > 0.0 and switch_rate_losses:
+            switch_rate_loss = torch.stack(switch_rate_losses).mean()
+            loss = loss + rate_coef * switch_rate_loss
         loss.backward()
         if self.agent.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(list(self.agent.net.mon.parameters()), self.agent.max_grad_norm)
@@ -2331,12 +2484,14 @@ class HRL_Trainer:
             "aux_mdd_loss": float(aux_mdd_loss.detach().cpu().item()),
             "aux_switch_adv_loss": float(aux_switch_adv_loss.detach().cpu().item()),
             "aux_return_weighted_loss": float((aux_return_coef * aux_return_loss).detach().cpu().item()),
-            "aux_mdd_weighted_loss": float((aux_mdd_coef * aux_mdd_loss).detach().cpu().item()),
-            "aux_switch_adv_weighted_loss": float((aux_switch_adv_coef * aux_switch_adv_loss).detach().cpu().item()),
+            "aux_mdd_weighted_loss": float((risk_coef * aux_mdd_loss).detach().cpu().item()),
+            "aux_switch_adv_weighted_loss": float((advantage_coef * aux_switch_adv_loss).detach().cpu().item()),
             "local_adv_loss": float(local_adv_loss.detach().cpu().item()),
             "local_adv_weighted_loss": float((local_adv_coef * local_adv_loss).detach().cpu().item()),
             "sup_loss": float(sup_loss.detach().cpu().item()),
             "sup_weighted_loss": float((guidance_coef * sup_loss).detach().cpu().item()),
+            "switch_rate_loss": float(switch_rate_loss.detach().cpu().item()),
+            "switch_rate_weighted_loss": float((rate_coef * switch_rate_loss).detach().cpu().item()),
         }
 
     def _controller_aux_losses_from_episode_segments_batch(self, episode_segments_batch):
@@ -2345,36 +2500,65 @@ class HRL_Trainer:
         aux_switch_adv_losses = []
         local_adv_losses = []
         sup_losses = []
-        for episode_segments in episode_segments_batch:
-            terms = self._controller_episode_terms(episode_segments)
-            (
-                _,
-                _,
-                _,
-                aux_return_loss,
-                aux_mdd_loss,
-                aux_switch_adv_loss,
-                _,
-                sup_loss,
-                local_adv_loss,
-                _,
-            ) = terms
-            if aux_return_loss is not None:
-                aux_return_losses.append(aux_return_loss)
-            if aux_mdd_loss is not None:
-                aux_mdd_losses.append(aux_mdd_loss)
-            if aux_switch_adv_loss is not None:
-                aux_switch_adv_losses.append(aux_switch_adv_loss)
-            if local_adv_loss is not None:
-                local_adv_losses.append(local_adv_loss)
-            if sup_loss is not None:
-                sup_losses.append(sup_loss)
+        switch_rate_losses = []
+        combined_segments = [
+            segment
+            for episode_segments in episode_segments_batch
+            for segment in episode_segments
+        ]
+        if not combined_segments:
+            return (
+                aux_return_losses,
+                aux_mdd_losses,
+                aux_switch_adv_losses,
+                local_adv_losses,
+                sup_losses,
+                switch_rate_losses,
+            )
+        terms, policy_logits = self._controller_episode_terms(
+            combined_segments,
+            return_policy_logits=True,
+        )
+        (
+            _,
+            _,
+            _,
+            aux_return_loss,
+            aux_mdd_loss,
+            aux_switch_adv_loss,
+            _,
+            sup_loss,
+            local_adv_loss,
+            _,
+        ) = terms
+        if aux_return_loss is not None:
+            aux_return_losses.append(aux_return_loss)
+        if aux_mdd_loss is not None:
+            aux_mdd_losses.append(aux_mdd_loss)
+        if aux_switch_adv_loss is not None:
+            aux_switch_adv_losses.append(aux_switch_adv_loss)
+        if local_adv_loss is not None:
+            local_adv_losses.append(local_adv_loss)
+        if sup_loss is not None:
+            sup_losses.append(sup_loss)
+        if (
+                float(getattr(self.cfg, "controller_switch_rate_penalty_coef", 0.0)) > 0.0
+                and policy_logits is not None
+        ):
+            switch_rate_loss, _ = self._controller_top_tail_rate_loss(
+                policy_logits,
+                min_rate=float(getattr(self.cfg, "controller_switch_rate_min", 0.05)),
+                max_rate=float(getattr(self.cfg, "controller_switch_rate_max", 0.15)),
+                margin=float(getattr(self.cfg, "controller_switch_rate_margin", 0.1)),
+            )
+            switch_rate_losses.append(switch_rate_loss)
         return (
             aux_return_losses,
             aux_mdd_losses,
             aux_switch_adv_losses,
             local_adv_losses,
             sup_losses,
+            switch_rate_losses,
         )
 
     def _update_controller_aux_replay_batch(self, episode_segments_batch, replay_epochs=None):
@@ -2506,15 +2690,21 @@ class HRL_Trainer:
             sup_rollout_len = rollout_len if sup_rollout_len <= 0 else max(2, sup_rollout_len)
             aux_replay_epochs = max(1, int(getattr(self.cfg, "controller_aux_replay_epochs", 1) or 1))
             self.logger.info(
-                "   [Controller Aux] pretrain epochs=%s, replay_epochs=%s, return_coef=%s, "
-                "risk_coef=%s, advantage_coef=%s, label_coef=%s, episode_len=%s",
+                "   [Controller Aux] pretrain epochs=%s, replay_epochs=%s, "
+                "pretrain_aux_coef=%s, episode_len=%s, "
+                "top_tail_rate=[%.3f, %.3f], margin=%.3f; "
+                "PG coefs: risk=%.3f advantage=%.3f label=%.3f rate=%.3f",
                 sup_pretrain_epochs,
                 aux_replay_epochs,
-                float(getattr(self.cfg, "controller_aux_return_coef", 0.0)),
-                float(getattr(self.cfg, "controller_aux_mdd_coef", 0.0)),
-                float(getattr(self.cfg, "controller_aux_switch_adv_coef", 0.0)),
                 float(getattr(self.cfg, "controller_guidance_pretrain_coef", 1.0)),
                 sup_rollout_len,
+                float(getattr(self.cfg, "controller_switch_rate_min", 0.05)),
+                float(getattr(self.cfg, "controller_switch_rate_max", 0.15)),
+                float(getattr(self.cfg, "controller_switch_rate_margin", 0.1)),
+                float(getattr(self.cfg, "controller_aux_mdd_coef", 0.0)),
+                float(getattr(self.cfg, "controller_aux_switch_adv_coef", 0.0)),
+                float(getattr(self.cfg, "controller_sup_coef", 0.0)),
+                float(getattr(self.cfg, "controller_switch_rate_penalty_coef", 0.0)),
             )
             for sup_epoch in range(sup_pretrain_epochs):
                 starts = list(controller_start_pool)
@@ -2549,7 +2739,8 @@ class HRL_Trainer:
                             pretrain_update_count += 1
                             self.logger.info(
                                 "[CTRL-AUX] update=%s epoch=%s replay=%s/%s windows=%s/%s "
-                                "loss=%.4f label=%.4f risk=%.4f advantage=%.4f aux_ret=%.4f local_adv=%.4f",
+                                "loss=%.4f label=%.4f risk=%.4f advantage=%.4f "
+                                "rate_w=%.4f aux_ret=%.4f local_adv=%.4f",
                                 sup_updates,
                                 sup_epoch + 1,
                                 replay_idx,
@@ -2560,6 +2751,7 @@ class HRL_Trainer:
                                 diag.get("sup_loss", 0.0),
                                 diag.get("aux_mdd_loss", 0.0),
                                 diag.get("aux_switch_adv_loss", 0.0),
+                                diag.get("switch_rate_weighted_loss", 0.0),
                                 diag.get("aux_return_loss", 0.0),
                                 diag.get("local_adv_loss", 0.0),
                             )
@@ -2574,7 +2766,8 @@ class HRL_Trainer:
                         pretrain_update_count += 1
                         self.logger.info(
                             "[CTRL-AUX] update=%s epoch=%s final-batch replay=%s/%s "
-                            "loss=%.4f label=%.4f risk=%.4f advantage=%.4f aux_ret=%.4f local_adv=%.4f",
+                            "loss=%.4f label=%.4f risk=%.4f advantage=%.4f "
+                            "rate_w=%.4f aux_ret=%.4f local_adv=%.4f",
                             sup_updates,
                             sup_epoch + 1,
                             replay_idx,
@@ -2583,6 +2776,7 @@ class HRL_Trainer:
                             diag.get("sup_loss", 0.0),
                             diag.get("aux_mdd_loss", 0.0),
                             diag.get("aux_switch_adv_loss", 0.0),
+                            diag.get("switch_rate_weighted_loss", 0.0),
                             diag.get("aux_return_loss", 0.0),
                             diag.get("local_adv_loss", 0.0),
                         )
@@ -2797,7 +2991,7 @@ class HRL_Trainer:
                         "[CTRL-PG] update=%s epoch=%s windows=%s/%s loss=%.4f loss_abs=%.4f "
                         "policy=%.4f policy_abs=%.4f "
                         "ent_loss=%.4f aux_ret_w=%.4f aux_mdd_w=%.4f aux_sw_w=%.4f overflow_act=%.4f "
-                        "sup_w=%.4f local_adv_w=%.4f expected_sw=%.4f value_w=%.4f "
+                        "sup_w=%.4f local_adv_w=%.4f rate_w=%.4f hard_rate=%.3f value_w=%.4f "
                         "reward=%.4f rew_abs=%.4f rew_std=%.4f rew_min=%.4f rew_max=%.4f "
                         "entropy=%.4f aux_ret=%.4f aux_mdd=%.4f sup=%.4f "
                         "local_adv=%.4f value=%.4f",
@@ -2811,7 +3005,8 @@ class HRL_Trainer:
                         diag.get("overflow_action_loss", 0.0),
                         diag.get("sup_weighted_loss", 0.0),
                         diag.get("local_adv_weighted_loss", 0.0),
-                        diag.get("expected_switch_loss", 0.0),
+                        diag.get("switch_rate_weighted_loss", 0.0),
+                        diag.get("hard_switch_rate", 0.0),
                         diag.get("value_weighted_loss", 0.0),
                         diag.get("reward_mean", 0.0),
                         diag.get("reward_abs_mean", 0.0),
@@ -2832,7 +3027,7 @@ class HRL_Trainer:
                     "[CTRL-PG] update=%s epoch=%s final-batch loss=%.4f loss_abs=%.4f "
                     "policy=%.4f policy_abs=%.4f "
                     "ent_loss=%.4f aux_ret_w=%.4f aux_mdd_w=%.4f aux_sw_w=%.4f overflow_act=%.4f "
-                    "sup_w=%.4f local_adv_w=%.4f expected_sw=%.4f value_w=%.4f "
+                    "sup_w=%.4f local_adv_w=%.4f rate_w=%.4f hard_rate=%.3f value_w=%.4f "
                     "reward=%.4f rew_abs=%.4f rew_std=%.4f rew_min=%.4f rew_max=%.4f "
                     "entropy=%.4f aux_ret=%.4f aux_mdd=%.4f sup=%.4f "
                     "local_adv=%.4f value=%.4f",
@@ -2846,7 +3041,8 @@ class HRL_Trainer:
                     diag.get("overflow_action_loss", 0.0),
                     diag.get("sup_weighted_loss", 0.0),
                     diag.get("local_adv_weighted_loss", 0.0),
-                    diag.get("expected_switch_loss", 0.0),
+                    diag.get("switch_rate_weighted_loss", 0.0),
+                    diag.get("hard_switch_rate", 0.0),
                     diag.get("value_weighted_loss", 0.0),
                     diag.get("reward_mean", 0.0),
                     diag.get("reward_abs_mean", 0.0),

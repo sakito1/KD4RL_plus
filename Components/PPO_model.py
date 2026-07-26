@@ -522,14 +522,14 @@ class MonitorAC(nn.Module):
         self.risk_mlp = nn.Sequential(
             nn.Linear(risk_in, hidden_dim),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Identity(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
         )
         self.advantage_mlp = nn.Sequential(
             nn.Linear(advantage_in, hidden_dim),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Identity(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
         )
@@ -537,7 +537,7 @@ class MonitorAC(nn.Module):
         self.switch_mlp = nn.Sequential(
             nn.Linear(fusion_in, hidden_dim),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Identity(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
         )
@@ -613,16 +613,51 @@ class MonitorAC(nn.Module):
             port_state,
             switch_action=None,
             asset_state=None,
+            hold_exec_weights=None,
+            switch_exec_weights=None,
+            remaining_horizon=None,
     ):
         asset_seq = self._encode_asset_sequence(asset_state)
         hold_weights = self._soft_hold_weights(weights_drift)
         switch_weights = self._soft_hold_weights(switch_action) if switch_action is not None else hold_weights
+        advantage_hold_weights = (
+            self._soft_hold_weights(hold_exec_weights)
+            if hold_exec_weights is not None
+            else hold_weights
+        )
+        advantage_switch_weights = (
+            self._soft_hold_weights(switch_exec_weights)
+            if switch_exec_weights is not None
+            else switch_weights
+        )
+        if remaining_horizon is None:
+            horizon_gate = torch.ones(
+                (hold_weights.shape[0], 1),
+                dtype=hold_weights.dtype,
+                device=hold_weights.device,
+            )
+        else:
+            horizon_gate = torch.as_tensor(
+                remaining_horizon,
+                dtype=hold_weights.dtype,
+                device=hold_weights.device,
+            ).reshape(hold_weights.shape[0], -1)[:, :1].clamp(0.0, 1.0)
 
         last_emb = asset_seq[:, :, -1, :]
         portfolio_last = torch.sum(last_emb * hold_weights.unsqueeze(-1), dim=1)
-        switch_last = torch.sum(last_emb * switch_weights.unsqueeze(-1), dim=1)
+        advantage_hold_last = torch.sum(
+            last_emb * advantage_hold_weights.unsqueeze(-1),
+            dim=1,
+        )
+        advantage_switch_last = torch.sum(
+            last_emb * advantage_switch_weights.unsqueeze(-1),
+            dim=1,
+        )
         state5 = self._state_features(port_state, hold_weights)
-        action_state = self._switch_action_features(hold_weights, switch_weights)
+        action_state = self._switch_action_features(
+            advantage_hold_weights,
+            advantage_switch_weights,
+        )
 
         query = self.query_mlp(torch.cat([portfolio_last, state5], dim=-1))
         asset_ctx1 = self._temporal_attention_global(
@@ -636,7 +671,14 @@ class MonitorAC(nn.Module):
             query2, asset_seq, self.attn2_q, self.attn2_k, self.attn2_v
         )
         portfolio_ctx = torch.sum(asset_ctx2 * hold_weights.unsqueeze(-1), dim=1)
-        switch_ctx = torch.sum(asset_ctx2 * switch_weights.unsqueeze(-1), dim=1)
+        advantage_hold_ctx = torch.sum(
+            asset_ctx2 * advantage_hold_weights.unsqueeze(-1),
+            dim=1,
+        )
+        advantage_switch_ctx = torch.sum(
+            asset_ctx2 * advantage_switch_weights.unsqueeze(-1),
+            dim=1,
+        )
 
         risk_feat = torch.cat([
             portfolio_last,
@@ -644,10 +686,10 @@ class MonitorAC(nn.Module):
             state5,
         ], dim=-1)
         advantage_feat = torch.cat([
-            portfolio_last,
-            portfolio_ctx,
-            switch_last - portfolio_last,
-            switch_ctx - portfolio_ctx,
+            advantage_hold_last,
+            advantage_hold_ctx,
+            (advantage_switch_last - advantage_hold_last) * horizon_gate,
+            (advantage_switch_ctx - advantage_hold_ctx) * horizon_gate,
             action_state,
         ], dim=-1)
         risk_embedding = self.risk_mlp(risk_feat)
@@ -681,17 +723,25 @@ class MonitorAC(nn.Module):
         }
 
     def encode(self, weights_drift, port_state,
-               switch_action=None, asset_state=None):
+               switch_action=None, asset_state=None, hold_exec_weights=None,
+               switch_exec_weights=None, remaining_horizon=None):
         return self.decision_stats(
             weights_drift, port_state,
-            switch_action=switch_action, asset_state=asset_state
+            switch_action=switch_action, asset_state=asset_state,
+            hold_exec_weights=hold_exec_weights,
+            switch_exec_weights=switch_exec_weights,
+            remaining_horizon=remaining_horizon,
         )["value_feat"]
 
     def pi(self, weights_drift, port_state, switch_action=None,
-           deterministic=False, asset_state=None):
+           deterministic=False, asset_state=None, hold_exec_weights=None,
+           switch_exec_weights=None, remaining_horizon=None):
         stats = self.decision_stats(
             weights_drift, port_state,
-            switch_action=switch_action, asset_state=asset_state
+            switch_action=switch_action, asset_state=asset_state,
+            hold_exec_weights=hold_exec_weights,
+            switch_exec_weights=switch_exec_weights,
+            remaining_horizon=remaining_horizon,
         )
         zeros = torch.zeros_like(stats["policy_logit"])
         logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)
@@ -702,17 +752,25 @@ class MonitorAC(nn.Module):
         return action, log_prob, entropy, logits
 
     def value(self, weights_drift, port_state,
-              switch_action=None, asset_state=None):
+              switch_action=None, asset_state=None, hold_exec_weights=None,
+              switch_exec_weights=None, remaining_horizon=None):
         return self.decision_stats(
             weights_drift, port_state,
-            switch_action=switch_action, asset_state=asset_state
+            switch_action=switch_action, asset_state=asset_state,
+            hold_exec_weights=hold_exec_weights,
+            switch_exec_weights=switch_exec_weights,
+            remaining_horizon=remaining_horizon,
         )["value"]
 
     def forward(self, weights_drift, port_state, switch_action=None,
-                deterministic=False, asset_state=None):
+                deterministic=False, asset_state=None, hold_exec_weights=None,
+                switch_exec_weights=None, remaining_horizon=None):
         stats = self.decision_stats(
             weights_drift, port_state,
-            switch_action=switch_action, asset_state=asset_state
+            switch_action=switch_action, asset_state=asset_state,
+            hold_exec_weights=hold_exec_weights,
+            switch_exec_weights=switch_exec_weights,
+            remaining_horizon=remaining_horizon,
         )
         zeros = torch.zeros_like(stats["policy_logit"])
         logits = torch.stack([zeros, stats["policy_logit"]], dim=-1)

@@ -66,7 +66,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --controller_aux_return_coef 0.0 \
   --controller_aux_mdd_coef 0.1 \
   --controller_aux_switch_adv_coef 1.0 \
-  --controller_aux_switch_adv_loss_type smooth_l1 \
+  --controller_aux_switch_adv_loss_type mse \
   --controller_compute_switch_advantage \
   --controller_aux_return_target_scale 1.0 \
   --controller_aux_mdd_target_scale 1.0 \

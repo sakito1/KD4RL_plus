@@ -56,7 +56,7 @@ class EndToEndHrlControllerJointScriptTests(unittest.TestCase):
         self.assertIn("--controller_epochs 3", result.stdout)
         self.assertIn("--controller_fixed_pool_limit 12", result.stdout)
         self.assertIn("--controller_pg_logprob_reduction mean", result.stdout)
-        self.assertIn("--controller_aux_switch_adv_loss_type smooth_l1", result.stdout)
+        self.assertIn("--controller_aux_switch_adv_loss_type mse", result.stdout)
         self.assertNotIn("--controller_switch_adv_logit_coef", result.stdout)
         self.assertNotIn("--controller_switch_adv_logit_detach", result.stdout)
         self.assertIn("--controller_eval_switch_threshold 0.5", result.stdout)

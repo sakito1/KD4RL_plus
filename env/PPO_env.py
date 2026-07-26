@@ -508,7 +508,7 @@ class PPO_Env(gym.Env):
         # =====================================================================
         # =====================================================================
 
-        current_holdings_drift = self._normalize(self.prev_base_weight * r_past)
+        current_holdings_drift = self._normalize(self.prev_weights * r_past)
         remaining_hold_horizon = max(1, int(self.max_hold) - int(self.t_held))
         controller_hold_return_target, controller_hold_mdd_target = (
             self._future_portfolio_return_and_relative_market_drawdown(

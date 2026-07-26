@@ -157,7 +157,7 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
             "--controller_aux_switch_adv_coef",
             "0.15",
             "--controller_aux_switch_adv_loss_type",
-            "weighted_bce",
+            "mse",
             "--controller_switch_adv_logit_coef",
             "2.0",
             "--controller_switch_adv_logit_scale",
@@ -216,7 +216,7 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--controller_aux_return_coef") + 1], "0.2")
         self.assertEqual(command[command.index("--controller_aux_mdd_coef") + 1], "0.2")
         self.assertEqual(command[command.index("--controller_aux_switch_adv_coef") + 1], "0.15")
-        self.assertEqual(command[command.index("--controller_aux_switch_adv_loss_type") + 1], "weighted_bce")
+        self.assertEqual(command[command.index("--controller_aux_switch_adv_loss_type") + 1], "mse")
         self.assertEqual(command[command.index("--controller_switch_adv_logit_coef") + 1], "2.0")
         self.assertEqual(command[command.index("--controller_switch_adv_logit_scale") + 1], "0.02")
         self.assertIn("--controller_switch_adv_logit_detach", command)
@@ -269,6 +269,10 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
             "--controller_aux_mdd_coef", "0.1",
             "--controller_aux_switch_adv_coef", "1.0",
             "--controller_entropy_coef", "0.01",
+            "--controller_switch_rate_penalty_coef", "5.0",
+            "--controller_switch_rate_min", "0.05",
+            "--controller_switch_rate_max", "0.15",
+            "--controller_switch_rate_margin", "0.1",
         ])
 
         command = run_hrl_training.build_child_command(
@@ -285,6 +289,10 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--controller_sup_coef") + 1], "0.1")
         self.assertEqual(command[command.index("--controller_sup_pretrain_rollout_len") + 1], "300")
         self.assertEqual(command[command.index("--controller_rollout_len") + 1], "300")
+        self.assertEqual(command[command.index("--controller_switch_rate_penalty_coef") + 1], "5.0")
+        self.assertEqual(command[command.index("--controller_switch_rate_min") + 1], "0.05")
+        self.assertEqual(command[command.index("--controller_switch_rate_max") + 1], "0.15")
+        self.assertEqual(command[command.index("--controller_switch_rate_margin") + 1], "0.1")
 
     def test_controller_pretrain_only_is_forwarded_to_child(self):
         args = self._args_from_cli([

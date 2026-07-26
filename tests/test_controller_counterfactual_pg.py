@@ -29,7 +29,8 @@ class _FakeControllerMonitor:
         return self
 
     def decision_stats(self, weights_drift, port_state,
-                       switch_action=None, asset_state=None):
+                       switch_action=None, asset_state=None, **kwargs):
+        del kwargs
         return {
             "policy_logit": torch.tensor([self.policy_logit], requires_grad=True),
             "exit_prob": torch.sigmoid(torch.tensor([self.policy_logit], requires_grad=True)),
@@ -166,6 +167,135 @@ class _FakeControllerPGWindowEnv:
 
 
 class ControllerCounterfactualPGTests(unittest.TestCase):
+    def test_top_tail_rate_loss_is_zero_when_logit_tails_satisfy_band(self):
+        logits = torch.tensor([0.2, 0.0, 0.0] + [-0.2] * 17)
+
+        loss, hard_rate = HRL_Trainer._controller_top_tail_rate_loss(
+            logits,
+            min_rate=0.05,
+            max_rate=0.15,
+            margin=0.1,
+        )
+
+        self.assertAlmostEqual(float(hard_rate), 0.05, places=6)
+        self.assertAlmostEqual(float(loss), 0.0, places=6)
+
+    def test_top_tail_rate_loss_pushes_excessive_positive_logits_down(self):
+        logits = torch.full((20,), 1.0, requires_grad=True)
+
+        loss, hard_rate = HRL_Trainer._controller_top_tail_rate_loss(
+            logits,
+            min_rate=0.05,
+            max_rate=0.15,
+            margin=0.1,
+        )
+        loss.backward()
+
+        self.assertEqual(float(hard_rate), 1.0)
+        self.assertGreater(float(loss), 0.0)
+        self.assertEqual(int(torch.count_nonzero(logits.grad > 0)), 17)
+
+    def test_top_tail_rate_loss_pushes_at_least_top_five_percent_up(self):
+        logits = torch.full((20,), -1.0, requires_grad=True)
+
+        loss, hard_rate = HRL_Trainer._controller_top_tail_rate_loss(
+            logits,
+            min_rate=0.05,
+            max_rate=0.15,
+            margin=0.1,
+        )
+        loss.backward()
+
+        self.assertEqual(float(hard_rate), 0.0)
+        self.assertGreater(float(loss), 0.0)
+        self.assertEqual(int(torch.count_nonzero(logits.grad < 0)), 1)
+
+    def test_controller_terms_mean_logprob_weights_every_daily_action_equally(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.device = torch.device("cpu")
+        trainer.cfg = SimpleNamespace(
+            controller_aux_return_coef=0.0,
+            controller_aux_mdd_coef=0.0,
+            controller_sup_coef=0.0,
+            controller_use_switch_supervision=False,
+            controller_max_switches=0,
+            controller_pg_logprob_reduction="mean",
+        )
+        trainer.agent = SimpleNamespace(
+            net=SimpleNamespace(mon=_FakeControllerMonitor(policy_logit=1.0))
+        )
+
+        def make_record(action):
+            return {
+                "weights_drift": torch.ones(1, 1),
+                "port_state": torch.zeros(1, 6),
+                "switch_action": torch.ones(1, 1),
+                "asset_state": None,
+                "action": torch.tensor([action]),
+                "free_switch_index": 1,
+            }
+
+        terms = trainer._controller_episode_terms([
+            [make_record(1)],
+            [make_record(0), make_record(0), make_record(0)],
+        ])
+        episode_logprob = terms[0]
+        dist = Categorical(logits=torch.tensor([[0.0, 1.0]]))
+        expected = torch.stack([
+            dist.log_prob(torch.tensor([1])).view(()),
+            dist.log_prob(torch.tensor([0])).view(()),
+            dist.log_prob(torch.tensor([0])).view(()),
+            dist.log_prob(torch.tensor([0])).view(()),
+        ]).mean()
+
+        torch.testing.assert_close(episode_logprob.detach(), expected)
+
+    def test_guidance_annotation_keeps_natural_class_imbalance(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.cfg = SimpleNamespace(
+            controller_guidance_risk_threshold=0.05,
+            controller_guidance_advantage_threshold=0.05,
+        )
+
+        records = [
+            {
+                "target_mdd": torch.tensor([risk]),
+                "switch_advantage": torch.tensor([advantage]),
+            }
+            for risk, advantage in [
+                (0.01, 0.01),
+                (0.01, 0.01),
+                (0.01, 0.01),
+                (0.01, 0.06),
+            ]
+        ]
+        trainer._annotate_controller_guidance_segments([records])
+
+        self.assertEqual([float(record["sup_label"]) for record in records], [0.0, 0.0, 0.0, 1.0])
+        self.assertEqual([float(record["sup_weight"]) for record in records], [1.0, 1.0, 1.0, 1.0])
+
+    def test_controller_record_preserves_aligned_advantage_inputs(self):
+        obs = {
+            "weights_drift": torch.tensor([[0.6, 0.4]]),
+            "port_state": torch.zeros(1, 6),
+            "outer_state": torch.zeros(1, 2, 3, 4),
+        }
+        hold_exec = torch.tensor([[0.7, 0.3]])
+        switch_exec = torch.tensor([[0.2, 0.8]])
+
+        record = HRL_Trainer._detach_controller_record(
+            obs,
+            torch.tensor([[0.1, 0.9]]),
+            torch.tensor([0]),
+            hold_exec_weights=hold_exec,
+            switch_exec_weights=switch_exec,
+            remaining_horizon=torch.tensor([0.4]),
+        )
+
+        torch.testing.assert_close(record["hold_exec_weights"], hold_exec)
+        torch.testing.assert_close(record["switch_exec_weights"], switch_exec)
+        torch.testing.assert_close(record["remaining_horizon"], torch.tensor([0.4]))
+
     def test_controller_pretrain_only_saves_without_running_pg(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
         saved = []
@@ -253,11 +383,7 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertGreater(weights[1], 0.0)
         self.assertGreater(weights[2], 0.0)
         self.assertGreater(weights[3], 0.0)
-        self.assertAlmostEqual(
-            weights[0] + weights[1] + weights[3],
-            weights[2],
-            delta=1e-6,
-        )
+        self.assertEqual(weights, [1.0, 1.0, 1.0, 1.0])
 
     def test_segment_budget_keeps_rollout_within_max_segments(self):
         self.assertTrue(segment_budget_allows_switch(
@@ -971,6 +1097,40 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertIsNotNone(aux_mdd_loss)
         self.assertIsNone(sup_loss)
 
+    def test_controller_terms_use_scaled_mse_for_risk_regression(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.device = torch.device("cpu")
+        trainer.cfg = SimpleNamespace(
+            controller_aux_return_coef=0.0,
+            controller_aux_mdd_coef=1.0,
+            controller_aux_mdd_target_scale=20.0,
+            controller_aux_switch_adv_coef=0.0,
+            controller_sup_coef=0.0,
+            controller_use_switch_supervision=False,
+            controller_max_switches=0,
+            controller_local_adv_coef=0.0,
+        )
+        trainer.agent = SimpleNamespace(
+            net=SimpleNamespace(mon=_FakeControllerMonitor())
+        )
+        record = {
+            "weights_drift": torch.ones(1, 1),
+            "port_state": torch.zeros(1, 6),
+            "switch_action": torch.ones(1, 1),
+            "asset_state": None,
+            "action": torch.tensor([0]),
+            "target_mdd": torch.tensor([0.02]),
+        }
+
+        terms = trainer._controller_episode_terms([[record]])
+        aux_mdd_loss = terms[4]
+
+        expected = torch.nn.functional.mse_loss(
+            torch.tensor([0.04]),
+            torch.tensor([0.40]),
+        )
+        torch.testing.assert_close(aux_mdd_loss.detach(), expected)
+
     def test_controller_terms_can_sum_logprob_over_episode_actions(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
         trainer.device = torch.device("cpu")
@@ -1285,21 +1445,21 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         terms = trainer._controller_episode_terms([[record]])
         aux_switch_adv_loss = terms[5]
 
-        expected = torch.nn.functional.smooth_l1_loss(
+        expected = torch.nn.functional.mse_loss(
             torch.tensor([0.02]),
             torch.tensor([0.40]),
         )
         self.assertIsNotNone(aux_switch_adv_loss)
         torch.testing.assert_close(aux_switch_adv_loss.detach(), expected)
 
-    def test_controller_terms_can_use_weighted_bce_switch_advantage_aux_loss(self):
+    def test_controller_terms_regress_continuous_switch_advantage(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
         trainer.device = torch.device("cpu")
         trainer.cfg = SimpleNamespace(
             controller_aux_return_coef=0.0,
             controller_aux_mdd_coef=0.0,
             controller_aux_switch_adv_coef=1.0,
-            controller_aux_switch_adv_loss_type="weighted_bce",
+            controller_aux_switch_adv_loss_type="mse",
             controller_aux_switch_adv_target_scale=1.0,
             controller_local_adv_scale=0.1,
             controller_local_adv_clip=10.0,
@@ -1332,10 +1492,58 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         terms = trainer._controller_episode_terms([[record]])
         aux_switch_adv_loss = terms[5]
 
-        expected = torch.nn.functional.binary_cross_entropy_with_logits(
-            torch.tensor([0.02 / 0.1]),
-            torch.tensor([1.0]),
+        expected = torch.nn.functional.mse_loss(
+            torch.tensor([0.02]),
+            torch.tensor([0.20]),
         )
+        self.assertIsNotNone(aux_switch_adv_loss)
+        torch.testing.assert_close(aux_switch_adv_loss.detach(), expected)
+
+    def test_controller_terms_advantage_regression_preserves_sign_and_magnitude(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        trainer.device = torch.device("cpu")
+        trainer.cfg = SimpleNamespace(
+            controller_aux_return_coef=0.0,
+            controller_aux_mdd_coef=0.0,
+            controller_aux_switch_adv_coef=1.0,
+            controller_aux_switch_adv_loss_type="mse",
+            controller_aux_switch_adv_target_scale=1.0,
+            controller_sup_coef=0.0,
+            controller_use_switch_supervision=False,
+            controller_max_switches=0,
+            controller_local_adv_coef=0.0,
+        )
+        trainer.agent = SimpleNamespace(
+            net=SimpleNamespace(mon=_FakeControllerMonitor())
+        )
+
+        def make_record(advantage):
+            return {
+                "weights_drift": torch.ones(1, 1),
+                "port_state": torch.zeros(1, 6),
+                "switch_action": torch.ones(1, 1),
+                "asset_state": None,
+                "action": torch.tensor([1]),
+                "free_switch_index": 1,
+                "switch_advantage": torch.tensor([advantage]),
+            }
+
+        terms = trainer._controller_episode_terms([[
+            make_record(0.20),
+            make_record(-0.05),
+        ]])
+        aux_switch_adv_loss = terms[5]
+
+        expected = torch.stack([
+            torch.nn.functional.mse_loss(
+                torch.tensor([0.02]),
+                torch.tensor([0.20]),
+            ),
+            torch.nn.functional.mse_loss(
+                torch.tensor([0.02]),
+                torch.tensor([-0.05]),
+            ),
+        ]).mean()
         self.assertIsNotNone(aux_switch_adv_loss)
         torch.testing.assert_close(aux_switch_adv_loss.detach(), expected)
 
@@ -1456,6 +1664,28 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics["local_adv_loss"], 0.5)
         self.assertAlmostEqual(diagnostics["loss"], 0.1)
 
+    def test_controller_aux_pretrain_adds_weighted_switch_rate_loss(self):
+        trainer = HRL_Trainer.__new__(HRL_Trainer)
+        opt = _FakeOptimizer()
+        trainer.cfg = SimpleNamespace(
+            controller_aux_return_coef=0.0,
+            controller_aux_mdd_coef=0.0,
+            controller_aux_switch_adv_coef=0.0,
+            controller_local_adv_coef=0.0,
+            controller_use_switch_supervision=True,
+            controller_guidance_pretrain_coef=1.0,
+        )
+        trainer.agent = SimpleNamespace(opt_mon=opt, max_grad_norm=None)
+        switch_rate_loss = torch.tensor(0.25, requires_grad=True)
+
+        diagnostics = trainer._update_controller_aux_batch(
+            switch_rate_losses=[switch_rate_loss],
+        )
+
+        self.assertTrue(opt.step_called)
+        self.assertAlmostEqual(diagnostics["loss"], 0.25)
+        self.assertAlmostEqual(diagnostics["switch_rate_weighted_loss"], 0.25)
+
     def test_controller_aux_pretrain_uses_full_guidance_risk_advantage_loss(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
         opt = _FakeOptimizer()
@@ -1475,7 +1705,7 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
             sup_losses=[torch.tensor(0.4, requires_grad=True)],
         )
 
-        self.assertAlmostEqual(diagnostics["loss"], 0.1 * 0.2 + 1.0 * 0.3 + 1.0 * 0.4)
+        self.assertAlmostEqual(diagnostics["loss"], 0.2 + 0.3 + 0.4)
         self.assertAlmostEqual(diagnostics["sup_weighted_loss"], 0.4)
 
     def test_controller_pg_uses_guidance_risk_advantage_and_entropy_coefficients(self):
@@ -1545,18 +1775,20 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         trainer.cfg = SimpleNamespace(controller_aux_replay_epochs=3)
         calls = {"terms": 0, "updates": 0}
 
-        def fake_terms(episode_segments):
+        def fake_terms(episode_segments, *, return_policy_logits=False):
             self.assertEqual(episode_segments, ["segment"])
             calls["terms"] += 1
             loss = torch.tensor(float(calls["terms"]), requires_grad=True)
-            return None, None, None, None, None, None, None, None, loss, None
+            terms = (None, None, None, None, None, None, None, None, loss, None)
+            return (terms, None) if return_policy_logits else terms
 
         def fake_update(aux_return_losses=None, aux_mdd_losses=None,
                         aux_switch_adv_losses=None, local_adv_losses=None,
-                        sup_losses=None):
+                        sup_losses=None, switch_rate_losses=None):
             calls["updates"] += 1
             self.assertEqual(len(local_adv_losses), 1)
             self.assertEqual(sup_losses, [])
+            self.assertEqual(switch_rate_losses, [])
             return {"loss": float(local_adv_losses[0].detach().item())}
 
         trainer._controller_episode_terms = fake_terms
@@ -1671,14 +1903,16 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         trainer.agent = SimpleNamespace(opt_mon=opt, max_grad_norm=None, net=SimpleNamespace(mon=torch.nn.Linear(1, 1)))
         calls = []
 
-        def fake_terms(episode_segments):
+        def fake_terms(episode_segments, *, return_policy_logits=False):
             calls.append(episode_segments)
             episode_idx = int(episode_segments[0]["episode_idx"])
             sign = -1.0 if episode_idx % 2 else 1.0
             log_prob = torch.tensor(sign * float(episode_idx) / 10.0, requires_grad=True)
             entropy = torch.tensor(0.0, requires_grad=True)
             episode_value = torch.tensor(0.0, requires_grad=True)
-            return log_prob, entropy, episode_value, None, None, None, None, None, None, None
+            terms = (log_prob, entropy, episode_value, None, None, None, None, None, None, None)
+            policy_logits = torch.tensor([0.0], requires_grad=True)
+            return (terms, policy_logits) if return_policy_logits else terms
 
         trainer._controller_episode_terms = fake_terms
         trainer._controller_switch_supervision_enabled = lambda: False
@@ -1789,6 +2023,7 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertAlmostEqual(summary["p50"], 0.4955)
         self.assertEqual(summary["gt_0p5"], 2)
         self.assertEqual(summary["gt_0p45"], 3)
+        self.assertAlmostEqual(summary["hard_switch_rate"], 0.5)
 
     def test_controller_switch_advantage_summary_reports_sign_distribution(self):
         summary = HRL_Trainer._controller_switch_advantage_summary(
@@ -1810,26 +2045,23 @@ class ControllerCounterfactualPGTests(unittest.TestCase):
         self.assertAlmostEqual(summary["negative_exit_prob_mean"], 0.2)
         self.assertAlmostEqual(summary["exit_prob_gap"], 0.5)
 
-    def test_inner_adjusted_switch_advantage_compares_inner_executed_weights(self):
+    def test_actual_holdings_switch_advantage_uses_predecision_drifted_holdings(self):
         trainer = HRL_Trainer.__new__(HRL_Trainer)
         env = _FakeSwitchAdvEnv()
         obs = {"weights_drift": torch.tensor([[0.50, 0.50]])}
-        hold_exec = torch.tensor([[0.60, 0.40]])
         switch_exec = torch.tensor([[0.20, 0.80]])
 
-        advantage = trainer._controller_inner_adjusted_switch_advantage(
+        advantage = trainer._controller_actual_holdings_switch_advantage(
             env,
             obs,
-            hold_exec,
             switch_exec,
         )
 
-        hold_ret, _ = env._future_portfolio_return_and_max_drawdown(hold_exec.flatten(), env.day, 20)
+        actual = env._normalize(obs["weights_drift"].flatten())
+        hold_ret, _ = env._future_portfolio_return_and_max_drawdown(actual, env.day, 20)
         switch_ret, _ = env._future_portfolio_return_and_max_drawdown(switch_exec.flatten(), env.day, 20)
-        current = env._normalize(obs["weights_drift"])
-        hold_turnover = torch.sum(torch.abs(env._normalize(hold_exec) - current))
-        switch_turnover = torch.sum(torch.abs(env._normalize(switch_exec) - current))
-        expected = switch_ret - hold_ret - (switch_turnover - hold_turnover) * env.transaction_cost_pct
+        switch_turnover = torch.sum(torch.abs(env._normalize(switch_exec) - actual))
+        expected = switch_ret - hold_ret - switch_turnover * env.transaction_cost_pct
         torch.testing.assert_close(advantage.detach(), expected.detach())
 
 

@@ -326,6 +326,41 @@ class HRL_PPO_Agent:
         full = selected_weights.new_zeros((selected_weights.shape[0], num_assets))
         return full.scatter(1, indices, selected_weights)
 
+    def _preview_inner_exec(self, obs, base_used, weight_drift, *, force_inner_zero=False):
+        if force_inner_zero:
+            return base_used.detach()
+        inner_state_used, inner_base_used, inner_weight_drift, inner_indices = self._select_inner_inputs(
+            obs,
+            base_used,
+            weight_drift,
+        )
+        with torch.no_grad():
+            if hasattr(self.net.inner, "build_inner_action_simple"):
+                alpha = float(getattr(self.cfg, "inner_max_boundary", 1.0))
+                selected, _, _, _, _ = self.net.inner.build_inner_action_simple(
+                    inner_state_used,
+                    inner_base_used,
+                    inner_weight_drift,
+                    alpha=alpha,
+                    deterministic=True,
+                )
+            else:
+                raw, _, _ = self.net.inner.pi(
+                    inner_state_used,
+                    inner_base_used,
+                    inner_weight_drift,
+                    deterministic=True,
+                )
+                adjusted = inner_base_used * torch.exp(
+                    torch.clamp(raw, -3.0, 3.0) * self.cfg.inner_max_boundary
+                )
+                selected = adjusted / (adjusted.sum(dim=1, keepdim=True) + 1e-12)
+        return self._scatter_selected_weights(
+            selected,
+            inner_indices,
+            base_used.shape[1],
+        ).detach()
+
     def _select_outer_state_batch(self, outer_state, idx_or_mask=None):
         if outer_state is None:
             return None
@@ -373,6 +408,9 @@ class HRL_PPO_Agent:
         # =========================
         # Monitor
         # =========================
+        controller_hold_exec = None
+        controller_switch_exec = None
+        controller_remaining_horizon = None
         if force_switch is not None:
             B = weight_drift.shape[0]
             act_mon = torch.full((B,), force_switch, dtype=torch.long, device=self.device)
@@ -381,10 +419,23 @@ class HRL_PPO_Agent:
             is_locked_val = 1 if force_locked else 0
             is_locked = torch.full((B,), is_locked_val, dtype=torch.long, device=self.device)
         else:
+            controller_hold_exec = weight_drift.detach()
+            controller_switch_exec = self._preview_inner_exec(
+                obs,
+                act_out,
+                weight_drift,
+                force_inner_zero=force_inner_zero,
+            )
+            controller_remaining_horizon = (
+                1.0 - obs["port_state"][:, :1]
+            ).clamp(0.0, 1.0)
             act_mon_samp, logp_mon_samp, _, _, val_mon = self.net.mon(
                 weight_drift, obs['port_state'], switch_action=act_out,
                 deterministic=(not is_train),
                 asset_state=obs.get('outer_state'),
+                hold_exec_weights=controller_hold_exec,
+                switch_exec_weights=controller_switch_exec,
+                remaining_horizon=controller_remaining_horizon,
             )
             act_mon = act_mon_samp
             logp_mon = logp_mon_samp
@@ -456,6 +507,9 @@ class HRL_PPO_Agent:
             'inner_base_used': inner_base_used,
             'inner_weights_drift': inner_weight_drift,
             'inner_indices': inner_indices,
+            'controller_hold_exec': controller_hold_exec,
+            'controller_switch_exec': controller_switch_exec,
+            'controller_remaining_horizon': controller_remaining_horizon,
         }
 
     def update(self, buffer_data, phase='joint', train_monitor=None):

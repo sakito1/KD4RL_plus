@@ -343,6 +343,75 @@ class ActorScoreSupervisionTests(unittest.TestCase):
         torch.testing.assert_close(info["controller_hold_mdd_target"], expected_mdd)
         torch.testing.assert_close(info["controller_switch_advantage"], expected_switch_advantage)
 
+    def test_env_controller_aux_targets_use_actual_drifted_holdings(self):
+        env = PPO_Env.__new__(PPO_Env)
+        env.device = torch.device("cpu")
+        env.day = 1
+        env.stop_step = 5
+        env.total_days = 6
+        env.num_stocks = 3
+        env.max_hold = 4
+        env.min_hold = 2
+        env.transaction_cost_pct = 0.0
+        env.risk_gamma = 5.0
+        env.reward_scale_portfolio = 1.0
+        env.reward_scale_base = 1.0
+        env.reward_scale_inner = 1.0
+        env.reward_scale_controller = 1.0
+        env.controller_sup_enabled = False
+        env.controller_switch_advantage_enabled = False
+        env.portfolio_value = torch.tensor(1.0)
+        env.prev_weights = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
+        env.prev_base_weight = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
+        env.t_held = 2
+        env.peak_value = 1.0
+        env.segment_init_value = 1.0
+        env.cumulative_alpha = 0.0
+        env.cumulative_risk = 0.0
+        env.all_dates = pd.date_range("2020-01-01", periods=8)
+        env.ratio = torch.tensor(
+            [
+                [1.00, 1.20, 1.10, 1.00, 1.00],
+                [1.00, 0.80, 0.90, 1.00, 1.00],
+                [1.00, 1.00, 1.00, 1.00, 1.00],
+            ],
+            dtype=torch.float32,
+        )
+        env._get_observation = lambda: {}
+
+        day_before_step = env.day
+        held_before_step = env.t_held
+        r_past = env.ratio[:, day_before_step - 1]
+        actual_drift = env._normalize(env.prev_weights * r_past)
+        base_drift = env._normalize(env.prev_base_weight * r_past)
+        horizon = env.max_hold - held_before_step
+        expected_return, expected_mdd = (
+            env._future_portfolio_return_and_relative_market_drawdown(
+                actual_drift,
+                day_before_step,
+                horizon,
+            )
+        )
+        base_return, base_mdd = (
+            env._future_portfolio_return_and_relative_market_drawdown(
+                base_drift,
+                day_before_step,
+                horizon,
+            )
+        )
+
+        _, _, _, info = env.step(
+            torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32),
+            torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32),
+            outer_action=torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32),
+            is_switch=False,
+        )
+
+        torch.testing.assert_close(info["controller_hold_return_target"], expected_return)
+        torch.testing.assert_close(info["controller_hold_mdd_target"], expected_mdd)
+        self.assertFalse(torch.isclose(expected_return, base_return))
+        self.assertFalse(torch.isclose(expected_mdd, base_mdd))
+
     def test_env_skips_switch_advantage_by_default_for_fast_hrl_steps(self):
         env = PPO_Env.__new__(PPO_Env)
         env.device = torch.device("cpu")
