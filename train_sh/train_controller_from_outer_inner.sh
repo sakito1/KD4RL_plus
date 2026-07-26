@@ -58,11 +58,11 @@ CMD=(
   --warmup_outer_epochs 0
   --warmup_inner_epochs 0
   --joint_epochs 0
-  --controller_epochs 5
+  --controller_epochs 8
   --controller_sup_coef 0.01
-  --controller_sup_pretrain_epochs 4
+  --controller_sup_pretrain_epochs 10
   --controller_sup_pretrain_rollout_len 300
-  --controller_aux_replay_epochs 30
+  --controller_aux_replay_epochs 15
   --controller_guidance_risk_threshold 0.05
   --controller_guidance_advantage_threshold 0.05
   --controller_guidance_pretrain_coef 1.0
