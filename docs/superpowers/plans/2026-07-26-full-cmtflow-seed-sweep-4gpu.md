@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use $superpower-executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking via update_plan.
 
-**Goal:** 为指定 NAS/SH 种子提供从零完成 Outer、Inner、Outer+Inner joint、Controller 和测试的四 GPU 双进程调度入口。
+**Goal:** 为指定 NAS/SH 种子提供从零完成 Outer、Inner、Outer+Inner joint、Controller 和测试的四 GPU 单进程调度入口。
 
-**Architecture:** 单任务 shell 只负责一个市场—种子的完整 `run_hrl_training.py` 命令；调度 shell 只负责把 11 个任务轮询分配给 4 GPU × 2 lane，并汇总测试日志。所有模型训练保持在同一 Python 进程内，从而直接复用阶段 checkpoint，不做额外加载或 Controller 后联合微调。
+**Architecture:** 单任务 shell 只负责一个市场—种子的完整 `run_hrl_training.py` 命令；调度 shell 只负责把 11 个任务轮询分配给 4 GPU × 1 lane，并汇总测试日志。所有模型训练保持在同一 Python 进程内，从而直接复用阶段 checkpoint，不做额外加载或 Controller 后联合微调。
 
 **Tech Stack:** Bash、现有 PyTorch 训练入口、Python pytest。
 
@@ -73,7 +73,7 @@ bash -n train_sh/train_full_cmtflow_seed.sh
 
 Expected: 测试 PASS，shell exit 0。
 
-### Task 2: 四 GPU 八 lane 调度与汇总
+### Task 2: 四 GPU 四 lane 调度与汇总
 
 **Files:**
 - Create: `train_sh/run_full_cmtflow_seed_sweep_4gpu.sh`
@@ -86,8 +86,8 @@ Expected: 测试 PASS，shell exit 0。
 
 ```python
 assert output.count("lane 0 queue:") == 4
-assert output.count("lane 1 queue:") == 4
-assert "Concurrent jobs per GPU: 2" in output
+assert "lane 1 queue:" not in output
+assert "Concurrent jobs per GPU: 1" in output
 ```
 
 - [ ] **Step 2: 运行测试并确认 RED**
@@ -99,20 +99,20 @@ assert "Concurrent jobs per GPU: 2" in output
 
 Expected: FAIL，调度脚本不存在。
 
-- [ ] **Step 3: 实现八 lane 调度**
+- [ ] **Step 3: 实现四 lane 调度**
 
 使用：
 
 ```bash
 GPU_IDS=("${GPU0:-0}" "${GPU1:-1}" "${GPU2:-2}" "${GPU3:-3}")
-JOBS_PER_GPU="${JOBS_PER_GPU:-2}"
+JOBS_PER_GPU="${JOBS_PER_GPU:-1}"
 slot_count=$((4 * JOBS_PER_GPU))
 slot=$((index % slot_count))
 gpu_index=$((slot % 4))
 lane=$((slot / 4))
 ```
 
-八条 queue 后台并行，每条 queue 内串行调用单任务脚本；单任务失败时继续该 lane
+四条 queue 后台并行，每条 queue 内串行调用单任务脚本；单任务失败时继续该 lane
 后续任务，最终统一返回失败状态。
 
 - [ ] **Step 4: 实现测试汇总**
@@ -163,13 +163,13 @@ Expected: 测试 PASS，shell exit 0。
   tests/test_full_cmtflow_seed_sweep_4gpu_script.py
 ```
 
-- [ ] **Step 3: 验证 11 个任务和八条 lane**
+- [ ] **Step 3: 验证 11 个任务和四条 lane**
 
 ```bash
 DRY_RUN=1 bash train_sh/run_full_cmtflow_seed_sweep_4gpu.sh
 ```
 
-Expected: 11 个任务、GPU 0--3 各两条 lane，无 GPU 训练进程启动。
+Expected: 11 个任务、GPU 0--3 各一条 lane，无 GPU 训练进程启动。
 
 - [ ] **Step 4: 检查格式与工作区**
 
@@ -179,4 +179,3 @@ git status --short
 ```
 
 按用户要求不执行 commit 或 push。
-

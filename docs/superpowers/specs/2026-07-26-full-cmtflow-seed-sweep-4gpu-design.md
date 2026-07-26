@@ -7,7 +7,7 @@
 - NAS：44、45、47、50、56、57、58；
 - SH：44、46、49、54。
 
-使用四张 GPU，每张 GPU 同时运行两个独立种子进程，总并发上限为八。
+使用四张 GPU，每张 GPU 同时只运行一个独立种子进程，总并发上限为四。
 
 ## 单任务训练流程
 
@@ -46,15 +46,15 @@ last_model.pth
 
 ## 四 GPU 调度
 
-调度器建立八条 lane：
+调度器建立四条 lane：
 
-- GPU 0：lane 0、lane 1；
-- GPU 1：lane 0、lane 1；
-- GPU 2：lane 0、lane 1；
-- GPU 3：lane 0、lane 1。
+- GPU 0：lane 0；
+- GPU 1：lane 0；
+- GPU 2：lane 0；
+- GPU 3：lane 0。
 
-11 个任务轮询分配到八条 lane。八条 lane 并行，每条 lane 内任务串行，因此每张
-GPU 同时最多两个进程。市场种子、GPU 编号和每卡并发数均允许通过环境变量覆盖。
+11 个任务轮询分配到四条 lane。四条 lane 并行，每条 lane 内任务串行，因此每张
+GPU 同时最多一个进程。市场种子、GPU 编号和每卡并发数均允许通过环境变量覆盖。
 
 ## 输出与失败处理
 
@@ -73,5 +73,5 @@ Controller 概率统计，写入统一 `test_results_summary.txt`。
 2. 阶段轮数严格为 4/2/1/3/5；
 3. Controller 使用当前监督预训练和 PG 参数；
 4. 不包含 `--no_train_controller`、`--skip_test` 或 Controller 后联合微调；
-5. 默认生成指定 11 个任务及四张 GPU 的八条 lane；
+5. 默认生成指定 11 个任务及四张 GPU 的四条 lane；
 6. shell 语法和完整 dry-run 通过。

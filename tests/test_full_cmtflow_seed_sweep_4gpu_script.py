@@ -64,7 +64,7 @@ def test_single_job_runs_full_42135_schedule_and_test_from_scratch():
     assert "--skip_test" not in output
 
 
-def test_scheduler_assigns_default_seeds_to_two_lanes_on_four_gpus():
+def test_scheduler_assigns_default_seeds_to_one_lane_per_gpu():
     result = run_bash(
         SCHEDULER_SCRIPT,
         {
@@ -87,8 +87,8 @@ def test_scheduler_assigns_default_seeds_to_two_lanes_on_four_gpus():
             assert output.count(f"starting market={market} seed={seed};") == 1
 
     assert output.count("lane 0 queue:") == 4
-    assert output.count("lane 1 queue:") == 4
-    assert "Concurrent jobs per GPU: 2" in output
+    assert "lane 1 queue:" not in output
+    assert "Concurrent jobs per GPU: 1" in output
     assert "Schedule: Outer 4 -> Inner 2 -> Outer+Inner joint 1" in output
     assert "--skip_test" not in output
 
