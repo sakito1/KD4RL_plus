@@ -47,13 +47,14 @@ def test_script_emits_one_controller_sampled_sup_pg_configuration():
     assert "--controller_pg_batch_windows 12" in output
     assert "--controller_train_max_hold 30" in output
     assert "--controller_eval_max_hold 30" in output
-    assert "--controller_sup_pretrain_epochs 1" in output
+    assert "--controller_sup_pretrain_epochs 4" in output
     assert "--controller_aux_replay_epochs 30" in output
-    assert "--controller_epochs 3" in output
+    assert "--controller_epochs 5" in output
     assert "--controller_use_switch_supervision" in output
-    assert "--controller_sup_coef 0.1" in output
-    assert "--controller_aux_mdd_coef 0.1" in output
-    assert "--controller_aux_switch_adv_coef 0.1" in output
+    assert "--controller_sup_coef 0.01" in output
+    assert "--controller_aux_mdd_coef 0.01" in output
+    assert "--controller_aux_switch_adv_coef 0.01" in output
+    assert "--controller_switch_rate_penalty_coef 0.01" in output
     assert "--controller_aux_mdd_target_scale 20.0" in output
     assert "--controller_aux_switch_adv_target_scale 20.0" in output
     assert "--controller_aux_switch_adv_loss_type mse" in output
