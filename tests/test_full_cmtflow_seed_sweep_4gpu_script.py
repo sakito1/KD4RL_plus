@@ -91,3 +91,34 @@ def test_scheduler_assigns_default_seeds_to_two_lanes_on_four_gpus():
     assert "Concurrent jobs per GPU: 2" in output
     assert "Schedule: Outer 4 -> Inner 2 -> Outer+Inner joint 1" in output
     assert "--skip_test" not in output
+
+
+def test_scheduler_uses_python_from_active_path_when_not_overridden(tmp_path):
+    fake_python = tmp_path / "python"
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+
+    env = os.environ.copy()
+    env.pop("PYTHON_BIN", None)
+    env.update(
+        {
+            "DRY_RUN": "1",
+            "PATH": f"{tmp_path}:/usr/bin:/bin",
+            "NAS_SEEDS": "44",
+            "SH_SEEDS": "",
+            "OUTPUT_ROOT": "results/test_full_cmtflow",
+        }
+    )
+    result = subprocess.run(
+        ["/bin/bash", str(SCHEDULER_SCRIPT)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert str(fake_python) in result.stdout
+    assert "/home/tongwenxuan/conda/envs/xuangu/bin/python" not in result.stdout

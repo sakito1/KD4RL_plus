@@ -9,7 +9,7 @@ SEED="${SEED:-44}"
 GPU_ID="${GPU_ID:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 ALLOW_EXISTING_OUTPUT="${ALLOW_EXISTING_OUTPUT:-0}"
-PYTHON_BIN="${PYTHON_BIN:-/home/tongwenxuan/conda/envs/xuangu/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python || true)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-results/full_cmtflow_seed_sweep_4gpu}"
 RUN_NAME="${RUN_NAME:-${MARKET}_full_42135_seed${SEED}}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-300}"
@@ -20,6 +20,10 @@ if [[ "$MARKET" != "nas" && "$MARKET" != "sh" ]]; then
 fi
 if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
   echo "SEED must be a non-negative integer: $SEED" >&2
+  exit 1
+fi
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "Python was not found in PATH; activate the intended environment or set PYTHON_BIN." >&2
   exit 1
 fi
 if [[ "$DRY_RUN" != "1" && ! -x "$PYTHON_BIN" ]]; then

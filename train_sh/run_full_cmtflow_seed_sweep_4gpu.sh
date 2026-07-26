@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 SINGLE_SCRIPT="$ROOT_DIR/train_sh/train_full_cmtflow_seed.sh"
-PYTHON_BIN="${PYTHON_BIN:-/home/tongwenxuan/conda/envs/xuangu/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python || true)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-results/full_cmtflow_seed_sweep_4gpu}"
 DRY_RUN="${DRY_RUN:-0}"
 ALLOW_EXISTING_OUTPUT="${ALLOW_EXISTING_OUTPUT:-0}"
@@ -21,6 +21,10 @@ SH_SEEDS="${SH_SEEDS-44 46 49 54}"
 
 if [[ ! -f "$SINGLE_SCRIPT" ]]; then
   echo "Missing single-job script: $SINGLE_SCRIPT" >&2
+  exit 1
+fi
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "Python was not found in PATH; activate the intended environment or set PYTHON_BIN." >&2
   exit 1
 fi
 if ! [[ "$JOBS_PER_GPU" =~ ^[1-9][0-9]*$ ]]; then
