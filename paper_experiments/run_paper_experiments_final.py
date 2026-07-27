@@ -28,6 +28,10 @@ import numpy as np
 import pandas as pd
 
 from paper_experiments.metrics import compute_financial_metrics, summarize_all
+from paper_experiments.plot_inner_actor_base_adjustment import (
+    plot_combined_market_heatmaps,
+    prepare_market_heatmap_data,
+)
 from paper_experiments.trace_utils import discover_runs, parse_seed_specs
 
 
@@ -2037,11 +2041,27 @@ def plot_inner_actor(market: str, seed: int, end2end_dir: Path, case_step: int, 
 
 def inner_experiment(end2end_dir: Path, interpretability_dir: Path, markets: Sequence[str], seeds: Dict[str, int], case_df: pd.DataFrame, dirs: Dict[str, Path]) -> pd.DataFrame:
     rows = []
+    market_panels = {}
     for market in markets:
         market_cases = case_df[case_df["market"] == market]
         case_step = int(market_cases.iloc[0]["key_step"]) if not market_cases.empty else -1
         rows.append(plot_inner_actor(market, seeds[market], end2end_dir, case_step, dirs["inner"]))
         plot_weight_stack(market, case_step, interpretability_dir, dirs["inner"])
+        actions = read_portfolio(
+            end2end_dir
+            / "traces"
+            / f"{market}_seed{seeds[market]}_full_controller_actions.csv"
+        )
+        market_panels[market] = prepare_market_heatmap_data(
+            market,
+            actions,
+            future_horizon=5,
+        )
+    plot_combined_market_heatmaps(
+        market_panels,
+        dirs["inner"],
+        future_horizon=5,
+    )
     out = pd.DataFrame(rows)
     out.to_csv(dirs["inner"] / "inner_actor_summary.csv", index=False)
     out.to_csv(dirs["tables"] / "inner_actor_summary.csv", index=False)

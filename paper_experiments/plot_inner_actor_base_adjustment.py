@@ -223,10 +223,153 @@ def date_ticks(index: pd.Index, max_ticks: int = 6) -> tuple[np.ndarray, list[st
     return locs, labels
 
 
-def save_figure(fig: plt.Figure, path_base: Path) -> None:
-    fig.savefig(path_base.with_suffix(".png"), bbox_inches="tight", facecolor="white")
-    fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
+def save_figure(fig: plt.Figure, path_base: Path, *, pad_inches: float = 0.1) -> None:
+    fig.savefig(path_base.with_suffix(".png"), dpi=240, bbox_inches="tight", pad_inches=pad_inches, facecolor="white")
+    fig.savefig(path_base.with_suffix(".pdf"), dpi=240, bbox_inches="tight", pad_inches=pad_inches, facecolor="white")
     plt.close(fig)
+
+
+def prepare_market_heatmap_data(
+    market: str,
+    actions: pd.DataFrame,
+    *,
+    future_horizon: int,
+) -> dict:
+    tilt = parse_matrix(actions, "inner_tilt_json")
+    prices = load_prices(market, tilt.columns)
+    fut_rel = future_relative_return(prices, tilt.index, future_horizon)
+    common = tilt.index.intersection(fut_rel.dropna(how="all").index)
+    tilt = tilt.loc[common]
+    fut_rel = fut_rel.loc[common, tilt.columns]
+    window = select_window(tilt, fut_rel)
+    sl = slice(window["start"], window["end"] + 1)
+    assets = window["assets"]
+    idx = tilt.iloc[sl].index
+    xticks, xticklabels = date_ticks(idx)
+    return {
+        "assets": assets,
+        "idx": idx,
+        "fut_pct": fut_rel.iloc[sl][assets].T * 100.0,
+        "tilt_pct": tilt.iloc[sl][assets].T * 100.0,
+        "xticks": xticks,
+        "xticklabels": xticklabels,
+    }
+
+
+def plot_combined_market_heatmaps(
+    market_panels: Dict[str, dict],
+    output_dir: Path,
+    *,
+    future_horizon: int,
+) -> None:
+    markets = [market for market in ("nas", "sh") if market in market_panels]
+    if len(markets) != 2:
+        return
+
+    fig = plt.figure(figsize=(15.2, 6.0))
+    grid = fig.add_gridspec(
+        2,
+        3,
+        width_ratios=[1.0, 1.0, 0.025],
+        wspace=0.28,
+        hspace=0.38,
+        left=0.065,
+        right=0.94,
+        top=0.86,
+        bottom=0.16,
+    )
+    axes = np.asarray(
+        [
+            [fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[0, 1])],
+            [fig.add_subplot(grid[1, 0]), fig.add_subplot(grid[1, 1])],
+        ]
+    )
+    colorbar_axes = [fig.add_subplot(grid[0, 2]), fig.add_subplot(grid[1, 2])]
+    future_limit = max(
+        1.0,
+        max(
+            float(np.nanpercentile(np.abs(market_panels[market]["fut_pct"].to_numpy()), 94))
+            for market in markets
+        ),
+    )
+    tilt_limit = max(
+        0.5,
+        max(
+            float(np.nanpercentile(np.abs(market_panels[market]["tilt_pct"].to_numpy()), 94))
+            for market in markets
+        ),
+    )
+
+    future_image = None
+    tilt_image = None
+    for column, market in enumerate(markets):
+        panel = market_panels[market]
+        assets = panel["assets"]
+        future_image = axes[0, column].imshow(
+            panel["fut_pct"],
+            aspect="auto",
+            cmap="RdYlGn",
+            vmin=-future_limit,
+            vmax=future_limit,
+        )
+        tilt_image = axes[1, column].imshow(
+            panel["tilt_pct"],
+            aspect="auto",
+            cmap="BrBG",
+            vmin=-tilt_limit,
+            vmax=tilt_limit,
+        )
+        for row, title in enumerate(
+            (f"Future {future_horizon}-day relative return", "Refinement tilt")
+        ):
+            axis = axes[row, column]
+            axis.set_yticks(np.arange(len(assets)))
+            axis.set_yticklabels(assets, fontsize=11)
+            axis.set_xticks(panel["xticks"])
+            axis.tick_params(axis="x", labelsize=10)
+            axis.tick_params(axis="y", labelsize=11)
+            axis.set_title(title, fontsize=14, fontweight="semibold", pad=7)
+            axis.spines["top"].set_visible(False)
+            axis.spines["right"].set_visible(False)
+        axes[0, column].set_xticklabels([])
+        axes[1, column].set_xticklabels(
+            panel["xticklabels"],
+            rotation=20,
+            ha="right",
+            fontsize=10,
+        )
+
+    future_colorbar = fig.colorbar(
+        future_image,
+        cax=colorbar_axes[0],
+    )
+    future_colorbar.set_label("Relative return (%)", fontsize=11)
+    future_colorbar.ax.tick_params(labelsize=10)
+    tilt_colorbar = fig.colorbar(
+        tilt_image,
+        cax=colorbar_axes[1],
+    )
+    tilt_colorbar.set_label("Refinement tilt (pp)", fontsize=11)
+    tilt_colorbar.ax.tick_params(labelsize=10)
+
+    for column, market in enumerate(markets):
+        position = axes[0, column].get_position()
+        fig.text(
+            (position.x0 + position.x1) / 2,
+            0.965,
+            f"{MARKET_LABELS[market]} Trader Refinement",
+            ha="center",
+            va="top",
+            fontsize=17,
+            fontweight="bold",
+            color="#1F2937",
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_figure(
+        fig,
+        output_dir / "trader_refinement_two_markets",
+        pad_inches=0.02,
+    )
 
 
 def plot_market(
@@ -367,8 +510,10 @@ def main() -> None:
     output_root = Path(args.output_dir)
     seed_map = parse_seed_specs(args.seeds)
     rows = []
+    actions_by_market = {}
     for market in args.markets:
         actions = ensure_trace(args, output_root, market, seed_map[market])
+        actions_by_market[market] = actions
         rows.append(plot_market(market, actions, output_root, future_horizon=args.future_horizon))
     summary = pd.DataFrame(rows)
     out_dir = output_root / "04_inner_actor_interpretability"
@@ -382,6 +527,19 @@ def main() -> None:
         display[col] = display[col].map(lambda x: f"{x * 100:.2f}%")
     display.to_csv(out_dir / "inner_actor_base_adjustment_future_return_summary_display.csv", index=False)
     display.to_csv(tables_dir / "inner_actor_base_adjustment_future_return_summary_display.csv", index=False)
+    market_panels = {
+        market: prepare_market_heatmap_data(
+            market,
+            actions,
+            future_horizon=args.future_horizon,
+        )
+        for market, actions in actions_by_market.items()
+    }
+    plot_combined_market_heatmaps(
+        market_panels,
+        out_dir,
+        future_horizon=args.future_horizon,
+    )
 
 
 if __name__ == "__main__":
