@@ -91,9 +91,8 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
         labels = [text.get_text() for text in fig.legends[0].get_texts()]
         assert labels == [
             "No-controller keep",
-            "Controller switch",
-            "Switch advantage area",
             "Controller reconstruct",
+            "Switch advantage area",
             "Avoided drawdown",
         ]
         assert len(fig.texts) == 0
@@ -166,6 +165,10 @@ def test_combined_controller_case_uses_two_by_two_layout(
             bottom_left.get_position().height
         )
         assert top_left.get_position().y0 > bottom_left.get_position().y0
+        horizontal_gap = top_right.get_position().x0 - top_left.get_position().x1
+        vertical_gap = top_left.get_position().y0 - bottom_left.get_position().y1
+        assert horizontal_gap < 0.15 * top_left.get_position().width
+        assert vertical_gap < 0.25 * top_left.get_position().height
         figure_labels = [text.get_text() for text in fig.texts]
         assert figure_labels.count("CSI-300") == 1
         assert figure_labels.count("Nasdaq-100") == 1
@@ -176,7 +179,26 @@ def test_combined_controller_case_uses_two_by_two_layout(
             "B. Future drawdown under the same frozen window"
         ) == 1
         assert len(fig.legends) == 1
+        legend_labels = [text.get_text() for text in fig.legends[0].get_texts()]
+        assert legend_labels == [
+            "No-controller keep",
+            "Controller reconstruct",
+            "Switch advantage area",
+            "Avoided drawdown",
+        ]
         assert captured["path"].name == "controller_case_combined_sh01_nas02"
+        row_labels = {
+            text.get_text(): text
+            for text in fig.texts
+            if text.get_text() in {"CSI-300", "Nasdaq-100"}
+        }
+        assert row_labels["CSI-300"].get_position()[1] == pytest.approx(
+            (top_left.get_position().y0 + top_left.get_position().y1) / 2 + 0.015
+        )
+        assert row_labels["Nasdaq-100"].get_position()[1] == pytest.approx(
+            (bottom_left.get_position().y0 + bottom_left.get_position().y1) / 2
+            + 0.015
+        )
         for axis in fig.axes:
             assert list(axis.get_xticks()) == pytest.approx(
                 [1, 5, 10, 15, 20, 25, 30]

@@ -1057,7 +1057,7 @@ def draw_controller_case_panels(
     mdd_gain = float(data["mdd_gain"])
 
     ax0.plot(plot_days, hold_ret_plot, color=keep_color, lw=2.5, label="No-controller keep")
-    ax0.plot(plot_days, switch_ret_plot, color=switch_color, lw=2.8, label="Controller switch")
+    ax0.plot(plot_days, switch_ret_plot, color=switch_color, lw=2.8, label="Controller reconstruct")
     ax0.fill_between(
         plot_days,
         hold_ret_plot,
@@ -1216,28 +1216,6 @@ def plot_combined_controller_case(
         fontsize=8.8,
     )
     fig.text(
-        0.018,
-        0.66,
-        "CSI-300",
-        rotation=90,
-        ha="center",
-        va="center",
-        fontsize=12.0,
-        fontweight="semibold",
-        color="#1F2937",
-    )
-    fig.text(
-        0.018,
-        0.285,
-        "Nasdaq-100",
-        rotation=90,
-        ha="center",
-        va="center",
-        fontsize=12.0,
-        fontweight="semibold",
-        color="#1F2937",
-    )
-    fig.text(
         0.285,
         0.025,
         "A. Future return after the switch decision",
@@ -1262,8 +1240,30 @@ def plot_combined_controller_case(
         right=0.985,
         top=0.91,
         bottom=0.11,
-        wspace=0.24,
-        hspace=0.36,
+        wspace=0.10,
+        hspace=0.22,
+    )
+    top_return_position = axes[0, 0].get_position()
+    bottom_return_position = axes[1, 0].get_position()
+    row_label_style = {
+        "rotation": 90,
+        "ha": "center",
+        "va": "center",
+        "fontsize": 12.0,
+        "fontweight": "semibold",
+        "color": "#1F2937",
+    }
+    fig.text(
+        0.018,
+        (top_return_position.y0 + top_return_position.y1) / 2 + 0.015,
+        "CSI-300",
+        **row_label_style,
+    )
+    fig.text(
+        0.018,
+        (bottom_return_position.y0 + bottom_return_position.y1) / 2 + 0.015,
+        "Nasdaq-100",
+        **row_label_style,
     )
     save_figure(
         fig,
