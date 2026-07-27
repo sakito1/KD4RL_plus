@@ -138,9 +138,10 @@ def test_combined_controller_case_uses_two_by_two_layout(
     )
     captured = {}
 
-    def capture(fig, path):
+    def capture(fig, path, **kwargs):
         captured["fig"] = fig
         captured["path"] = path
+        captured["save_kwargs"] = kwargs
 
     monkeypatch.setattr(figures, "save_figure", capture)
 
@@ -196,6 +197,9 @@ def test_combined_controller_case_uses_two_by_two_layout(
         assert top_left.xaxis.label.get_fontsize() == pytest.approx(10.2)
         assert top_left.yaxis.label.get_fontsize() == pytest.approx(11.0)
         assert captured["path"].name == "controller_case_combined_sh01_nas02"
+        assert captured["save_kwargs"] == {"pad_inches": 0.02}
+        assert top_left.get_position().x0 == pytest.approx(0.065)
+        assert top_right.get_position().x1 == pytest.approx(0.995)
         row_labels = {
             text.get_text(): text
             for text in fig.texts

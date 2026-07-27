@@ -126,10 +126,10 @@ def ensure_dirs(root: Path) -> Dict[str, Path]:
     return dirs
 
 
-def save_figure(fig: plt.Figure, path_base: Path) -> None:
+def save_figure(fig: plt.Figure, path_base: Path, *, pad_inches: float = 0.1) -> None:
     path_base.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path_base.with_suffix(".png"), dpi=240, bbox_inches="tight", facecolor="white")
-    fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
+    fig.savefig(path_base.with_suffix(".png"), dpi=240, bbox_inches="tight", pad_inches=pad_inches, facecolor="white")
+    fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight", pad_inches=pad_inches, facecolor="white")
     plt.close(fig)
 
 
@@ -1224,7 +1224,7 @@ def plot_combined_controller_case(
     )
     fig.text(
         0.285,
-        0.012,
+        0.035,
         "A. Frozen portfolio return",
         ha="center",
         va="bottom",
@@ -1234,7 +1234,7 @@ def plot_combined_controller_case(
     )
     fig.text(
         0.755,
-        0.012,
+        0.035,
         "B. Frozen portfolio drawdown",
         ha="center",
         va="bottom",
@@ -1243,10 +1243,10 @@ def plot_combined_controller_case(
         color="#1F2937",
     )
     fig.subplots_adjust(
-        left=0.075,
-        right=0.985,
+        left=0.065,
+        right=0.995,
         top=0.91,
-        bottom=0.18,
+        bottom=0.16,
         wspace=0.10,
         hspace=0.22,
     )
@@ -1276,6 +1276,7 @@ def plot_combined_controller_case(
         fig,
         out_dir
         / f"controller_case_combined_sh{sh_case_id:02d}_nas{nas_case_id:02d}",
+        pad_inches=0.02,
     )
 
 
