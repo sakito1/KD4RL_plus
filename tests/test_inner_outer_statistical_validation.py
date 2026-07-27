@@ -1,4 +1,7 @@
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -456,3 +459,27 @@ def test_cli_skip_eval_writes_tables_and_report(tmp_path):
     assert (output / "tables" / "frozen_path_direct_effect.csv").exists()
     assert (output / "tables" / "closed_loop_effect.csv").exists()
     assert (output / "INNER_OUTER_STATISTICAL_VALIDATION.md").exists()
+
+
+def test_script_entrypoint_adds_project_root_to_sys_path():
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "paper_experiments"
+        / "analyze_inner_outer_statistical_validation.py"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import runpy,sys;"
+                f"runpy.run_path({str(script)!r}, run_name='not_main');"
+                f"assert {str(script.parents[1])!r} in sys.path"
+            ),
+        ],
+        cwd=script.parent,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
