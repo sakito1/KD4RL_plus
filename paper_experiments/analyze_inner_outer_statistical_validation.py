@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Sequence
 
 import numpy as np
@@ -463,3 +465,217 @@ def summarize_frozen_path(
             clean.loc[worst_market, "delta_net_log_return"].mean()
         ),
     }
+
+
+def _trace_cache_paths(
+    output_dir: Path,
+    market: str,
+    seed: int,
+    scenario: str,
+) -> dict[str, Path]:
+    trace_dir = Path(output_dir) / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"{market}_seed{int(seed)}_{scenario}"
+    return {
+        "portfolio": trace_dir / f"{prefix}_portfolio.csv",
+        "actions": trace_dir / f"{prefix}_actions.csv",
+        "switch_events": trace_dir / f"{prefix}_switch_events.csv",
+    }
+
+
+def _cached_trace_bundle(paths: dict[str, Path]) -> dict[str, pd.DataFrame] | None:
+    if not all(path.exists() and path.stat().st_size > 0 for path in paths.values()):
+        return None
+    bundle = {name: pd.read_csv(path) for name, path in paths.items()}
+    if not {"date", "portfolio_value", "daily_log_return"}.issubset(
+        bundle["portfolio"].columns
+    ):
+        return None
+    if not {
+        "date",
+        "base_weights_json",
+        "exec_weights_json",
+        "inner_tilt_json",
+    }.issubset(bundle["actions"].columns):
+        return None
+    return bundle
+
+
+def ensure_closed_loop_trace(
+    *,
+    results_root: Path,
+    output_dir: Path,
+    market: str,
+    seed: int,
+    scenario: str,
+    device: str,
+    force_eval: bool,
+) -> dict[str, pd.DataFrame]:
+    if scenario not in {"full_controller", "controller_outer"}:
+        raise ValueError(f"unsupported closed-loop scenario: {scenario}")
+    paths = _trace_cache_paths(Path(output_dir), market, seed, scenario)
+    if not force_eval:
+        cached = _cached_trace_bundle(paths)
+        if cached is not None:
+            return cached
+
+    from paper_experiments.eval_end_to_end_explain import (
+        build_loaded_trainer,
+        collect_eval_trace,
+        load_checkpoint_into_trainer,
+    )
+    from paper_experiments.trace_utils import discover_runs
+
+    runs = discover_runs(
+        Path(results_root),
+        markets=[market],
+        seed_map={market: [int(seed)]},
+    )
+    if not runs:
+        raise RuntimeError(f"no run found for {market}:seed{seed}")
+    run = runs[0]
+    trainer, _, torch_module = build_loaded_trainer(
+        run,
+        output_dir=Path(output_dir) / "_runtime",
+        device=device,
+        results_root=Path(results_root),
+    )
+    checkpoint = run.checkpoints["best_model"]
+    if not load_checkpoint_into_trainer(trainer, torch_module, checkpoint.path):
+        raise RuntimeError(f"could not load checkpoint: {checkpoint.path}")
+    bundle = collect_eval_trace(
+        trainer,
+        scenario=scenario,
+        fixed_cycle=None,
+        disable_inner=scenario == "controller_outer",
+    )
+    for name, path in paths.items():
+        bundle[name].to_csv(path, index=False)
+    return bundle
+
+
+def align_closed_loop_returns(
+    full_portfolio: pd.DataFrame,
+    no_inner_portfolio: pd.DataFrame,
+) -> pd.DataFrame:
+    required = {"date", "daily_log_return"}
+    for label, frame in [("full", full_portfolio), ("no_inner", no_inner_portfolio)]:
+        missing = sorted(required.difference(frame.columns))
+        if missing:
+            raise ValueError(f"{label} portfolio is missing columns: {missing}")
+    full = full_portfolio.loc[:, ["date", "daily_log_return"]].copy()
+    no_inner = no_inner_portfolio.loc[:, ["date", "daily_log_return"]].copy()
+    full["date"] = pd.to_datetime(full["date"])
+    no_inner["date"] = pd.to_datetime(no_inner["date"])
+    full = full.rename(columns={"daily_log_return": "full_log_return"})
+    no_inner = no_inner.rename(columns={"daily_log_return": "no_inner_log_return"})
+    paired = full.merge(no_inner, on="date", how="inner", validate="one_to_one")
+    paired = paired.sort_values("date").set_index("date")
+    paired["difference_log_return"] = (
+        paired["full_log_return"] - paired["no_inner_log_return"]
+    )
+    return paired
+
+
+def portfolio_path_metrics(log_returns: Sequence[float]) -> dict[str, float]:
+    log_returns = np.asarray(log_returns, dtype="float64")
+    log_returns = log_returns[np.isfinite(log_returns)]
+    if not len(log_returns):
+        return {
+            "mean_daily_return": np.nan,
+            "total_return": np.nan,
+            "sharpe": np.nan,
+            "max_drawdown": np.nan,
+            "calmar": np.nan,
+            "expected_shortfall_5": np.nan,
+        }
+    simple_returns = np.expm1(log_returns)
+    wealth = np.concatenate([[1.0], np.exp(np.cumsum(log_returns))])
+    peaks = np.maximum.accumulate(wealth)
+    max_drawdown = float(np.max((peaks - wealth) / np.maximum(peaks, 1e-12)))
+    volatility = float(np.std(simple_returns, ddof=1)) if len(simple_returns) > 1 else np.nan
+    annual_return = float(np.mean(simple_returns) * 252.0)
+    sharpe = (
+        float(np.mean(simple_returns) / volatility * np.sqrt(252.0))
+        if np.isfinite(volatility) and volatility > 1e-12
+        else np.nan
+    )
+    return {
+        "mean_daily_return": float(np.mean(simple_returns)),
+        "total_return": float(wealth[-1] - 1.0),
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+        "calmar": (
+            float(annual_return / max_drawdown) if max_drawdown > 1e-12 else np.nan
+        ),
+        "expected_shortfall_5": _expected_shortfall(simple_returns),
+    }
+
+
+def summarize_closed_loop(
+    paired: pd.DataFrame,
+    *,
+    block_length: int,
+    bootstrap_reps: int,
+    seed: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    required = {"full_log_return", "no_inner_log_return", "difference_log_return"}
+    missing = sorted(required.difference(paired.columns))
+    if missing:
+        raise ValueError(f"paired closed-loop table is missing columns: {missing}")
+    clean = paired.dropna(subset=list(required))
+    full = clean["full_log_return"].to_numpy(dtype="float64")
+    no_inner = clean["no_inner_log_return"].to_numpy(dtype="float64")
+    metric_names = [
+        "mean_daily_return",
+        "total_return",
+        "sharpe",
+        "max_drawdown",
+        "calmar",
+        "expected_shortfall_5",
+    ]
+
+    def metric_differences(full_sample, no_inner_sample):
+        full_metrics = portfolio_path_metrics(full_sample)
+        no_inner_metrics = portfolio_path_metrics(no_inner_sample)
+        return np.asarray(
+            [full_metrics[name] - no_inner_metrics[name] for name in metric_names],
+            dtype="float64",
+        )
+
+    boot_values = circular_block_bootstrap(
+        [full, no_inner],
+        metric_differences,
+        block_length=block_length,
+        reps=bootstrap_reps,
+        seed=seed,
+    )
+    bootstrap = pd.DataFrame(boot_values, columns=metric_names)
+    full_metrics = portfolio_path_metrics(full)
+    no_inner_metrics = portfolio_path_metrics(no_inner)
+    rows = []
+    for name in metric_names:
+        values = bootstrap[name].replace([np.inf, -np.inf], np.nan).dropna()
+        ci_low, ci_high = (
+            np.quantile(values, [0.025, 0.975]) if len(values) else (np.nan, np.nan)
+        )
+        rows.append(
+            {
+                "metric": name,
+                "full": full_metrics[name],
+                "no_inner": no_inner_metrics[name],
+                "difference": full_metrics[name] - no_inner_metrics[name],
+                "ci_low": float(ci_low),
+                "ci_high": float(ci_high),
+                "bootstrap_reps": int(bootstrap_reps),
+            }
+        )
+    return pd.DataFrame(rows), bootstrap
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

@@ -5,13 +5,17 @@ import pandas as pd
 import pytest
 
 from paper_experiments.analyze_inner_outer_statistical_validation import (
+    align_closed_loop_returns,
     attach_market_volatility_regime,
     circular_block_bootstrap,
     configuration_shape_metrics,
+    ensure_closed_loop_trace,
     ex_ante_risk_metrics,
     frozen_path_direct_effect,
     newey_west_mean_test,
     parse_weight_trace,
+    portfolio_path_metrics,
+    summarize_closed_loop,
     summarize_frozen_path,
     validate_weight_invariants,
 )
@@ -247,3 +251,77 @@ def test_newey_west_and_frozen_summary_report_effect_size():
     assert summary["mean_net_alpha_bp_day"] == pytest.approx(14.0)
     assert summary["positive_alpha_ratio"] == pytest.approx(1.0)
     assert summary["block_ci_low_bp_day"] > 0
+
+
+def test_ensure_closed_loop_trace_reuses_valid_cache(tmp_path):
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    prefix = "nas_seed49_full_controller"
+    portfolio = pd.DataFrame(
+        {
+            "date": ["2020-01-02", "2020-01-03"],
+            "portfolio_value": [100.0, 101.0],
+            "daily_log_return": [0.0, np.log(1.01)],
+        }
+    )
+    actions = synthetic_actions(
+        base=[[0.6, 0.4], [0.6, 0.4]],
+        executed=[[0.5, 0.5], [0.5, 0.5]],
+    )
+    switches = pd.DataFrame({"date": ["2020-01-02"], "is_switch": [1]})
+    portfolio.to_csv(traces / f"{prefix}_portfolio.csv", index=False)
+    actions.to_csv(traces / f"{prefix}_actions.csv", index=False)
+    switches.to_csv(traces / f"{prefix}_switch_events.csv", index=False)
+
+    result = ensure_closed_loop_trace(
+        results_root=tmp_path / "unused",
+        output_dir=tmp_path,
+        market="nas",
+        seed=49,
+        scenario="full_controller",
+        device="cpu",
+        force_eval=False,
+    )
+
+    pd.testing.assert_frame_equal(result["portfolio"], portfolio)
+    assert len(result["actions"]) == 2
+
+
+def test_align_closed_loop_returns_inner_joins_dates():
+    full = pd.DataFrame(
+        {"date": ["2020-01-02", "2020-01-03"], "daily_log_return": [0.01, 0.02]}
+    )
+    no_inner = pd.DataFrame(
+        {"date": ["2020-01-03", "2020-01-06"], "daily_log_return": [0.005, 0.01]}
+    )
+
+    result = align_closed_loop_returns(full, no_inner)
+
+    assert list(result.index) == [pd.Timestamp("2020-01-03")]
+    assert result.iloc[0]["difference_log_return"] == pytest.approx(0.015)
+
+
+def test_portfolio_path_metrics_and_closed_loop_summary():
+    full = np.array([0.01, 0.005, -0.002, 0.008, 0.003])
+    no_inner = np.array([0.005, 0.002, -0.003, 0.004, 0.001])
+    paired = pd.DataFrame(
+        {
+            "full_log_return": full,
+            "no_inner_log_return": no_inner,
+            "difference_log_return": full - no_inner,
+        }
+    )
+
+    metrics = portfolio_path_metrics(full)
+    summary, bootstrap = summarize_closed_loop(
+        paired,
+        block_length=2,
+        bootstrap_reps=100,
+        seed=11,
+    )
+
+    assert metrics["total_return"] == pytest.approx(np.exp(full.sum()) - 1)
+    total = summary.loc[summary["metric"] == "total_return"].iloc[0]
+    assert total["difference"] > 0
+    assert total["ci_low"] > 0
+    assert len(bootstrap) == 100
