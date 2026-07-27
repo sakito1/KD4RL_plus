@@ -839,32 +839,56 @@ def run_placebo_analysis(
     base: pd.DataFrame,
     tilt: pd.DataFrame,
     prices: pd.DataFrame,
+    asset_returns: pd.DataFrame,
     *,
     transaction_cost_pct: float,
+    risk_lookback: int,
     reps: int,
     seed: int,
     observed: dict[str, float | int],
+    observed_mean_delta_exante_vol: float,
 ) -> dict[str, float | int]:
     observed_cumulative = float(observed["cumulative_net_alpha"])
+    prepared = _prepare_frozen_path_arrays(base, prices)
+    risk_covariances, base_risk, risk_valid = _prepare_exante_risk_arrays(
+        base,
+        asset_returns,
+        lookback=risk_lookback,
+    )
+    base_values = base.to_numpy(dtype="float64")
+    tilt_values = tilt.to_numpy(dtype="float64")
+    rng = np.random.default_rng(int(seed))
     placebo_values = []
+    placebo_risk_values = []
     invalid_rows = 0
-    for replicate in range(int(reps)):
-        permuted, invalid = permute_tilt_within_support(
-            base,
-            tilt,
-            seed=seed + replicate,
+    for _ in range(int(reps)):
+        permuted_values, invalid = _permuted_executed_numpy(
+            base_values,
+            tilt_values,
+            rng,
         )
         invalid_rows += invalid
-        direct = frozen_path_direct_effect(
-            base,
-            permuted,
-            prices,
-            transaction_cost_pct=transaction_cost_pct,
-        )
         placebo_values.append(
-            float(np.exp(direct["delta_net_log_return"].sum()) - 1.0)
+            _cumulative_frozen_path_alpha_from_arrays(
+                base_values,
+                permuted_values,
+                prepared,
+                transaction_cost_pct,
+            )
+        )
+        exec_variance = np.einsum(
+            "ti,tij,tj->t",
+            permuted_values,
+            risk_covariances,
+            permuted_values,
+            optimize=True,
+        )
+        exec_risk = np.sqrt(np.clip(exec_variance, 0.0, None)) * np.sqrt(252.0)
+        placebo_risk_values.append(
+            float(np.mean((exec_risk - base_risk)[risk_valid]))
         )
     placebo = np.asarray(placebo_values, dtype="float64")
+    placebo_risk = np.asarray(placebo_risk_values, dtype="float64")
     positive_p = float(
         (1 + np.sum(placebo >= observed_cumulative)) / (len(placebo) + 1)
     )
@@ -876,8 +900,169 @@ def run_placebo_analysis(
         "placebo_ci_high": float(np.quantile(placebo, 0.975)),
         "positive_permutation_p": positive_p,
         "observed_percentile": float(np.mean(placebo <= observed_cumulative)),
+        "observed_mean_delta_exante_vol": float(observed_mean_delta_exante_vol),
+        "placebo_mean_delta_exante_vol": float(placebo_risk.mean()),
+        "placebo_risk_ci_low": float(np.quantile(placebo_risk, 0.025)),
+        "placebo_risk_ci_high": float(np.quantile(placebo_risk, 0.975)),
+        "negative_risk_permutation_p": float(
+            (1 + np.sum(placebo_risk <= observed_mean_delta_exante_vol))
+            / (len(placebo_risk) + 1)
+        ),
+        "risk_observed_percentile": float(
+            np.mean(placebo_risk <= observed_mean_delta_exante_vol)
+        ),
         "invalid_row_count": int(invalid_rows),
     }
+
+
+def _prepare_exante_risk_arrays(
+    base: pd.DataFrame,
+    asset_returns: pd.DataFrame,
+    *,
+    lookback: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    returns = asset_returns.loc[:, base.columns].sort_index()
+    asset_count = len(base.columns)
+    covariances = np.zeros((len(base), asset_count, asset_count), dtype="float64")
+    valid = np.zeros(len(base), dtype=bool)
+    for position, date in enumerate(base.index):
+        history = returns.loc[:date].tail(int(lookback)).to_numpy(dtype="float64")
+        if len(history) < 2:
+            continue
+        covariances[position] = estimate_covariance(history)
+        valid[position] = True
+    base_values = base.to_numpy(dtype="float64")
+    base_variance = np.einsum(
+        "ti,tij,tj->t",
+        base_values,
+        covariances,
+        base_values,
+        optimize=True,
+    )
+    base_risk = np.sqrt(np.clip(base_variance, 0.0, None)) * np.sqrt(252.0)
+    return covariances, base_risk, valid
+
+
+def _prepare_frozen_path_arrays(
+    base: pd.DataFrame,
+    prices: pd.DataFrame,
+) -> dict[str, np.ndarray]:
+    price_panel = prices.loc[:, base.columns].sort_index().astype("float64")
+    positions = []
+    previous_ratios = []
+    next_ratios = []
+    for position in range(1, len(base)):
+        previous_date = pd.Timestamp(base.index[position - 1])
+        date = pd.Timestamp(base.index[position])
+        later_dates = price_panel.index[price_panel.index > date]
+        if not len(later_dates):
+            continue
+        next_date = pd.Timestamp(later_dates[0])
+        positions.append(position)
+        previous_ratios.append(
+            price_panel.loc[date].to_numpy() / price_panel.loc[previous_date].to_numpy()
+        )
+        next_ratios.append(
+            price_panel.loc[next_date].to_numpy() / price_panel.loc[date].to_numpy()
+        )
+    return {
+        "positions": np.asarray(positions, dtype=int),
+        "previous_ratios": np.asarray(previous_ratios, dtype="float64"),
+        "next_ratios": np.asarray(next_ratios, dtype="float64"),
+    }
+
+
+def _cumulative_frozen_path_alpha_from_arrays(
+    base_values: np.ndarray,
+    executed_values: np.ndarray,
+    prepared: dict[str, np.ndarray],
+    transaction_cost_pct: float,
+) -> float:
+    positions = prepared["positions"]
+    previous_ratios = prepared["previous_ratios"]
+    next_ratios = prepared["next_ratios"]
+    previous_positions = positions - 1
+    base_drift = base_values[previous_positions] * previous_ratios
+    base_drift /= base_drift.sum(axis=1, keepdims=True)
+    exec_drift = executed_values[previous_positions] * previous_ratios
+    exec_drift /= exec_drift.sum(axis=1, keepdims=True)
+    base_targets = base_values[positions]
+    exec_targets = executed_values[positions]
+    base_turnover = np.abs(base_targets - base_drift).sum(axis=1)
+    exec_turnover = np.abs(exec_targets - exec_drift).sum(axis=1)
+    base_growth = (
+        1.0 - float(transaction_cost_pct) * base_turnover
+    ) * np.sum(base_targets * next_ratios, axis=1)
+    exec_growth = (
+        1.0 - float(transaction_cost_pct) * exec_turnover
+    ) * np.sum(exec_targets * next_ratios, axis=1)
+    delta = np.log(np.maximum(exec_growth, 1e-12)) - np.log(
+        np.maximum(base_growth, 1e-12)
+    )
+    return float(np.exp(np.sum(delta)) - 1.0)
+
+
+def cumulative_frozen_path_alpha(
+    base: pd.DataFrame,
+    executed: pd.DataFrame,
+    prices: pd.DataFrame,
+    *,
+    transaction_cost_pct: float,
+) -> float:
+    _require_aligned_weights(base, executed)
+    prepared = _prepare_frozen_path_arrays(base, prices)
+    return _cumulative_frozen_path_alpha_from_arrays(
+        base.to_numpy(dtype="float64"),
+        executed.to_numpy(dtype="float64"),
+        prepared,
+        transaction_cost_pct,
+    )
+
+
+def _permuted_executed_numpy(
+    base_values: np.ndarray,
+    tilt_values: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    max_attempts: int = 100,
+) -> tuple[np.ndarray, int]:
+    executed = base_values.copy()
+    supports = base_values > 1e-12
+    groups: dict[bytes, list[int]] = {}
+    for row_index, support in enumerate(supports):
+        groups.setdefault(support.tobytes(), []).append(row_index)
+    for row_indices in groups.values():
+        rows = np.asarray(row_indices, dtype=int)
+        support_indices = np.flatnonzero(supports[rows[0]])
+        values = tilt_values[np.ix_(rows, support_indices)]
+        keys = rng.random(values.shape)
+        order = np.argsort(keys, axis=1)
+        executed[np.ix_(rows, support_indices)] += np.take_along_axis(
+            values,
+            order,
+            axis=1,
+        )
+    invalid_mask = (executed < -1e-12).any(axis=1)
+    initially_invalid = np.flatnonzero(invalid_mask)
+    unresolved = []
+    for row_index in initially_invalid:
+        support_indices = np.flatnonzero(supports[row_index])
+        accepted = False
+        for _ in range(int(max_attempts)):
+            candidate = base_values[row_index].copy()
+            candidate[support_indices] += rng.permutation(
+                tilt_values[row_index, support_indices]
+            )
+            if np.min(candidate) >= -1e-12:
+                executed[row_index] = candidate
+                accepted = True
+                break
+        if not accepted:
+            executed[row_index] = base_values[row_index] + tilt_values[row_index]
+            unresolved.append(row_index)
+    executed = np.clip(executed, 0.0, None)
+    executed /= executed.sum(axis=1, keepdims=True)
+    return executed, len(unresolved)
 
 
 def _load_cached_only(
@@ -1225,10 +1410,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 weight_trace.base,
                 weight_trace.tilt,
                 prices,
+                asset_returns,
                 transaction_cost_pct=args.transaction_cost_pct,
+                risk_lookback=int(args.risk_windows[0]),
                 reps=args.placebo_reps,
                 seed=4000 + seed,
                 observed=direct,
+                observed_mean_delta_exante_vol=float(
+                    configuration["mean_delta_ex_ante_vol"]
+                ),
             )
         else:
             placebo = {"placebo_reps": 0}

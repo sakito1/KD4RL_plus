@@ -13,6 +13,7 @@ from paper_experiments.analyze_inner_outer_statistical_validation import (
     benjamini_hochberg,
     circular_block_bootstrap,
     configuration_shape_metrics,
+    cumulative_frozen_path_alpha,
     ensure_closed_loop_trace,
     ex_ante_risk_metrics,
     frozen_path_direct_effect,
@@ -369,6 +370,39 @@ def test_benjamini_hochberg_is_monotone_and_preserves_nan():
     assert np.isnan(adjusted[3])
 
 
+def test_fast_cumulative_frozen_alpha_matches_daily_counterfactual():
+    dates = pd.date_range("2020-01-02", periods=6, freq="B")
+    prices = pd.DataFrame(
+        {
+            "A": [100, 101, 103, 102, 105, 106],
+            "B": [100, 99, 100, 102, 101, 103],
+        },
+        index=dates,
+        dtype=float,
+    )
+    base = pd.DataFrame([[0.6, 0.4]] * 5, index=dates[:5], columns=prices.columns)
+    executed = pd.DataFrame(
+        [[0.55, 0.45], [0.65, 0.35], [0.5, 0.5], [0.6, 0.4], [0.7, 0.3]],
+        index=dates[:5],
+        columns=prices.columns,
+    )
+    direct = frozen_path_direct_effect(
+        base,
+        executed,
+        prices,
+        transaction_cost_pct=0.0005,
+    )
+
+    fast = cumulative_frozen_path_alpha(
+        base,
+        executed,
+        prices,
+        transaction_cost_pct=0.0005,
+    )
+
+    assert fast == pytest.approx(np.exp(direct["delta_net_log_return"].sum()) - 1.0)
+
+
 def test_cli_skip_eval_writes_tables_and_report(tmp_path):
     dates = pd.date_range("2020-01-02", periods=10, freq="B")
     prices_root = tmp_path / "prices"
@@ -459,6 +493,8 @@ def test_cli_skip_eval_writes_tables_and_report(tmp_path):
     assert (output / "tables" / "frozen_path_direct_effect.csv").exists()
     assert (output / "tables" / "closed_loop_effect.csv").exists()
     assert (output / "INNER_OUTER_STATISTICAL_VALIDATION.md").exists()
+    placebo = pd.read_csv(output / "tables" / "placebo_analysis.csv")
+    assert "negative_risk_permutation_p" in placebo.columns
 
 
 def test_script_entrypoint_adds_project_root_to_sys_path():
