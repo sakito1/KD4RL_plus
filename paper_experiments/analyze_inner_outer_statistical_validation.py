@@ -690,6 +690,26 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def discover_model_identity(
+    results_root: Path,
+    market: str,
+    seed: int,
+) -> dict[str, str]:
+    run_dir = Path(results_root) / f"{market}_seed{int(seed)}"
+    checkpoint = run_dir / "checkpoints" / "best_model.pth"
+    command_json = run_dir / f"seed_{int(seed)}_command.json"
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"missing checkpoint: {checkpoint}")
+    if not command_json.exists():
+        raise FileNotFoundError(f"missing command json: {command_json}")
+    return {
+        "checkpoint_path": str(checkpoint.resolve()),
+        "checkpoint_sha256": sha256_file(checkpoint),
+        "command_json_path": str(command_json.resolve()),
+        "command_json_sha256": sha256_file(command_json),
+    }
+
+
 def permute_tilt_within_support(
     base: pd.DataFrame,
     tilt: pd.DataFrame,
@@ -861,31 +881,53 @@ def run_placebo_analysis(
     placebo_values = []
     placebo_risk_values = []
     invalid_rows = 0
-    for _ in range(int(reps)):
-        permuted_values, invalid = _permuted_executed_numpy(
-            base_values,
-            tilt_values,
-            rng,
+    positions = prepared["positions"]
+    previous_positions = positions - 1
+    previous_ratios = prepared["previous_ratios"]
+    next_ratios = prepared["next_ratios"]
+    base_drift = base_values[previous_positions] * previous_ratios
+    base_drift /= base_drift.sum(axis=1, keepdims=True)
+    base_targets = base_values[positions]
+    base_turnover = np.abs(base_targets - base_drift).sum(axis=1)
+    base_growth = (
+        1.0 - float(transaction_cost_pct) * base_turnover
+    ) * np.sum(base_targets * next_ratios, axis=1)
+    batch_size = min(100, int(reps))
+    for batch_start in range(0, int(reps), batch_size):
+        current_batch_size = min(batch_size, int(reps) - batch_start)
+        batch = np.empty(
+            (current_batch_size, len(base_values), base_values.shape[1]),
+            dtype="float64",
         )
-        invalid_rows += invalid
-        placebo_values.append(
-            _cumulative_frozen_path_alpha_from_arrays(
+        for batch_index in range(current_batch_size):
+            permuted_values, invalid = _permuted_executed_numpy(
                 base_values,
-                permuted_values,
-                prepared,
-                transaction_cost_pct,
+                tilt_values,
+                rng,
             )
+            invalid_rows += invalid
+            batch[batch_index] = permuted_values
+        exec_drift = batch[:, previous_positions, :] * previous_ratios[None, :, :]
+        exec_drift /= exec_drift.sum(axis=2, keepdims=True)
+        exec_targets = batch[:, positions, :]
+        exec_turnover = np.abs(exec_targets - exec_drift).sum(axis=2)
+        exec_growth = (
+            1.0 - float(transaction_cost_pct) * exec_turnover
+        ) * np.sum(exec_targets * next_ratios[None, :, :], axis=2)
+        delta = np.log(np.maximum(exec_growth, 1e-12)) - np.log(
+            np.maximum(base_growth[None, :], 1e-12)
         )
+        placebo_values.extend(np.expm1(delta.sum(axis=1)).tolist())
         exec_variance = np.einsum(
-            "ti,tij,tj->t",
-            permuted_values,
+            "bti,tij,btj->bt",
+            batch,
             risk_covariances,
-            permuted_values,
+            batch,
             optimize=True,
         )
         exec_risk = np.sqrt(np.clip(exec_variance, 0.0, None)) * np.sqrt(252.0)
-        placebo_risk_values.append(
-            float(np.mean((exec_risk - base_risk)[risk_valid]))
+        placebo_risk_values.extend(
+            np.mean((exec_risk - base_risk[None, :])[:, risk_valid], axis=1).tolist()
         )
     placebo = np.asarray(placebo_values, dtype="float64")
     placebo_risk = np.asarray(placebo_risk_values, dtype="float64")
@@ -1432,6 +1474,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         manifest["markets"][market] = {
             "seed": seed,
+            **discover_model_identity(Path(args.results_root), market, seed),
             "action_trace": str(action_path),
             "action_trace_sha256": sha256_file(action_path),
             "price_file_sha256": sha256_file(

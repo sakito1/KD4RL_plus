@@ -14,6 +14,7 @@ from paper_experiments.analyze_inner_outer_statistical_validation import (
     circular_block_bootstrap,
     configuration_shape_metrics,
     cumulative_frozen_path_alpha,
+    discover_model_identity,
     ensure_closed_loop_trace,
     ex_ante_risk_metrics,
     frozen_path_direct_effect,
@@ -403,6 +404,19 @@ def test_fast_cumulative_frozen_alpha_matches_daily_counterfactual():
     assert fast == pytest.approx(np.exp(direct["delta_net_log_return"].sum()) - 1.0)
 
 
+def test_discover_model_identity_hashes_checkpoint_and_command(tmp_path):
+    run = tmp_path / "nas_seed49"
+    (run / "checkpoints").mkdir(parents=True)
+    (run / "checkpoints" / "best_model.pth").write_bytes(b"checkpoint")
+    (run / "seed_49_command.json").write_text('{"command": ["python"]}', encoding="utf-8")
+
+    identity = discover_model_identity(tmp_path, "nas", 49)
+
+    assert identity["checkpoint_path"].endswith("best_model.pth")
+    assert len(identity["checkpoint_sha256"]) == 64
+    assert len(identity["command_json_sha256"]) == 64
+
+
 def test_cli_skip_eval_writes_tables_and_report(tmp_path):
     dates = pd.date_range("2020-01-02", periods=10, freq="B")
     prices_root = tmp_path / "prices"
@@ -434,6 +448,10 @@ def test_cli_skip_eval_writes_tables_and_report(tmp_path):
     output = tmp_path / "output"
     traces = output / "traces"
     traces.mkdir(parents=True)
+    run = tmp_path / "unused" / "nas_seed49"
+    (run / "checkpoints").mkdir(parents=True)
+    (run / "checkpoints" / "best_model.pth").write_bytes(b"checkpoint")
+    (run / "seed_49_command.json").write_text('{"command": ["python"]}', encoding="utf-8")
     for scenario, returns, scenario_actions in [
         ("full_controller", np.full(8, 0.002), actions),
         (
