@@ -217,8 +217,8 @@ class PaperExperimentHelperTests(unittest.TestCase):
             _paper_title("Switch Event Study", "nas"),
         ]
 
-        self.assertEqual(_market_label("sh"), "SH Market")
-        self.assertEqual(_market_label("nas"), "NASDAQ Market")
+        self.assertEqual(_market_label("sh"), "CSI-300")
+        self.assertEqual(_market_label("nas"), "Nasdaq-100")
         for title in titles:
             lower = title.lower()
             self.assertNotIn("seed", lower)
