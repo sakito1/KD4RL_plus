@@ -27,6 +27,7 @@ def build_economic_guidance_labels(
         advantage: torch.Tensor,
         *,
         risk_threshold: float = 0.05,
+        risk_min_advantage_threshold: float = 0.0,
         advantage_threshold: float = 0.05,
 ) -> EconomicGuidanceLabels:
     risk = risk.detach().view(-1).float()
@@ -36,7 +37,10 @@ def build_economic_guidance_labels(
 
     valid = torch.isfinite(risk) & torch.isfinite(advantage)
     trigger = valid & (
-        ((risk >= float(risk_threshold)) & (advantage > 0.0))
+        (
+            (risk >= float(risk_threshold))
+            & (advantage > float(risk_min_advantage_threshold))
+        )
         | (advantage >= float(advantage_threshold))
     )
     labels = trigger.to(dtype=risk.dtype)

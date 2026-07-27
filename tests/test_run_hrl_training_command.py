@@ -119,6 +119,38 @@ class RunHrlTrainingCommandTests(unittest.TestCase):
             "300",
         )
 
+    def test_controller_economic_guidance_thresholds_are_forwarded(self):
+        args = self._args_from_cli([
+            "--markets", "sh",
+            "--controller_guidance_risk_threshold", "0.10",
+            "--controller_guidance_risk_min_advantage_threshold", "0.02",
+            "--controller_guidance_advantage_threshold", "0.10",
+        ])
+
+        command = run_hrl_training.build_child_command(
+            args,
+            market="sh",
+            run_root=Path("/tmp/hrl-test"),
+            seed=44,
+        )
+
+        self.assertEqual(
+            command[command.index("--controller_guidance_risk_threshold") + 1],
+            "0.1",
+        )
+        self.assertEqual(
+            command[
+                command.index(
+                    "--controller_guidance_risk_min_advantage_threshold"
+                ) + 1
+            ],
+            "0.02",
+        )
+        self.assertEqual(
+            command[command.index("--controller_guidance_advantage_threshold") + 1],
+            "0.1",
+        )
+
     def test_frozen_hrl_checkpoint_is_forwarded_to_child_command(self):
         args = self._args_from_cli([
             "--markets", "sh",

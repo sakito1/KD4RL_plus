@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use $superpower-subagents (recommended) or $superpower-executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking via update_plan.
 
-**Goal:** Add a directly runnable two-GPU script that resumes only the Controller for SH seeds 44 and 46 with a 60-day Controller horizon and PG switch-supervision coefficient 0.10.
+**Goal:** Add a directly runnable two-GPU script that resumes only the Controller for SH seeds 44 and 46 with a 30-day training horizon, a test-only 60-day forced-switch cap, and PG switch-supervision coefficient 0.10.
 
 **Architecture:** A single Bash scheduler owns the two seed-specific checkpoint defaults and launches one isolated job per GPU. Each job invokes the existing `run_hrl_training.py` controller-only path, freezes Outer+Inner through `--frozen_hrl_checkpoint`, and writes an independent log and result directory.
 
@@ -26,8 +26,8 @@ assert "--seeds 44" in output
 assert "--seeds 46" in output
 assert "--controller_only_finetune" in output
 assert output.count("--controller_sup_coef 0.10") == 2
-assert output.count("--max_hold 60") == 2
-assert output.count("--controller_train_max_hold 60") == 2
+assert output.count("--max_hold 30") == 2
+assert output.count("--controller_train_max_hold 30") == 2
 assert output.count("--controller_eval_max_hold 60") == 2
 assert output.count("--frozen_hrl_checkpoint") == 2
 assert "--warmup_outer_epochs 0" in output
@@ -77,10 +77,13 @@ For each seed, construct a Bash array containing:
 --warmup_outer_epochs 0
 --warmup_inner_epochs 0
 --joint_epochs 0
---max_hold 60
---controller_train_max_hold 60
+--max_hold 30
+--controller_train_max_hold 30
 --controller_eval_max_hold 60
 --controller_sup_coef "$CONTROLLER_SUP_COEF"
+--controller_guidance_risk_threshold 0.10
+--controller_guidance_risk_min_advantage_threshold 0.02
+--controller_guidance_advantage_threshold 0.10
 --controller_guidance_pretrain_coef 1.0
 --controller_aux_mdd_coef 0.01
 --controller_aux_switch_adv_coef 0.01
@@ -128,7 +131,7 @@ DRY_RUN=1 PYTHON_BIN=/bin/echo \
   bash train_sh/resume_sh_controller_44_46_strong_sup.sh
 ```
 
-Expected: two commands, seeds 44 and 46, GPUs 0 and 1, Controller-only training, 60-day horizon, PG supervision 0.10, and no `--skip_test`.
+Expected: two commands, seeds 44 and 46, GPUs 0 and 1, Controller-only training, 30-day training targets, a test-only 60-day forced-switch cap, PG supervision 0.10, and no `--skip_test`.
 
 - [ ] **Step 3: Run focused existing regression**
 

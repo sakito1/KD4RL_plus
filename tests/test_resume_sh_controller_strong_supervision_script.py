@@ -45,11 +45,19 @@ def test_dry_run_builds_two_frozen_controller_only_jobs():
     assert output.count("--warmup_outer_epochs 0") == 2
     assert output.count("--warmup_inner_epochs 0") == 2
     assert output.count("--joint_epochs 0") == 2
-    assert output.count("--max_hold 60") == 2
-    assert output.count("--controller_train_max_hold 60") == 2
+    assert output.count("--max_hold 30") == 2
+    assert output.count("--controller_train_max_hold 30") == 2
     assert output.count("--controller_eval_max_hold 60") == 2
     assert output.count("--controller_sup_coef 0.10") == 2
     assert output.count("--controller_guidance_pretrain_coef 1.0") == 2
+    assert output.count("--controller_guidance_risk_threshold 0.10") == 2
+    assert (
+        output.count(
+            "--controller_guidance_risk_min_advantage_threshold 0.02"
+        )
+        == 2
+    )
+    assert output.count("--controller_guidance_advantage_threshold 0.10") == 2
     assert output.count("--controller_aux_mdd_coef 0.01") == 2
     assert output.count("--controller_aux_switch_adv_coef 0.01") == 2
     assert "--skip_test" not in output

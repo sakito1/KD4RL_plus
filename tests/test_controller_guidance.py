@@ -27,6 +27,20 @@ class ControllerGuidanceLabelTests(unittest.TestCase):
 
         self.assertEqual(result.trigger.tolist(), [False, True, True, False])
 
+    def test_economic_rule_supports_stricter_risk_branch_advantage(self):
+        risk = torch.tensor([0.11, 0.11, 0.01, 0.01])
+        advantage = torch.tensor([0.01, 0.03, 0.09, 0.11])
+
+        result = build_economic_guidance_labels(
+            risk,
+            advantage,
+            risk_threshold=0.10,
+            risk_min_advantage_threshold=0.02,
+            advantage_threshold=0.10,
+        )
+
+        self.assertEqual(result.trigger.tolist(), [False, True, False, True])
+
     def test_economic_rule_labels_every_triggered_day(self):
         risk = torch.tensor([0.06, 0.07, 0.08, 0.01, 0.01])
         advantage = torch.tensor([0.01, 0.02, 0.03, 0.00, 0.06])

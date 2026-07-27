@@ -65,7 +65,7 @@ build_command() {
     --trade_num 5
     --outer_window 60
     --min_hold 30
-    --max_hold 60
+    --max_hold 30
     --train_episodes_per_epoch 1
     --train_start_stride_days 1
     --warmup_outer_epochs 0
@@ -76,8 +76,9 @@ build_command() {
     --controller_sup_pretrain_epochs 3
     --controller_sup_pretrain_rollout_len 300
     --controller_aux_replay_epochs 30
-    --controller_guidance_risk_threshold 0.05
-    --controller_guidance_advantage_threshold 0.05
+    --controller_guidance_risk_threshold 0.10
+    --controller_guidance_risk_min_advantage_threshold 0.02
+    --controller_guidance_advantage_threshold 0.10
     --controller_guidance_pretrain_coef 1.0
     --controller_rollout_len 300
     --controller_windows_per_epoch 12
@@ -88,7 +89,7 @@ build_command() {
     --controller_episode_batch_size 12
     --controller_episode_parallel_workers 6
     --controller_start_stride_days 5
-    --controller_train_max_hold 60
+    --controller_train_max_hold 30
     --controller_eval_max_hold 60
     --controller_window 30
     --controller_hidden_dim 64
@@ -166,7 +167,8 @@ fi
 
 echo "SH Controller strong-supervision resume"
 echo "PG switch supervision coefficient: $CONTROLLER_SUP_COEF"
-echo "Controller horizon: 60 trading days"
+echo "Controller training/target horizon: 30 trading days"
+echo "Controller test-only forced-switch cap: 60 trading days"
 echo "Outer+Inner checkpoints remain frozen"
 
 run_seed 44 &

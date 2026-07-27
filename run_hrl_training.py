@@ -430,6 +430,11 @@ def parse_args():
     )
     parser.add_argument("--controller_rollout_len", type=int, default=300)
     parser.add_argument("--controller_guidance_risk_threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--controller_guidance_risk_min_advantage_threshold",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--controller_guidance_advantage_threshold", type=float, default=0.05)
     parser.add_argument("--controller_guidance_pretrain_coef", type=float, default=1.0)
     parser.add_argument(
@@ -1020,6 +1025,8 @@ def build_child_command(args, market, run_root, seed):
         str(args.controller_rollout_len),
         "--controller_guidance_risk_threshold",
         str(args.controller_guidance_risk_threshold),
+        "--controller_guidance_risk_min_advantage_threshold",
+        str(args.controller_guidance_risk_min_advantage_threshold),
         "--controller_guidance_advantage_threshold",
         str(args.controller_guidance_advantage_threshold),
         "--controller_guidance_pretrain_coef",
@@ -1301,6 +1308,10 @@ def set_runtime_training_args(args, market_root, seed):
         0.0,
         float(args.controller_guidance_risk_threshold),
     )
+    runtime_config.controller_guidance_risk_min_advantage_threshold = max(
+        0.0,
+        float(args.controller_guidance_risk_min_advantage_threshold),
+    )
     runtime_config.controller_guidance_advantage_threshold = max(
         0.0,
         float(args.controller_guidance_advantage_threshold),
@@ -1533,6 +1544,11 @@ def write_child_metadata(args, market_root, label, seed, fixed_cycle):
             "controller_fixed_decision_window": getattr(runtime_config, "controller_fixed_decision_window", None),
             "controller_rollout_len": getattr(runtime_config, "controller_rollout_len", None),
             "controller_guidance_risk_threshold": getattr(runtime_config, "controller_guidance_risk_threshold", None),
+            "controller_guidance_risk_min_advantage_threshold": getattr(
+                runtime_config,
+                "controller_guidance_risk_min_advantage_threshold",
+                None,
+            ),
             "controller_guidance_advantage_threshold": getattr(runtime_config, "controller_guidance_advantage_threshold", None),
             "controller_guidance_pretrain_coef": getattr(runtime_config, "controller_guidance_pretrain_coef", None),
             "controller_max_segments": getattr(runtime_config, "controller_max_segments", None),
@@ -1721,11 +1737,18 @@ def run_child(args):
         getattr(runtime_config, "controller_selection_metric", "risk_return"),
     )
     logger.info(
-        "Controller policy: %s, switch_sup=%s, sup_coef=%s, guidance=(risk:%.4f, advantage:%.4f, pretrain:%.2f), check_stride_days=%s",
+        "Controller policy: %s, switch_sup=%s, sup_coef=%s, "
+        "guidance=(risk:%.4f, risk_min_advantage:%.4f, advantage:%.4f, pretrain:%.2f), "
+        "check_stride_days=%s",
         "counterfactual PG controller" if runtime_config.train_monitor_enabled else "forced hold/switch constraints only",
         getattr(runtime_config, "controller_use_switch_supervision", False),
         getattr(runtime_config, "controller_sup_coef", None),
         getattr(runtime_config, "controller_guidance_risk_threshold", 0.05),
+        getattr(
+            runtime_config,
+            "controller_guidance_risk_min_advantage_threshold",
+            0.0,
+        ),
         getattr(runtime_config, "controller_guidance_advantage_threshold", 0.05),
         getattr(runtime_config, "controller_guidance_pretrain_coef", 1.0),
         getattr(runtime_config, "controller_check_stride_days", None),

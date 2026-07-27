@@ -1125,6 +1125,11 @@ class HRL_Trainer:
             "controller_guidance_advantage_threshold",
             0.05,
         ))
+        risk_min_advantage_threshold = float(getattr(
+            self.cfg,
+            "controller_guidance_risk_min_advantage_threshold",
+            0.0,
+        ))
         for segment in episode_segments:
             valid_records = [
                 record
@@ -1146,6 +1151,7 @@ class HRL_Trainer:
                 risk,
                 advantage,
                 risk_threshold=risk_threshold,
+                risk_min_advantage_threshold=risk_min_advantage_threshold,
                 advantage_threshold=advantage_threshold,
             )
             if guidance.labels.numel() != len(valid_records):
