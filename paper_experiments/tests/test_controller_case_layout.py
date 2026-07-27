@@ -63,21 +63,16 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
             "Switch advantage area",
             "Avoided drawdown",
         ]
-        assert len(fig.texts) == 1
-        fig.canvas.draw()
-        expected_dates = set(
-            portfolio.loc[portfolio["step"].between(20, 50), "date"].dt.strftime("%Y-%m-%d")
-        )
-        for axis in fig.axes:
-            date_labels = [label.get_text() for label in axis.get_xticklabels() if label.get_text()]
-            assert date_labels
-            assert all(
-                len(label) == 10
-                and label[4] == "-"
-                and label[7] == "-"
-                and label.replace("-", "").isdigit()
-                for label in date_labels
-            )
-            assert set(date_labels).issubset(expected_dates)
+        assert len(fig.texts) == 0
+        expected_panel_titles = [
+            "A. Future return after the switch decision",
+            "B. Future drawdown under the same frozen window",
+        ]
+        for axis, panel_title in zip(fig.axes, expected_panel_titles):
+            assert axis.get_title() == ""
+            assert axis.get_xlim() == pytest.approx((1.0, 30.0))
+            assert list(axis.get_xticks()) == pytest.approx([1, 5, 10, 15, 20, 25, 30])
+            assert axis.get_xlabel() == "2021-07-08—2021-08-18"
+            assert panel_title in [text.get_text() for text in axis.texts]
     finally:
         plt.close(fig)
