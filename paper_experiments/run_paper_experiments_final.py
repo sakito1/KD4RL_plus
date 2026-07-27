@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.patches import FancyBboxPatch, Patch
+from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 
@@ -945,7 +945,6 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
 
     keep_color = "#C65D4B"
     switch_color = CONTROLLER_COLOR
-    probability_color = "#315F9E"
     key_date = parse_dates(pd.Series([case["date"]])).iloc[0]
     key_date_label = key_date.strftime("%Y/%m/%d") if pd.notna(key_date) else str(case.get("date", ""))
     exit_prob = float(case.get("exit_prob", np.nan))
@@ -977,11 +976,10 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     action_window["relative_day"] = action_window["step"] - key_step
     switches = action_window[pd.to_numeric(action_window.get("is_switch"), errors="coerce").fillna(0) > 0]
 
-    fig = plt.figure(figsize=(7.2, 7.8))
-    gs = fig.add_gridspec(3, 1, height_ratios=[2.25, 1.65, 1.55], hspace=0.50)
+    fig = plt.figure(figsize=(12.8, 4.8))
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.0], wspace=0.24)
     ax0 = fig.add_subplot(gs[0, 0])
-    ax1 = fig.add_subplot(gs[1, 0])
-    ax2 = fig.add_subplot(gs[2, 0])
+    ax1 = fig.add_subplot(gs[0, 1])
     fig.suptitle(
         f"{MARKET_LABELS[market]} Controller Switch Case",
         x=0.055,
@@ -1040,7 +1038,6 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     ax0.set_xlim(0, realized_horizon)
     clean_axis(ax0)
     ax0.grid(True, axis="both", alpha=0.60)
-    ax0.legend(loc="upper left", ncol=3, frameon=False, fontsize=8.4)
 
     ax1.plot(days, hold_dd_path, color=keep_color, lw=2.3, label="No-controller keep")
     ax1.plot(days, switch_dd_path, color=switch_color, lw=2.6, label="Controller switch")
@@ -1057,70 +1054,21 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     clean_axis(ax1)
     ax1.grid(True, axis="both", alpha=0.60)
 
-    ax2.set_title("C. Day-0 decision evidence for the key switch", loc="left", fontsize=11.0, pad=6)
-    ax2.set_xlim(0, 1)
-    ax2.set_ylim(0, 1)
-    ax2.axis("off")
-    card_specs = [
-        {
-            "x": 0.02,
-            "title": "Switch probability",
-            "value": f"{exit_prob:.2f}",
-            "sub": "threshold = 0.50",
-            "color": probability_color,
-            "kind": "prob",
-        },
-        {
-            "x": 0.355,
-            "title": "30d return gap",
-            "value": f"{ret_gain * 100:+.2f} pp",
-            "sub": "switch - keep",
-            "color": switch_color if ret_gain >= 0 else keep_color,
-            "kind": "metric",
-        },
-        {
-            "x": 0.69,
-            "title": "30d MDD reduction",
-            "value": f"{mdd_gain * 100:+.2f} pp",
-            "sub": "keep MDD - switch MDD",
-            "color": switch_color if mdd_gain >= 0 else keep_color,
-            "kind": "metric",
-        },
-    ]
-    for spec in card_specs:
-        x0 = spec["x"]
-        box = FancyBboxPatch(
-            (x0, 0.22),
-            0.29,
-            0.58,
-            boxstyle="round,pad=0.012,rounding_size=0.018",
-            facecolor="#FFFFFF",
-            edgecolor="#D9DEE7",
-            linewidth=1.0,
-        )
-        ax2.add_patch(box)
-        ax2.text(x0 + 0.025, 0.70, spec["title"], ha="left", va="center", fontsize=8.8, color="#526071")
-        ax2.text(x0 + 0.025, 0.53, spec["value"], ha="left", va="center", fontsize=16.0, fontweight="semibold", color=spec["color"])
-        ax2.text(x0 + 0.025, 0.34, spec["sub"], ha="left", va="center", fontsize=8.2, color="#6B7280")
-        if spec["kind"] == "prob":
-            bar_x = x0 + 0.025
-            bar_y = 0.26
-            bar_w = 0.24
-            ax2.plot([bar_x, bar_x + bar_w], [bar_y, bar_y], color="#CBD2DD", lw=6, solid_capstyle="round")
-            fill_w = bar_w * min(max(exit_prob if np.isfinite(exit_prob) else 0.0, 0.0), 1.0)
-            ax2.plot([bar_x, bar_x + fill_w], [bar_y, bar_y], color=probability_color, lw=6, solid_capstyle="round")
-            threshold_x = bar_x + bar_w * 0.5
-            ax2.plot([threshold_x, threshold_x], [bar_y - 0.045, bar_y + 0.045], color="#8A95A6", lw=1.0, linestyle=(0, (3, 2)))
-    ax2.text(
-        0.02,
-        0.05,
-        "Day 0 is the selected actual switch. Panels A and B freeze the two alternatives from this same day for 30 trading days.",
-        ha="left",
-        va="bottom",
-        fontsize=8.4,
-        color="#526071",
+    legend_items = {}
+    for axis in (ax0, ax1):
+        handles, labels = axis.get_legend_handles_labels()
+        for handle, label in zip(handles, labels):
+            legend_items.setdefault(label, handle)
+    fig.legend(
+        legend_items.values(),
+        legend_items.keys(),
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.875),
+        ncol=len(legend_items),
+        frameon=False,
+        fontsize=8.8,
     )
-    fig.subplots_adjust(left=0.11, right=0.88, top=0.90, bottom=0.08)
+    fig.subplots_adjust(left=0.07, right=0.98, top=0.76, bottom=0.14)
     save_figure(fig, out_dir / f"controller_case_{market}_{case_id:02d}")
 
     return {
@@ -1890,7 +1838,7 @@ def write_readmes(dirs: Dict[str, Path], markets: Sequence[str]) -> None:
         """
 # Controller Interpretability
 
-这个目录解释 controller 到底在什么情况下 switch。`controller_case_*.png` 是自动筛选出的关键 free switch：第一行固定切点后 30 个交易日，比较“继续旧基础组合（无 controller）”和“切到新基础组合（controller）”的反事实收益；第二行比较同一冻结窗口下的未来回撤；第三行展示切点前后的 exit probability 与反事实切仓优势。这样可以避免真实路径后续多次切仓污染单个 switch 的比较。
+这个目录解释 controller 到底在什么情况下 switch。`controller_case_*.png` 是自动筛选出的关键 free switch：左侧固定切点后 30 个交易日，比较“继续旧基础组合（无 controller）”和“切到新基础组合（controller）”的反事实收益；右侧比较同一冻结窗口下的未来回撤；顶部共享图例，决策日期和 exit probability 保留在副标题中。这样可以避免真实路径后续多次切仓污染单个 switch 的比较。
 
 `switch_counterfactual_distribution_*.png` 比较所有实际 free switch 点之后 20 日的 switch/hold 反事实收益分布；`switch_remaining_horizon_counterfactual_distribution_*.png` 进一步比较每个实际 switch 在“切仓前组合原本剩余持仓期”内的 switch/hold 冻结反事实收益分布，避免真实路径后续多次切仓污染比较。`fixed_window_comparison_*.png` 比较 learned controller 与 5/10/20/30/60 日固定持仓窗口；`controller_probability_resonance_*.png` 展示 exit probability 是否和未来切仓优势同向变化。
 
