@@ -928,7 +928,13 @@ def select_controller_cases(actions: pd.DataFrame, portfolio: pd.DataFrame, coun
     return pd.DataFrame(selected)
 
 
-def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: pd.DataFrame, actions: pd.DataFrame, out_dir: Path) -> Dict[str, float]:
+def prepare_controller_case_plot_data(
+    market: str,
+    case_id: int,
+    case: pd.Series,
+    portfolio: pd.DataFrame,
+    actions: pd.DataFrame,
+) -> Dict[str, object]:
     key_step = int(case["step"])
     hold_curve = parse_curve_json(case.get("hold_curve_30", ""))
     switch_curve = parse_curve_json(case.get("switch_curve_30", ""))
@@ -942,10 +948,7 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     switch_curve = switch_curve[:curve_len]
     realized_horizon = curve_len - 1
 
-    keep_color = "#C65D4B"
-    switch_color = CONTROLLER_COLOR
     key_date = parse_dates(pd.Series([case["date"]])).iloc[0]
-    exit_prob = float(case.get("exit_prob", np.nan))
     portfolio_window = portfolio.copy()
     portfolio_window["_step"] = pd.to_numeric(portfolio_window["step"], errors="coerce")
     portfolio_window["_date"] = parse_dates(portfolio_window["date"])
@@ -988,10 +991,70 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     action_window["relative_day"] = action_window["step"] - key_step
     switches = action_window[pd.to_numeric(action_window.get("is_switch"), errors="coerce").fillna(0) > 0]
 
-    fig = plt.figure(figsize=(12.8, 5.2))
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.0], wspace=0.24)
-    ax0 = fig.add_subplot(gs[0, 0])
-    ax1 = fig.add_subplot(gs[0, 1])
+    summary = {
+        "market": market,
+        "case_id": case_id,
+        "key_date": str(case["date"]),
+        "key_step": key_step,
+        "case_horizon": int(realized_horizon),
+        "signal_window_start": int(action_window["step"].min()) if not action_window.empty else key_step,
+        "signal_window_end": int(action_window["step"].max()) if not action_window.empty else key_step,
+        "switches_in_window": int(pd.to_numeric(switches["is_switch"], errors="coerce").fillna(0).sum()) if not switches.empty else 0,
+        "free_switches_in_window": int(pd.to_numeric(switches.get("is_free_switch", 0), errors="coerce").fillna(0).sum()) if not switches.empty else 0,
+        "hold_future_return_20": float(case.get("hold_future_return_20", np.nan)),
+        "switch_future_return_20": float(case.get("switch_future_return_20", np.nan)),
+        "hold_future_mdd_20": float(case.get("hold_future_mdd_20", np.nan)),
+        "switch_future_mdd_20": float(case.get("switch_future_mdd_20", np.nan)),
+        "ret_gain_20": float(case.get("switch_future_return_20", np.nan) - case.get("hold_future_return_20", np.nan)),
+        "mdd_gain_20": float(case.get("hold_future_mdd_20", np.nan) - case.get("switch_future_mdd_20", np.nan)),
+        "hold_future_return_30": hold_return,
+        "switch_future_return_30": switch_return,
+        "hold_future_mdd_30": hold_mdd,
+        "switch_future_mdd_30": switch_mdd,
+        "ret_gain_30": ret_gain,
+        "mdd_gain_30": mdd_gain,
+        "exit_prob": float(case.get("exit_prob", np.nan)),
+        "score": float(case.get("score", np.nan)),
+    }
+    return {
+        "plot_days": plot_days,
+        "date_range_label": date_range_label,
+        "realized_horizon": realized_horizon,
+        "hold_return": hold_return,
+        "switch_return": switch_return,
+        "ret_gain": ret_gain,
+        "hold_mdd": hold_mdd,
+        "switch_mdd": switch_mdd,
+        "mdd_gain": mdd_gain,
+        "hold_ret_plot": hold_ret_plot,
+        "switch_ret_plot": switch_ret_plot,
+        "hold_dd_plot": hold_dd_plot,
+        "switch_dd_plot": switch_dd_plot,
+        "summary": summary,
+    }
+
+
+def draw_controller_case_panels(
+    ax0,
+    ax1,
+    data: Dict[str, object],
+    *,
+    show_panel_titles: bool,
+) -> Dict[str, object]:
+    keep_color = "#C65D4B"
+    switch_color = CONTROLLER_COLOR
+    plot_days = data["plot_days"]
+    realized_horizon = int(data["realized_horizon"])
+    hold_ret_plot = data["hold_ret_plot"]
+    switch_ret_plot = data["switch_ret_plot"]
+    hold_dd_plot = data["hold_dd_plot"]
+    switch_dd_plot = data["switch_dd_plot"]
+    hold_return = float(data["hold_return"])
+    switch_return = float(data["switch_return"])
+    ret_gain = float(data["ret_gain"])
+    hold_mdd = float(data["hold_mdd"])
+    switch_mdd = float(data["switch_mdd"])
+    mdd_gain = float(data["mdd_gain"])
 
     ax0.plot(plot_days, hold_ret_plot, color=keep_color, lw=2.5, label="No-controller keep")
     ax0.plot(plot_days, switch_ret_plot, color=switch_color, lw=2.8, label="Controller switch")
@@ -1033,7 +1096,7 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     ax0.grid(True, axis="both", alpha=0.60)
 
     ax1.plot(plot_days, hold_dd_plot, color=keep_color, lw=2.3, label="No-controller keep")
-    ax1.plot(plot_days, switch_dd_plot, color=switch_color, lw=2.6, label="Controller switch")
+    ax1.plot(plot_days, switch_dd_plot, color=switch_color, lw=2.6, label="Controller reconstruct")
     ax1.fill_between(plot_days, switch_dd_plot, hold_dd_plot, where=hold_dd_plot >= switch_dd_plot, color="#F1B7AB", alpha=0.40, interpolate=True, label="Avoided drawdown")
     hold_mdd_index = int(np.nanargmax(hold_dd_plot))
     switch_mdd_index = int(np.nanargmax(switch_dd_plot))
@@ -1056,24 +1119,40 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     ]
     for axis, panel_title in zip((ax0, ax1), panel_titles):
         axis.set_xticks(tick_days)
-        axis.set_xlabel(date_range_label, fontsize=9.2, color="#526071", labelpad=8)
-        axis.text(
-            0.5,
-            -0.27,
-            panel_title,
-            transform=axis.transAxes,
-            ha="center",
-            va="top",
-            fontsize=11.0,
-            fontweight="semibold",
-            color="#1F2937",
-        )
+        axis.set_xlabel(data["date_range_label"], fontsize=9.2, color="#526071", labelpad=8)
+        if show_panel_titles:
+            axis.text(
+                0.5,
+                -0.27,
+                panel_title,
+                transform=axis.transAxes,
+                ha="center",
+                va="top",
+                fontsize=11.0,
+                fontweight="semibold",
+                color="#1F2937",
+            )
 
     legend_items = {}
     for axis in (ax0, ax1):
         handles, labels = axis.get_legend_handles_labels()
         for handle, label in zip(handles, labels):
             legend_items.setdefault(label, handle)
+    return legend_items
+
+
+def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: pd.DataFrame, actions: pd.DataFrame, out_dir: Path) -> Dict[str, float]:
+    data = prepare_controller_case_plot_data(market, case_id, case, portfolio, actions)
+    fig = plt.figure(figsize=(12.8, 5.2))
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.0], wspace=0.24)
+    ax0 = fig.add_subplot(gs[0, 0])
+    ax1 = fig.add_subplot(gs[0, 1])
+    legend_items = draw_controller_case_panels(
+        ax0,
+        ax1,
+        data,
+        show_panel_titles=True,
+    )
     fig.legend(
         legend_items.values(),
         legend_items.keys(),
@@ -1085,32 +1164,112 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     )
     fig.subplots_adjust(left=0.07, right=0.98, top=0.82, bottom=0.27)
     save_figure(fig, out_dir / f"controller_case_{market}_{case_id:02d}")
+    return data["summary"]
 
-    return {
-        "market": market,
-        "case_id": case_id,
-        "key_date": str(case["date"]),
-        "key_step": key_step,
-        "case_horizon": int(realized_horizon),
-        "signal_window_start": int(action_window["step"].min()) if not action_window.empty else key_step,
-        "signal_window_end": int(action_window["step"].max()) if not action_window.empty else key_step,
-        "switches_in_window": int(pd.to_numeric(switches["is_switch"], errors="coerce").fillna(0).sum()) if not switches.empty else 0,
-        "free_switches_in_window": int(pd.to_numeric(switches.get("is_free_switch", 0), errors="coerce").fillna(0).sum()) if not switches.empty else 0,
-        "hold_future_return_20": float(case.get("hold_future_return_20", np.nan)),
-        "switch_future_return_20": float(case.get("switch_future_return_20", np.nan)),
-        "hold_future_mdd_20": float(case.get("hold_future_mdd_20", np.nan)),
-        "switch_future_mdd_20": float(case.get("switch_future_mdd_20", np.nan)),
-        "ret_gain_20": float(case.get("switch_future_return_20", np.nan) - case.get("hold_future_return_20", np.nan)),
-        "mdd_gain_20": float(case.get("hold_future_mdd_20", np.nan) - case.get("switch_future_mdd_20", np.nan)),
-        "hold_future_return_30": hold_return,
-        "switch_future_return_30": switch_return,
-        "hold_future_mdd_30": hold_mdd,
-        "switch_future_mdd_30": switch_mdd,
-        "ret_gain_30": ret_gain,
-        "mdd_gain_30": mdd_gain,
-        "exit_prob": float(case.get("exit_prob", np.nan)),
-        "score": float(case.get("score", np.nan)),
-    }
+
+def controller_case_combinations(sh_cases, nas_cases):
+    return [
+        (sh_id, sh_case, nas_id, nas_case)
+        for sh_id, sh_case in sh_cases
+        for nas_id, nas_case in nas_cases
+    ]
+
+
+def plot_combined_controller_case(
+    *,
+    sh_case_id: int,
+    sh_case: pd.Series,
+    sh_portfolio: pd.DataFrame,
+    sh_actions: pd.DataFrame,
+    nas_case_id: int,
+    nas_case: pd.Series,
+    nas_portfolio: pd.DataFrame,
+    nas_actions: pd.DataFrame,
+    out_dir: Path,
+) -> None:
+    sh_data = prepare_controller_case_plot_data(
+        "sh", sh_case_id, sh_case, sh_portfolio, sh_actions
+    )
+    nas_data = prepare_controller_case_plot_data(
+        "nas", nas_case_id, nas_case, nas_portfolio, nas_actions
+    )
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(12.8, 9.0),
+        gridspec_kw={"width_ratios": [1.0, 1.0], "height_ratios": [1.0, 1.0]},
+    )
+    sh_legend = draw_controller_case_panels(
+        axes[0, 0], axes[0, 1], sh_data, show_panel_titles=False
+    )
+    nas_legend = draw_controller_case_panels(
+        axes[1, 0], axes[1, 1], nas_data, show_panel_titles=False
+    )
+    legend_items = {**sh_legend, **nas_legend}
+    fig.legend(
+        legend_items.values(),
+        legend_items.keys(),
+        loc="upper center",
+        bbox_to_anchor=(0.53, 0.985),
+        ncol=len(legend_items),
+        frameon=False,
+        fontsize=8.8,
+    )
+    fig.text(
+        0.018,
+        0.66,
+        "CSI-300",
+        rotation=90,
+        ha="center",
+        va="center",
+        fontsize=12.0,
+        fontweight="semibold",
+        color="#1F2937",
+    )
+    fig.text(
+        0.018,
+        0.285,
+        "Nasdaq-100",
+        rotation=90,
+        ha="center",
+        va="center",
+        fontsize=12.0,
+        fontweight="semibold",
+        color="#1F2937",
+    )
+    fig.text(
+        0.285,
+        0.025,
+        "A. Future return after the switch decision",
+        ha="center",
+        va="bottom",
+        fontsize=11.0,
+        fontweight="semibold",
+        color="#1F2937",
+    )
+    fig.text(
+        0.755,
+        0.025,
+        "B. Future drawdown under the same frozen window",
+        ha="center",
+        va="bottom",
+        fontsize=11.0,
+        fontweight="semibold",
+        color="#1F2937",
+    )
+    fig.subplots_adjust(
+        left=0.075,
+        right=0.985,
+        top=0.91,
+        bottom=0.11,
+        wspace=0.24,
+        hspace=0.36,
+    )
+    save_figure(
+        fig,
+        out_dir
+        / f"controller_case_combined_sh{sh_case_id:02d}_nas{nas_case_id:02d}",
+    )
 
 
 def plot_switch_distribution(market: str, actions: pd.DataFrame, out_dir: Path) -> Dict[str, float]:
@@ -1542,6 +1701,8 @@ def controller_experiment(
     summary_rows = []
     remaining_rows = []
     remaining_frames = []
+    selected_cases = {}
+    selected_inputs = {}
     counterfactual_bundles = counterfactual_bundles or {}
     for market in markets:
         seed = seeds[market]
@@ -1556,7 +1717,13 @@ def controller_experiment(
             case_actions = actions
         cases = select_controller_cases(case_actions, portfolio, case_count)
         cases.to_csv(dirs["controller"] / f"selected_controller_cases_{market}.csv", index=False)
-        for idx, (_, case) in enumerate(cases.iterrows(), start=1):
+        indexed_cases = [
+            (idx, case.copy())
+            for idx, (_, case) in enumerate(cases.iterrows(), start=1)
+        ]
+        selected_cases[market] = indexed_cases
+        selected_inputs[market] = (portfolio, case_actions)
+        for idx, case in indexed_cases:
             case_rows.append(plot_controller_case(market, idx, case, portfolio, case_actions, dirs["controller"]))
         switch_summary = plot_switch_distribution(market, actions, dirs["controller"])
         prob_summary = plot_probability_resonance(market, actions, dirs["controller"])
@@ -1578,6 +1745,23 @@ def controller_experiment(
             remaining_frames.append(remaining_dist)
         if ablation_metrics is not None and not ablation_metrics.empty:
             plot_fixed_window_comparison(market, ablation_metrics, dirs["controller"])
+    if "sh" in selected_cases and "nas" in selected_cases:
+        sh_portfolio, sh_actions = selected_inputs["sh"]
+        nas_portfolio, nas_actions = selected_inputs["nas"]
+        for sh_case_id, sh_case, nas_case_id, nas_case in controller_case_combinations(
+            selected_cases["sh"], selected_cases["nas"]
+        ):
+            plot_combined_controller_case(
+                sh_case_id=sh_case_id,
+                sh_case=sh_case,
+                sh_portfolio=sh_portfolio,
+                sh_actions=sh_actions,
+                nas_case_id=nas_case_id,
+                nas_case=nas_case,
+                nas_portfolio=nas_portfolio,
+                nas_actions=nas_actions,
+                out_dir=dirs["controller"],
+            )
     case_df = pd.DataFrame(case_rows)
     summary_df = pd.DataFrame(summary_rows)
     remaining_summary_df = pd.DataFrame(remaining_rows)
