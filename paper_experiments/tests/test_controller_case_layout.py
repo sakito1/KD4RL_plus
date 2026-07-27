@@ -92,8 +92,8 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
         assert labels == [
             "Controller retain",
             "Controller reconstruct",
-            "Counterfactual switch advantage",
-            "MDD reduction",
+            "Return difference",
+            "Drawdown difference",
         ]
         assert len(fig.texts) == 0
         expected_panel_titles = [
@@ -188,9 +188,13 @@ def test_combined_controller_case_uses_two_by_two_layout(
         assert legend_labels == [
             "Controller retain",
             "Controller reconstruct",
-            "Counterfactual switch advantage",
-            "MDD reduction",
+            "Return difference",
+            "Drawdown difference",
         ]
+        assert fig.get_size_inches() == pytest.approx([10.24, 6.3])
+        assert fig.legends[0].get_texts()[0].get_fontsize() == pytest.approx(9.8)
+        assert top_left.xaxis.label.get_fontsize() == pytest.approx(10.2)
+        assert top_left.yaxis.label.get_fontsize() == pytest.approx(11.0)
         assert captured["path"].name == "controller_case_combined_sh01_nas02"
         row_labels = {
             text.get_text(): text

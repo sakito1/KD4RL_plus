@@ -1040,6 +1040,7 @@ def draw_controller_case_panels(
     data: Dict[str, object],
     *,
     show_panel_titles: bool,
+    font_delta: float = 0.0,
 ) -> Dict[str, object]:
     keep_color = "#C65D4B"
     switch_color = CONTROLLER_COLOR
@@ -1066,7 +1067,7 @@ def draw_controller_case_panels(
         color="#BFE6DD",
         alpha=0.58,
         interpolate=True,
-        label="Counterfactual switch advantage",
+        label="Return difference",
     )
     ax0.fill_between(plot_days, hold_ret_plot, switch_ret_plot, where=switch_ret_plot < hold_ret_plot, color="#F4C7BE", alpha=0.32, interpolate=True)
     ax0.axhline(0, color="#CBD2DD", lw=1.0)
@@ -1075,37 +1076,37 @@ def draw_controller_case_panels(
     ax0.annotate(
         f"retain {hold_return * 100:+.2f}%",
         xy=(realized_horizon, hold_ret_plot[-1]),
-        xytext=(-66, -14 if hold_ret_plot[-1] <= switch_ret_plot[-1] else 12),
+        xytext=(-66 - 8 * font_delta, -14 if hold_ret_plot[-1] <= switch_ret_plot[-1] else 12),
         textcoords="offset points",
-        fontsize=9.0,
+        fontsize=9.0 + font_delta,
         color=keep_color,
     )
     ax0.annotate(
         f"reconstruct {switch_return * 100:+.2f}%",
         xy=(realized_horizon, switch_ret_plot[-1]),
-        xytext=(-76, 10 if hold_ret_plot[-1] <= switch_ret_plot[-1] else -16),
+        xytext=(-76 - 24 * font_delta, 10 if hold_ret_plot[-1] <= switch_ret_plot[-1] else -16),
         textcoords="offset points",
-        fontsize=9.0,
+        fontsize=9.0 + font_delta,
         color=switch_color,
         fontweight="semibold",
     )
-    ax0.text(0.02, 0.06, f"Return uplift: {ret_gain * 100:+.2f} pp", transform=ax0.transAxes, ha="left", va="bottom", fontsize=10.0, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
-    ax0.set_ylabel("Return (%)")
+    ax0.text(0.02, 0.06, f"Return uplift: {ret_gain * 100:+.2f} pp", transform=ax0.transAxes, ha="left", va="bottom", fontsize=10.0 + font_delta, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
+    ax0.set_ylabel("Return (%)", fontsize=10.0 + font_delta)
     ax0.set_xlim(1, realized_horizon)
     clean_axis(ax0)
     ax0.grid(True, axis="both", alpha=0.60)
 
     ax1.plot(plot_days, hold_dd_plot, color=keep_color, lw=2.3, label="Controller retain")
     ax1.plot(plot_days, switch_dd_plot, color=switch_color, lw=2.6, label="Controller reconstruct")
-    ax1.fill_between(plot_days, switch_dd_plot, hold_dd_plot, where=hold_dd_plot >= switch_dd_plot, color="#F1B7AB", alpha=0.40, interpolate=True, label="MDD reduction")
+    ax1.fill_between(plot_days, switch_dd_plot, hold_dd_plot, where=hold_dd_plot >= switch_dd_plot, color="#F1B7AB", alpha=0.40, interpolate=True, label="Drawdown difference")
     hold_mdd_index = int(np.nanargmax(hold_dd_plot))
     switch_mdd_index = int(np.nanargmax(switch_dd_plot))
     hold_mdd_day = int(plot_days[hold_mdd_index])
     switch_mdd_day = int(plot_days[switch_mdd_index])
     ax1.scatter([hold_mdd_day], [hold_dd_plot[hold_mdd_index]], color=keep_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
     ax1.scatter([switch_mdd_day], [switch_dd_plot[switch_mdd_index]], color=switch_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
-    ax1.text(0.02, 0.84, f"MDD reduction: {mdd_gain * 100:+.2f} pp", transform=ax1.transAxes, ha="left", va="top", fontsize=9.5, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
-    ax1.set_ylabel("Drawdown (%)")
+    ax1.text(0.02, 0.84, f"MDD reduction: {mdd_gain * 100:+.2f} pp", transform=ax1.transAxes, ha="left", va="top", fontsize=9.5 + font_delta, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
+    ax1.set_ylabel("Drawdown (%)", fontsize=10.0 + font_delta)
     ax1.set_xlim(1, realized_horizon)
     ax1.set_ylim(bottom=0)
     clean_axis(ax1)
@@ -1119,7 +1120,13 @@ def draw_controller_case_panels(
     ]
     for axis, panel_title in zip((ax0, ax1), panel_titles):
         axis.set_xticks(tick_days)
-        axis.set_xlabel(data["date_range_label"], fontsize=9.2, color="#526071", labelpad=8)
+        axis.tick_params(axis="both", labelsize=10.0 + font_delta)
+        axis.set_xlabel(
+            data["date_range_label"],
+            fontsize=9.2 + font_delta,
+            color="#526071",
+            labelpad=8 - 4 * font_delta,
+        )
         if show_panel_titles:
             axis.text(
                 0.5,
@@ -1128,7 +1135,7 @@ def draw_controller_case_panels(
                 transform=axis.transAxes,
                 ha="center",
                 va="top",
-                fontsize=11.0,
+                fontsize=11.0 + font_delta,
                 fontweight="semibold",
                 color="#1F2937",
             )
@@ -1196,14 +1203,14 @@ def plot_combined_controller_case(
     fig, axes = plt.subplots(
         2,
         2,
-        figsize=(12.8, 9.0),
+        figsize=(10.24, 6.3),
         gridspec_kw={"width_ratios": [1.0, 1.0], "height_ratios": [1.0, 1.0]},
     )
     sh_legend = draw_controller_case_panels(
-        axes[0, 0], axes[0, 1], sh_data, show_panel_titles=False
+        axes[0, 0], axes[0, 1], sh_data, show_panel_titles=False, font_delta=1.0
     )
     nas_legend = draw_controller_case_panels(
-        axes[1, 0], axes[1, 1], nas_data, show_panel_titles=False
+        axes[1, 0], axes[1, 1], nas_data, show_panel_titles=False, font_delta=1.0
     )
     legend_items = {**sh_legend, **nas_legend}
     fig.legend(
@@ -1213,25 +1220,25 @@ def plot_combined_controller_case(
         bbox_to_anchor=(0.53, 0.985),
         ncol=len(legend_items),
         frameon=False,
-        fontsize=8.8,
+        fontsize=9.8,
     )
     fig.text(
         0.285,
-        0.025,
+        0.012,
         "A. Frozen portfolio return",
         ha="center",
         va="bottom",
-        fontsize=11.0,
+        fontsize=12.0,
         fontweight="semibold",
         color="#1F2937",
     )
     fig.text(
         0.755,
-        0.025,
+        0.012,
         "B. Frozen portfolio drawdown",
         ha="center",
         va="bottom",
-        fontsize=11.0,
+        fontsize=12.0,
         fontweight="semibold",
         color="#1F2937",
     )
@@ -1239,7 +1246,7 @@ def plot_combined_controller_case(
         left=0.075,
         right=0.985,
         top=0.91,
-        bottom=0.11,
+        bottom=0.18,
         wspace=0.10,
         hspace=0.22,
     )
@@ -1249,18 +1256,18 @@ def plot_combined_controller_case(
         "rotation": 90,
         "ha": "center",
         "va": "center",
-        "fontsize": 12.0,
+        "fontsize": 13.0,
         "fontweight": "semibold",
         "color": "#1F2937",
     }
     fig.text(
-        0.018,
+        -0.006,
         (top_return_position.y0 + top_return_position.y1) / 2 + 0.015,
         "CSI-300",
         **row_label_style,
     )
     fig.text(
-        0.018,
+        -0.006,
         (bottom_return_position.y0 + bottom_return_position.y1) / 2 + 0.015,
         "Nasdaq-100",
         **row_label_style,
