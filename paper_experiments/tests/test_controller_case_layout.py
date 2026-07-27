@@ -173,8 +173,12 @@ def test_combined_controller_case_uses_two_by_two_layout(
         assert top_left.get_position().y0 > bottom_left.get_position().y0
         horizontal_gap = top_right.get_position().x0 - top_left.get_position().x1
         vertical_gap = top_left.get_position().y0 - bottom_left.get_position().y1
-        assert horizontal_gap < 0.15 * top_left.get_position().width
-        assert vertical_gap < 0.25 * top_left.get_position().height
+        assert horizontal_gap / top_left.get_position().width == pytest.approx(
+            0.18
+        )
+        assert vertical_gap / top_left.get_position().height == pytest.approx(
+            0.30
+        )
         figure_labels = [text.get_text() for text in fig.texts]
         assert figure_labels.count("CSI-300") == 1
         assert figure_labels.count("Nasdaq-100") == 1
@@ -197,7 +201,7 @@ def test_combined_controller_case_uses_two_by_two_layout(
         assert top_left.xaxis.label.get_fontsize() == pytest.approx(10.2)
         assert top_left.yaxis.label.get_fontsize() == pytest.approx(11.0)
         assert captured["path"].name == "controller_case_combined_sh01_nas02"
-        assert captured["save_kwargs"] == {"pad_inches": 0.02}
+        assert captured["save_kwargs"] == {"pad_inches": 0.0}
         assert top_left.get_position().x0 == pytest.approx(0.065)
         assert top_right.get_position().x1 == pytest.approx(0.995)
         row_labels = {

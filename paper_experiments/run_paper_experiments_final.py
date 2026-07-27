@@ -1247,8 +1247,8 @@ def plot_combined_controller_case(
         right=0.995,
         top=0.91,
         bottom=0.16,
-        wspace=0.10,
-        hspace=0.22,
+        wspace=0.18,
+        hspace=0.30,
     )
     top_return_position = axes[0, 0].get_position()
     bottom_return_position = axes[1, 0].get_position()
@@ -1276,7 +1276,7 @@ def plot_combined_controller_case(
         fig,
         out_dir
         / f"controller_case_combined_sh{sh_case_id:02d}_nas{nas_case_id:02d}",
-        pad_inches=0.02,
+        pad_inches=0.0,
     )
 
 
