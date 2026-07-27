@@ -111,6 +111,20 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
         assert any(text.startswith("reconstruct ") for text in annotation_text)
         assert any(text.startswith("Return uplift:") for text in annotation_text)
         assert any(text.startswith("MDD reduction:") for text in annotation_text)
+        return_box = next(
+            text for text in left.texts if text.get_text().startswith("Return uplift:")
+        )
+        drawdown_box = next(
+            text
+            for text in right.texts
+            if text.get_text().startswith("MDD reduction:")
+        )
+        assert return_box.get_position() == pytest.approx((0.02, 0.96))
+        assert drawdown_box.get_position() == pytest.approx((0.02, 0.96))
+        for axis in (left, right):
+            line_max = max(max(line.get_ydata()) for line in axis.lines[:2])
+            ymin, ymax = axis.get_ylim()
+            assert (line_max - ymin) / (ymax - ymin) <= 0.82
     finally:
         plt.close(fig)
 

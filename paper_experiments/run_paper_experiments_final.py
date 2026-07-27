@@ -1090,9 +1090,16 @@ def draw_controller_case_panels(
         color=switch_color,
         fontweight="semibold",
     )
-    ax0.text(0.02, 0.06, f"Return uplift: {ret_gain * 100:+.2f} pp", transform=ax0.transAxes, ha="left", va="bottom", fontsize=10.0 + font_delta, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
+    ax0.text(0.02, 0.96, f"Return uplift: {ret_gain * 100:+.2f} pp", transform=ax0.transAxes, ha="left", va="top", fontsize=10.0 + font_delta, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
     ax0.set_ylabel("Return (%)", fontsize=10.0 + font_delta)
     ax0.set_xlim(1, realized_horizon)
+    return_min = float(np.nanmin([np.nanmin(hold_ret_plot), np.nanmin(switch_ret_plot)]))
+    return_max = float(np.nanmax([np.nanmax(hold_ret_plot), np.nanmax(switch_ret_plot)]))
+    return_span = max(return_max - return_min, 1.0)
+    ax0.set_ylim(
+        min(0.0, return_min - 0.05 * return_span),
+        return_max + 0.25 * return_span,
+    )
     clean_axis(ax0)
     ax0.grid(True, axis="both", alpha=0.60)
 
@@ -1105,10 +1112,11 @@ def draw_controller_case_panels(
     switch_mdd_day = int(plot_days[switch_mdd_index])
     ax1.scatter([hold_mdd_day], [hold_dd_plot[hold_mdd_index]], color=keep_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
     ax1.scatter([switch_mdd_day], [switch_dd_plot[switch_mdd_index]], color=switch_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
-    ax1.text(0.02, 0.84, f"MDD reduction: {mdd_gain * 100:+.2f} pp", transform=ax1.transAxes, ha="left", va="top", fontsize=9.5 + font_delta, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
+    ax1.text(0.02, 0.96, f"MDD reduction: {mdd_gain * 100:+.2f} pp", transform=ax1.transAxes, ha="left", va="top", fontsize=9.5 + font_delta, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
     ax1.set_ylabel("Drawdown (%)", fontsize=10.0 + font_delta)
     ax1.set_xlim(1, realized_horizon)
-    ax1.set_ylim(bottom=0)
+    drawdown_max = float(np.nanmax([np.nanmax(hold_dd_plot), np.nanmax(switch_dd_plot)]))
+    ax1.set_ylim(0, max(1.0, drawdown_max * 1.25))
     clean_axis(ax1)
     ax1.grid(True, axis="both", alpha=0.60)
     tick_days = [1] + list(range(5, realized_horizon + 1, 5))
