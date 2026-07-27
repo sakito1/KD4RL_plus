@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -236,3 +237,229 @@ def attach_market_volatility_regime(
         ordered=True,
     )
     return result, cuts
+
+
+def drift_weights(previous_target: np.ndarray, gross_ratio: np.ndarray) -> np.ndarray:
+    drifted = np.asarray(previous_target, dtype="float64") * np.asarray(
+        gross_ratio, dtype="float64"
+    )
+    total = float(drifted.sum())
+    if not np.isfinite(total) or total <= 0:
+        raise ValueError("drifted weights have a non-positive total")
+    return drifted / total
+
+
+def frozen_path_direct_effect(
+    base: pd.DataFrame,
+    executed: pd.DataFrame,
+    prices: pd.DataFrame,
+    *,
+    transaction_cost_pct: float,
+) -> pd.DataFrame:
+    _require_aligned_weights(base, executed)
+    if transaction_cost_pct < 0:
+        raise ValueError("transaction_cost_pct must be non-negative")
+    missing_assets = sorted(set(base.columns).difference(prices.columns))
+    if missing_assets:
+        raise ValueError(f"prices are missing columns: {missing_assets}")
+    price_panel = prices.loc[:, base.columns].sort_index().astype("float64")
+    rows = []
+    for position in range(1, len(base)):
+        previous_date = pd.Timestamp(base.index[position - 1])
+        date = pd.Timestamp(base.index[position])
+        later_dates = price_panel.index[price_panel.index > date]
+        if not len(later_dates):
+            continue
+        next_date = pd.Timestamp(later_dates[0])
+        if previous_date not in price_panel.index or date not in price_panel.index:
+            raise ValueError(f"prices do not contain decision dates {previous_date} and {date}")
+        previous_to_today = (
+            price_panel.loc[date].to_numpy() / price_panel.loc[previous_date].to_numpy()
+        )
+        today_to_next = (
+            price_panel.loc[next_date].to_numpy() / price_panel.loc[date].to_numpy()
+        )
+        base_drift = drift_weights(base.iloc[position - 1].to_numpy(), previous_to_today)
+        exec_drift = drift_weights(executed.iloc[position - 1].to_numpy(), previous_to_today)
+        base_target = base.iloc[position].to_numpy(dtype="float64")
+        exec_target = executed.iloc[position].to_numpy(dtype="float64")
+        base_turnover = float(np.abs(base_target - base_drift).sum())
+        exec_turnover = float(np.abs(exec_target - exec_drift).sum())
+        base_cost_rate = float(transaction_cost_pct * base_turnover)
+        exec_cost_rate = float(transaction_cost_pct * exec_turnover)
+        base_growth = float((1.0 - base_cost_rate) * np.dot(base_target, today_to_next))
+        exec_growth = float((1.0 - exec_cost_rate) * np.dot(exec_target, today_to_next))
+        if base_growth <= 0 or exec_growth <= 0:
+            raise ValueError("net portfolio growth must be positive")
+        base_net_log_return = float(np.log(base_growth))
+        exec_net_log_return = float(np.log(exec_growth))
+        rows.append(
+            {
+                "date": date,
+                "next_date": next_date,
+                "exec_net_log_return": exec_net_log_return,
+                "base_net_log_return": base_net_log_return,
+                "delta_net_log_return": exec_net_log_return - base_net_log_return,
+                "exec_turnover": exec_turnover,
+                "base_turnover": base_turnover,
+                "exec_cost_rate": exec_cost_rate,
+                "base_cost_rate": base_cost_rate,
+                "market_simple_return": float(np.mean(today_to_next - 1.0)),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "next_date",
+                "exec_net_log_return",
+                "base_net_log_return",
+                "delta_net_log_return",
+                "exec_turnover",
+                "base_turnover",
+                "exec_cost_rate",
+                "base_cost_rate",
+                "market_simple_return",
+            ]
+        )
+    return pd.DataFrame(rows).set_index("date")
+
+
+def newey_west_mean_test(
+    values: Sequence[float],
+    *,
+    maxlags: int = 5,
+) -> dict[str, float]:
+    import statsmodels.api as sm
+
+    array = np.asarray(values, dtype="float64")
+    array = array[np.isfinite(array)]
+    if not len(array):
+        return {"mean": np.nan, "se": np.nan, "t_stat": np.nan, "p_value": np.nan}
+    if np.max(np.abs(array - array.mean())) < 1e-15:
+        mean = float(array.mean())
+        if abs(mean) < 1e-15:
+            return {"mean": mean, "se": 0.0, "t_stat": 0.0, "p_value": 1.0}
+        return {
+            "mean": mean,
+            "se": 0.0,
+            "t_stat": float(np.sign(mean) * np.inf),
+            "p_value": 0.0,
+        }
+    fit = sm.OLS(array, np.ones((len(array), 1))).fit(
+        cov_type="HAC",
+        cov_kwds={
+            "maxlags": min(int(maxlags), max(len(array) - 1, 0)),
+            "use_correction": True,
+        },
+    )
+    return {
+        "mean": float(fit.params[0]),
+        "se": float(fit.bse[0]),
+        "t_stat": float(fit.tvalues[0]),
+        "p_value": float(fit.pvalues[0]),
+    }
+
+
+def circular_block_bootstrap(
+    arrays: Sequence[np.ndarray],
+    statistic: Callable[..., np.ndarray | float],
+    *,
+    block_length: int,
+    reps: int,
+    seed: int,
+) -> np.ndarray:
+    if not arrays:
+        raise ValueError("at least one array is required")
+    prepared = [np.asarray(array) for array in arrays]
+    sample_size = len(prepared[0])
+    if any(len(array) != sample_size for array in prepared):
+        raise ValueError("paired bootstrap arrays must have equal lengths")
+    if sample_size == 0 or block_length < 1 or reps < 1:
+        raise ValueError("sample size, block length, and reps must be positive")
+    rng = np.random.default_rng(int(seed))
+    block_count = int(np.ceil(sample_size / int(block_length)))
+    offsets = np.arange(int(block_length))
+    results = []
+    for _ in range(int(reps)):
+        starts = rng.integers(0, sample_size, size=block_count)
+        indices = ((starts[:, None] + offsets[None, :]) % sample_size).reshape(-1)
+        indices = indices[:sample_size]
+        results.append(statistic(*(array[indices] for array in prepared)))
+    return np.asarray(results)
+
+
+def _expected_shortfall(values: np.ndarray, probability: float = 0.05) -> float:
+    values = np.asarray(values, dtype="float64")
+    values = values[np.isfinite(values)]
+    if not len(values):
+        return np.nan
+    count = max(1, int(np.ceil(len(values) * probability)))
+    return float(np.sort(values)[:count].mean())
+
+
+def summarize_frozen_path(
+    direct: pd.DataFrame,
+    *,
+    block_length: int,
+    bootstrap_reps: int,
+    seed: int,
+) -> dict[str, float | int]:
+    required = {
+        "exec_net_log_return",
+        "base_net_log_return",
+        "delta_net_log_return",
+        "exec_turnover",
+        "base_turnover",
+        "exec_cost_rate",
+        "base_cost_rate",
+        "market_simple_return",
+    }
+    missing = sorted(required.difference(direct.columns))
+    if missing:
+        raise ValueError(f"direct effect table is missing columns: {missing}")
+    clean = direct.dropna(subset=list(required))
+    delta = clean["delta_net_log_return"].to_numpy(dtype="float64")
+    hac = newey_west_mean_test(delta, maxlags=5)
+    boot = circular_block_bootstrap(
+        [delta],
+        lambda values: float(np.mean(values)),
+        block_length=block_length,
+        reps=bootstrap_reps,
+        seed=seed,
+    )
+    ci_low, ci_high = np.quantile(boot, [0.025, 0.975])
+    std = float(np.std(delta, ddof=1)) if len(delta) > 1 else np.nan
+    market_cut = float(clean["market_simple_return"].quantile(0.05))
+    worst_market = clean["market_simple_return"] <= market_cut
+    return {
+        "days": int(len(clean)),
+        "mean_net_alpha_bp_day": float(hac["mean"] * 10000.0),
+        "nw_se_bp_day": float(hac["se"] * 10000.0),
+        "nw_t_stat": float(hac["t_stat"]),
+        "nw_p_value": float(hac["p_value"]),
+        "block_ci_low_bp_day": float(ci_low * 10000.0),
+        "block_ci_high_bp_day": float(ci_high * 10000.0),
+        "positive_alpha_ratio": float(np.mean(delta > 0)),
+        "annualized_alpha_sharpe": (
+            float(np.mean(delta) / std * np.sqrt(252.0))
+            if np.isfinite(std) and std > 0
+            else np.nan
+        ),
+        "cumulative_net_alpha": float(np.exp(np.sum(delta)) - 1.0),
+        "mean_exec_turnover": float(clean["exec_turnover"].mean()),
+        "mean_base_turnover": float(clean["base_turnover"].mean()),
+        "mean_incremental_cost_bp": float(
+            (clean["exec_cost_rate"] - clean["base_cost_rate"]).mean() * 10000.0
+        ),
+        "daily_volatility_difference": float(
+            clean["exec_net_log_return"].std(ddof=1)
+            - clean["base_net_log_return"].std(ddof=1)
+        ),
+        "expected_shortfall_5_difference": float(
+            _expected_shortfall(clean["exec_net_log_return"].to_numpy())
+            - _expected_shortfall(clean["base_net_log_return"].to_numpy())
+        ),
+        "worst_market_5_mean_delta": float(
+            clean.loc[worst_market, "delta_net_log_return"].mean()
+        ),
+    }
