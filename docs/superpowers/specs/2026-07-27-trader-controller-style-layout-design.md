@@ -23,7 +23,7 @@ case figure.
 
 - Preserve the current enlarged fonts and 240-DPI PNG/PDF output.
 - Keep both markets on the same color scale within each metric column.
-- Keep date labels on the bottom row only to avoid repetition.
+- Keep date labels on both market rows because their selected windows differ.
 - Preserve the output basename `trader_refinement_two_markets`.
 
 ## Verification

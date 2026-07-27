@@ -262,21 +262,20 @@ def plot_combined_market_heatmaps(
     *,
     future_horizon: int,
 ) -> None:
-    markets = [market for market in ("nas", "sh") if market in market_panels]
+    markets = [market for market in ("sh", "nas") if market in market_panels]
     if len(markets) != 2:
         return
 
-    fig = plt.figure(figsize=(15.2, 6.0))
+    fig = plt.figure(figsize=(15.2, 6.2))
     grid = fig.add_gridspec(
         2,
-        3,
-        width_ratios=[1.0, 1.0, 0.025],
+        2,
         wspace=0.28,
-        hspace=0.38,
-        left=0.065,
-        right=0.94,
-        top=0.86,
-        bottom=0.16,
+        hspace=0.48,
+        left=0.075,
+        right=0.97,
+        top=0.84,
+        bottom=0.19,
     )
     axes = np.asarray(
         [
@@ -284,7 +283,12 @@ def plot_combined_market_heatmaps(
             [fig.add_subplot(grid[1, 0]), fig.add_subplot(grid[1, 1])],
         ]
     )
-    colorbar_axes = [fig.add_subplot(grid[0, 2]), fig.add_subplot(grid[1, 2])]
+    colorbar_axes = []
+    for column in range(2):
+        position = axes[0, column].get_position()
+        colorbar_axes.append(
+            fig.add_axes([position.x0, 0.91, position.width, 0.018])
+        )
     future_limit = max(
         1.0,
         max(
@@ -302,65 +306,83 @@ def plot_combined_market_heatmaps(
 
     future_image = None
     tilt_image = None
-    for column, market in enumerate(markets):
+    for row, market in enumerate(markets):
         panel = market_panels[market]
         assets = panel["assets"]
-        future_image = axes[0, column].imshow(
+        future_image = axes[row, 0].imshow(
             panel["fut_pct"],
             aspect="auto",
             cmap="RdYlGn",
             vmin=-future_limit,
             vmax=future_limit,
         )
-        tilt_image = axes[1, column].imshow(
+        tilt_image = axes[row, 1].imshow(
             panel["tilt_pct"],
             aspect="auto",
             cmap="BrBG",
             vmin=-tilt_limit,
             vmax=tilt_limit,
         )
-        for row, title in enumerate(
-            (f"Future {future_horizon}-day relative return", "Refinement tilt")
-        ):
+        for column in range(2):
             axis = axes[row, column]
             axis.set_yticks(np.arange(len(assets)))
             axis.set_yticklabels(assets, fontsize=11)
             axis.set_xticks(panel["xticks"])
             axis.tick_params(axis="x", labelsize=10)
             axis.tick_params(axis="y", labelsize=11)
-            axis.set_title(title, fontsize=14, fontweight="semibold", pad=7)
+            axis.set_xticklabels(
+                panel["xticklabels"],
+                rotation=20,
+                ha="right",
+                fontsize=10,
+            )
             axis.spines["top"].set_visible(False)
             axis.spines["right"].set_visible(False)
-        axes[0, column].set_xticklabels([])
-        axes[1, column].set_xticklabels(
-            panel["xticklabels"],
-            rotation=20,
-            ha="right",
-            fontsize=10,
-        )
 
     future_colorbar = fig.colorbar(
         future_image,
         cax=colorbar_axes[0],
+        orientation="horizontal",
     )
     future_colorbar.set_label("Relative return (%)", fontsize=11)
     future_colorbar.ax.tick_params(labelsize=10)
+    future_colorbar.ax.xaxis.set_label_position("top")
     tilt_colorbar = fig.colorbar(
         tilt_image,
         cax=colorbar_axes[1],
+        orientation="horizontal",
     )
     tilt_colorbar.set_label("Refinement tilt (pp)", fontsize=11)
     tilt_colorbar.ax.tick_params(labelsize=10)
+    tilt_colorbar.ax.xaxis.set_label_position("top")
 
-    for column, market in enumerate(markets):
-        position = axes[0, column].get_position()
+    for row, market in enumerate(markets):
+        position = axes[row, 0].get_position()
+        fig.text(
+            0.012,
+            (position.y0 + position.y1) / 2,
+            MARKET_LABELS[market],
+            ha="center",
+            va="center",
+            rotation=90,
+            fontsize=15,
+            fontweight="bold",
+            color="#1F2937",
+        )
+    for column, title in enumerate(
+        (
+            f"A. Future {future_horizon}-day relative return",
+            "B. Refinement tilt",
+        )
+    ):
+        position = axes[1, column].get_position()
         fig.text(
             (position.x0 + position.x1) / 2,
-            0.965,
-            f"{MARKET_LABELS[market]} Trader Refinement",
+            0.025,
+            title,
             ha="center",
-            va="top",
-            fontsize=17,
+            va="bottom",
+            fontsize=15,
             fontweight="bold",
             color="#1F2937",
         )

@@ -27,7 +27,7 @@ def panel_data(scale: float) -> dict:
     }
 
 
-def test_trader_refinement_combines_markets_side_by_side_with_large_text(
+def test_trader_refinement_matches_controller_style_layout(
     monkeypatch, tmp_path
 ) -> None:
     captured = {}
@@ -51,20 +51,45 @@ def test_trader_refinement_combines_markets_side_by_side_with_large_text(
         assert len(image_axes) == 4
         top_left, top_right, bottom_left, bottom_right = image_axes
         assert top_left.get_position().x0 < top_right.get_position().x0
+        assert top_left.get_position().y0 > bottom_left.get_position().y0
         assert bottom_left.get_position().x0 < bottom_right.get_position().x0
-        assert top_left.get_title() == "Future 7-day relative return"
-        assert bottom_left.get_title() == "Refinement tilt"
+        assert not any(axis.get_title() for axis in image_axes)
+        np.testing.assert_allclose(
+            np.asarray(top_left.images[0].get_array()),
+            panel_data(0.2)["fut_pct"].to_numpy(),
+        )
+        np.testing.assert_allclose(
+            np.asarray(top_right.images[0].get_array()),
+            panel_data(0.2)["tilt_pct"].to_numpy(),
+        )
+        np.testing.assert_allclose(
+            np.asarray(bottom_left.images[0].get_array()),
+            panel_data(0.1)["fut_pct"].to_numpy(),
+        )
+        np.testing.assert_allclose(
+            np.asarray(bottom_right.images[0].get_array()),
+            panel_data(0.1)["tilt_pct"].to_numpy(),
+        )
         figure_text = [text.get_text() for text in fig.texts]
-        assert "Nasdaq-100 Trader Refinement" in figure_text
-        assert "CSI-300 Trader Refinement" in figure_text
-        assert top_left.title.get_fontsize() >= 14
+        assert figure_text.count("A. Future 7-day relative return") == 1
+        assert figure_text.count("B. Refinement tilt") == 1
+        assert figure_text.count("CSI-300") == 1
+        assert figure_text.count("Nasdaq-100") == 1
         assert top_left.get_yticklabels()[0].get_fontsize() >= 11
         assert len(fig.axes) == 6
         colorbar_axes = [axis for axis in fig.axes if not axis.images]
-        assert colorbar_axes[0].get_position().x0 > top_right.get_position().x1
-        assert colorbar_axes[1].get_position().x0 > bottom_right.get_position().x1
-        assert top_left.images[0].get_clim() == top_right.images[0].get_clim()
-        assert bottom_left.images[0].get_clim() == bottom_right.images[0].get_clim()
+        assert colorbar_axes[0].get_position().y0 > top_left.get_position().y1
+        assert colorbar_axes[1].get_position().y0 > top_right.get_position().y1
+        assert colorbar_axes[0].get_position().x0 == pytest.approx(
+            top_left.get_position().x0
+        )
+        assert colorbar_axes[1].get_position().x0 == pytest.approx(
+            top_right.get_position().x0
+        )
+        assert top_left.images[0].get_clim() == bottom_left.images[0].get_clim()
+        assert top_right.images[0].get_clim() == bottom_right.images[0].get_clim()
+        assert any(label.get_text() for label in top_left.get_xticklabels())
+        assert any(label.get_text() for label in bottom_left.get_xticklabels())
         assert captured["path"].name == "trader_refinement_two_markets"
         assert captured["kwargs"] == {"pad_inches": 0.02}
     finally:
