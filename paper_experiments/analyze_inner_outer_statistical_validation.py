@@ -1264,6 +1264,24 @@ def _write_report(
                 "",
             ]
         )
+    lines.extend(["## Risk-refinement placebo", ""])
+    for _, row in placebo.iterrows():
+        if int(row.get("placebo_reps", 0)) <= 0:
+            continue
+        lines.extend(
+            [
+                f"### {row['market'].upper()}",
+                "",
+                f"- Actual mean ex-ante volatility change: "
+                f"{row['observed_mean_delta_exante_vol']:.4%}; random-tilt mean: "
+                f"{row['placebo_mean_delta_exante_vol']:.4%}.",
+                f"- One-sided risk-reduction permutation p="
+                f"{row['negative_risk_permutation_p']:.4g}.",
+                f"- Alpha-direction permutation p={row['positive_permutation_p']:.4g}; "
+                "this is not used to claim standalone alpha.",
+                "",
+            ]
+        )
     lines.extend(
         [
             "## Interpretation boundary",

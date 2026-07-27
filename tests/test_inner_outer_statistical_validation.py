@@ -510,7 +510,9 @@ def test_cli_skip_eval_writes_tables_and_report(tmp_path):
     assert (output / "tables" / "configuration_refinement.csv").exists()
     assert (output / "tables" / "frozen_path_direct_effect.csv").exists()
     assert (output / "tables" / "closed_loop_effect.csv").exists()
-    assert (output / "INNER_OUTER_STATISTICAL_VALIDATION.md").exists()
+    report_path = output / "INNER_OUTER_STATISTICAL_VALIDATION.md"
+    assert report_path.exists()
+    assert "Risk-refinement placebo" in report_path.read_text(encoding="utf-8")
     placebo = pd.read_csv(output / "tables" / "placebo_analysis.csv")
     assert "negative_risk_permutation_p" in placebo.columns
 
