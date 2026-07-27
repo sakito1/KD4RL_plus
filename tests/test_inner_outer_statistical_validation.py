@@ -7,13 +7,16 @@ import pytest
 from paper_experiments.analyze_inner_outer_statistical_validation import (
     align_closed_loop_returns,
     attach_market_volatility_regime,
+    benjamini_hochberg,
     circular_block_bootstrap,
     configuration_shape_metrics,
     ensure_closed_loop_trace,
     ex_ante_risk_metrics,
     frozen_path_direct_effect,
+    main,
     newey_west_mean_test,
     parse_weight_trace,
+    permute_tilt_within_support,
     portfolio_path_metrics,
     summarize_closed_loop,
     summarize_frozen_path,
@@ -325,3 +328,131 @@ def test_portfolio_path_metrics_and_closed_loop_summary():
     assert total["difference"] > 0
     assert total["ci_low"] > 0
     assert len(bootstrap) == 100
+
+
+def test_permute_tilt_preserves_support_distribution_and_normalization():
+    index = pd.date_range("2020-01-02", periods=2, freq="B")
+    base = pd.DataFrame(
+        [[0.5, 0.3, 0.2, 0.0], [0.4, 0.35, 0.25, 0.0]],
+        index=index,
+        columns=["A", "B", "C", "D"],
+    )
+    tilt = pd.DataFrame(
+        [[0.05, -0.03, -0.02, 0.0], [-0.02, 0.04, -0.02, 0.0]],
+        index=index,
+        columns=base.columns,
+    )
+
+    first, invalid_first = permute_tilt_within_support(base, tilt, seed=13)
+    second, invalid_second = permute_tilt_within_support(base, tilt, seed=13)
+
+    pd.testing.assert_frame_equal(first, second)
+    assert invalid_first == invalid_second == 0
+    np.testing.assert_allclose(first.sum(axis=1), 1.0)
+    np.testing.assert_allclose(first["D"], 0.0)
+    for date in index:
+        support = base.loc[date] > 0
+        original = np.sort(tilt.loc[date, support].to_numpy())
+        permuted = np.sort((first.loc[date, support] - base.loc[date, support]).to_numpy())
+        np.testing.assert_allclose(original, permuted)
+
+
+def test_benjamini_hochberg_is_monotone_and_preserves_nan():
+    adjusted = benjamini_hochberg([0.01, 0.04, 0.03, np.nan])
+
+    assert adjusted[0] == pytest.approx(0.03)
+    assert adjusted[1] == pytest.approx(0.04)
+    assert adjusted[2] == pytest.approx(0.04)
+    assert np.isnan(adjusted[3])
+
+
+def test_cli_skip_eval_writes_tables_and_report(tmp_path):
+    dates = pd.date_range("2020-01-02", periods=10, freq="B")
+    prices_root = tmp_path / "prices"
+    (prices_root / "nas").mkdir(parents=True)
+    price_rows = []
+    for asset, levels in {
+        "A": np.linspace(100.0, 109.0, len(dates)),
+        "B": np.linspace(100.0, 104.0, len(dates)),
+    }.items():
+        price_rows.extend(
+            {"date": date, "tic": asset, "adjclose": level}
+            for date, level in zip(dates, levels)
+        )
+    pd.DataFrame(price_rows).to_csv(prices_root / "nas" / "nas_data.csv", index=False)
+
+    actions_root = tmp_path / "actions"
+    actions_root.mkdir()
+    actions = synthetic_actions(
+        base=[[0.6, 0.4]] * 8,
+        executed=[[0.55, 0.45]] * 8,
+        names=["A", "B"],
+    )
+    actions["date"] = dates[:8].astype(str)
+    actions.to_csv(
+        actions_root / "nas_seed49_full_controller_inner_base_actions.csv",
+        index=False,
+    )
+
+    output = tmp_path / "output"
+    traces = output / "traces"
+    traces.mkdir(parents=True)
+    for scenario, returns, scenario_actions in [
+        ("full_controller", np.full(8, 0.002), actions),
+        (
+            "controller_outer",
+            np.full(8, 0.001),
+            synthetic_actions(
+                base=[[0.6, 0.4]] * 8,
+                executed=[[0.6, 0.4]] * 8,
+                names=["A", "B"],
+            ),
+        ),
+    ]:
+        scenario_actions = scenario_actions.copy()
+        scenario_actions["date"] = dates[:8].astype(str)
+        prefix = f"nas_seed49_{scenario}"
+        pd.DataFrame(
+            {
+                "date": dates[:8].astype(str),
+                "portfolio_value": 1000.0 * np.exp(np.cumsum(returns)),
+                "daily_log_return": returns,
+            }
+        ).to_csv(traces / f"{prefix}_portfolio.csv", index=False)
+        scenario_actions.to_csv(traces / f"{prefix}_actions.csv", index=False)
+        pd.DataFrame({"date": [str(dates[0].date())], "is_switch": [1]}).to_csv(
+            traces / f"{prefix}_switch_events.csv",
+            index=False,
+        )
+
+    exit_code = main(
+        [
+            "--results_root",
+            str(tmp_path / "unused"),
+            "--full_actions_root",
+            str(actions_root),
+            "--prices_root",
+            str(prices_root),
+            "--output_dir",
+            str(output),
+            "--markets",
+            "nas",
+            "--seeds",
+            "nas:49",
+            "--risk_windows",
+            "3",
+            "--block_length",
+            "2",
+            "--bootstrap_reps",
+            "20",
+            "--placebo_reps",
+            "5",
+            "--skip_eval",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (output / "tables" / "configuration_refinement.csv").exists()
+    assert (output / "tables" / "frozen_path_direct_effect.csv").exists()
+    assert (output / "tables" / "closed_loop_effect.csv").exists()
+    assert (output / "INNER_OUTER_STATISTICAL_VALIDATION.md").exists()

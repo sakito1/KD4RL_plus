@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import hashlib
+import subprocess
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -679,3 +682,592 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def permute_tilt_within_support(
+    base: pd.DataFrame,
+    tilt: pd.DataFrame,
+    *,
+    seed: int,
+    max_attempts: int = 100,
+) -> tuple[pd.DataFrame, int]:
+    if not base.index.equals(tilt.index) or list(base.columns) != list(tilt.columns):
+        raise ValueError("base and tilt must be aligned")
+    rng = np.random.default_rng(int(seed))
+    result = base.copy().astype("float64")
+    invalid_rows = 0
+    for date in base.index:
+        base_row = base.loc[date].to_numpy(dtype="float64")
+        tilt_row = tilt.loc[date].to_numpy(dtype="float64")
+        support = np.flatnonzero(base_row > 1e-12)
+        if not len(support):
+            continue
+        accepted = None
+        for _ in range(int(max_attempts)):
+            candidate = base_row.copy()
+            candidate[support] += rng.permutation(tilt_row[support])
+            if np.min(candidate) >= -1e-12 and abs(candidate.sum() - 1.0) <= 1e-7:
+                candidate = np.clip(candidate, 0.0, None)
+                candidate /= candidate.sum()
+                accepted = candidate
+                break
+        if accepted is None:
+            invalid_rows += 1
+            accepted = base_row + tilt_row
+        result.loc[date] = accepted
+    return result, invalid_rows
+
+
+def benjamini_hochberg(p_values: Sequence[float]) -> np.ndarray:
+    values = np.asarray(p_values, dtype="float64")
+    adjusted = np.full(values.shape, np.nan, dtype="float64")
+    finite_indices = np.flatnonzero(np.isfinite(values))
+    if not len(finite_indices):
+        return adjusted
+    finite_values = values[finite_indices]
+    order = np.argsort(finite_values)
+    ranked = finite_values[order]
+    count = len(ranked)
+    corrected = ranked * count / np.arange(1, count + 1)
+    corrected = np.minimum.accumulate(corrected[::-1])[::-1]
+    corrected = np.clip(corrected, 0.0, 1.0)
+    restored = np.empty_like(corrected)
+    restored[order] = corrected
+    adjusted[finite_indices] = restored
+    return adjusted
+
+
+def _parse_seed_specs(specs: Sequence[str]) -> dict[str, int]:
+    result = {"nas": 49, "sh": 90}
+    for spec in specs:
+        market, separator, seed = str(spec).partition(":")
+        if not separator:
+            raise ValueError(f"invalid seed specification: {spec}")
+        result[market] = int(seed)
+    return result
+
+
+def _load_prices(prices_root: Path, market: str, assets: Sequence[str]) -> pd.DataFrame:
+    path = Path(prices_root) / market / f"{market}_data.csv"
+    frame = pd.read_csv(path, usecols=["date", "tic", "adjclose"])
+    frame["date"] = pd.to_datetime(frame["date"])
+    prices = frame.pivot(index="date", columns="tic", values="adjclose").sort_index()
+    missing = sorted(set(assets).difference(prices.columns))
+    if missing:
+        raise ValueError(f"{path} is missing assets: {missing}")
+    return prices.loc[:, list(assets)].ffill()
+
+
+def _block_mean_interval(
+    values: Sequence[float],
+    *,
+    block_length: int,
+    reps: int,
+    seed: int,
+) -> tuple[float, float]:
+    array = np.asarray(values, dtype="float64")
+    array = array[np.isfinite(array)]
+    boot = circular_block_bootstrap(
+        [array],
+        lambda sample: float(np.mean(sample)),
+        block_length=block_length,
+        reps=reps,
+        seed=seed,
+    )
+    return tuple(float(value) for value in np.quantile(boot, [0.025, 0.975]))
+
+
+def summarize_configuration(
+    daily: pd.DataFrame,
+    *,
+    primary_risk_window: int,
+    block_length: int,
+    bootstrap_reps: int,
+    seed: int,
+) -> dict[str, float | int]:
+    risk_column = f"delta_ex_ante_vol_{int(primary_risk_window)}d"
+    downside_column = f"delta_downside_vol_{int(primary_risk_window)}d"
+    risk = daily[risk_column].dropna().to_numpy(dtype="float64")
+    downside = daily[downside_column].dropna().to_numpy(dtype="float64")
+    risk_hac = newey_west_mean_test(risk, maxlags=5)
+    downside_hac = newey_west_mean_test(downside, maxlags=5)
+    risk_ci = _block_mean_interval(
+        risk,
+        block_length=block_length,
+        reps=bootstrap_reps,
+        seed=seed,
+    )
+    downside_ci = _block_mean_interval(
+        downside,
+        block_length=block_length,
+        reps=bootstrap_reps,
+        seed=seed + 1,
+    )
+    active = daily["active_share"]
+    return {
+        "days": int(len(daily)),
+        "mean_active_share": float(active.mean()),
+        "median_active_share": float(active.median()),
+        "p90_active_share": float(active.quantile(0.90)),
+        "active_share_gt_1pct": float((active > 0.01).mean()),
+        "active_share_gt_5pct": float((active > 0.05).mean()),
+        "active_share_gt_10pct": float((active > 0.10).mean()),
+        "mean_delta_hhi": float(daily["delta_hhi"].mean()),
+        "mean_delta_effective_n": float(daily["delta_effective_n"].mean()),
+        "mean_delta_ex_ante_vol": float(np.mean(risk)),
+        "delta_ex_ante_vol_nw_t": float(risk_hac["t_stat"]),
+        "delta_ex_ante_vol_p": float(risk_hac["p_value"]),
+        "delta_ex_ante_vol_ci_low": risk_ci[0],
+        "delta_ex_ante_vol_ci_high": risk_ci[1],
+        "risk_reduction_days": float(np.mean(risk < 0)),
+        "mean_delta_downside_vol": float(np.mean(downside)),
+        "delta_downside_vol_nw_t": float(downside_hac["t_stat"]),
+        "delta_downside_vol_p": float(downside_hac["p_value"]),
+        "delta_downside_vol_ci_low": downside_ci[0],
+        "delta_downside_vol_ci_high": downside_ci[1],
+        "downside_risk_reduction_days": float(np.mean(downside < 0)),
+    }
+
+
+def run_placebo_analysis(
+    base: pd.DataFrame,
+    tilt: pd.DataFrame,
+    prices: pd.DataFrame,
+    *,
+    transaction_cost_pct: float,
+    reps: int,
+    seed: int,
+    observed: dict[str, float | int],
+) -> dict[str, float | int]:
+    observed_cumulative = float(observed["cumulative_net_alpha"])
+    placebo_values = []
+    invalid_rows = 0
+    for replicate in range(int(reps)):
+        permuted, invalid = permute_tilt_within_support(
+            base,
+            tilt,
+            seed=seed + replicate,
+        )
+        invalid_rows += invalid
+        direct = frozen_path_direct_effect(
+            base,
+            permuted,
+            prices,
+            transaction_cost_pct=transaction_cost_pct,
+        )
+        placebo_values.append(
+            float(np.exp(direct["delta_net_log_return"].sum()) - 1.0)
+        )
+    placebo = np.asarray(placebo_values, dtype="float64")
+    positive_p = float(
+        (1 + np.sum(placebo >= observed_cumulative)) / (len(placebo) + 1)
+    )
+    return {
+        "placebo_reps": int(reps),
+        "observed_cumulative_net_alpha": observed_cumulative,
+        "placebo_mean_cumulative_net_alpha": float(placebo.mean()),
+        "placebo_ci_low": float(np.quantile(placebo, 0.025)),
+        "placebo_ci_high": float(np.quantile(placebo, 0.975)),
+        "positive_permutation_p": positive_p,
+        "observed_percentile": float(np.mean(placebo <= observed_cumulative)),
+        "invalid_row_count": int(invalid_rows),
+    }
+
+
+def _load_cached_only(
+    output_dir: Path,
+    market: str,
+    seed: int,
+    scenario: str,
+) -> dict[str, pd.DataFrame]:
+    paths = _trace_cache_paths(output_dir, market, seed, scenario)
+    bundle = _cached_trace_bundle(paths)
+    if bundle is None:
+        raise RuntimeError(
+            f"--skip_eval requires valid cached trace bundle for {market}:{seed}:{scenario}"
+        )
+    return bundle
+
+
+def _plot_market(
+    market: str,
+    daily: pd.DataFrame,
+    paired: pd.DataFrame,
+    figures_dir: Path,
+    primary_risk_window: int,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    market_label = {"nas": "Nasdaq-100", "sh": "CSI-300"}[market]
+    risk_column = f"delta_ex_ante_vol_{primary_risk_window}d"
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.6))
+    for axis, column, title in [
+        (axes[0], "active_share", "Active Share"),
+        (axes[1], "delta_hhi", "Executed − Base HHI"),
+        (axes[2], risk_column, f"Executed − Base {primary_risk_window}d ex-ante vol"),
+    ]:
+        axis.hist(daily[column].dropna(), bins=35, color="#2A9D8F", alpha=0.85)
+        axis.axvline(0.0, color="#D1495B", linewidth=1.0)
+        axis.set_title(title)
+        axis.grid(alpha=0.25)
+    fig.suptitle(f"{market_label}: Inner configuration refinement")
+    fig.tight_layout()
+    for suffix in [".png", ".pdf"]:
+        fig.savefig(
+            figures_dir / f"configuration_refinement_{market}{suffix}",
+            dpi=200,
+            bbox_inches="tight",
+        )
+    plt.close(fig)
+
+    full_wealth = np.exp(paired["full_log_return"].cumsum())
+    no_inner_wealth = np.exp(paired["no_inner_log_return"].cumsum())
+    cumulative_difference = paired["difference_log_return"].cumsum() * 100.0
+    fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+    axes[0].plot(paired.index, full_wealth, label="Full", color="#2A9D8F")
+    axes[0].plot(paired.index, no_inner_wealth, label="No-Inner", color="#D1495B")
+    axes[0].set_ylabel("Wealth")
+    axes[0].legend()
+    axes[1].plot(paired.index, cumulative_difference, color="#264653")
+    axes[1].axhline(0.0, color="#888888", linewidth=0.8)
+    axes[1].set_ylabel("Cumulative log-return gap (pp)")
+    axes[1].set_xlabel("Date")
+    for axis in axes:
+        axis.grid(alpha=0.25)
+    fig.suptitle(f"{market_label}: Full vs No-Inner closed loop")
+    fig.tight_layout()
+    for suffix in [".png", ".pdf"]:
+        fig.savefig(
+            figures_dir / f"closed_loop_difference_{market}{suffix}",
+            dpi=200,
+            bbox_inches="tight",
+        )
+    plt.close(fig)
+
+
+def _status_from_interval(low: float, high: float, beneficial_sign: str) -> str:
+    if beneficial_sign == "negative" and high < 0:
+        return "SUPPORTED"
+    if beneficial_sign == "positive" and low > 0:
+        return "SUPPORTED"
+    return "NOT SUPPORTED"
+
+
+def _write_report(
+    output_dir: Path,
+    configuration: pd.DataFrame,
+    direct: pd.DataFrame,
+    closed: pd.DataFrame,
+    placebo: pd.DataFrame,
+) -> None:
+    lines = [
+        "# Inner–Outer Statistical Validation",
+        "",
+        "## Material Passport",
+        "",
+        "- Verification Status: ANALYZED",
+        "- Scope: paper-selected checkpoint, one checkpoint per market",
+        "- Inference: Newey-West HAC and paired circular block bootstrap",
+        "- Limitation: intervals describe test-period uncertainty, not training-seed uncertainty",
+        "",
+        "## Claim-level results",
+        "",
+    ]
+    for _, row in configuration.iterrows():
+        risk_status = _status_from_interval(
+            row["delta_ex_ante_vol_ci_low"],
+            row["delta_ex_ante_vol_ci_high"],
+            "negative",
+        )
+        lines.extend(
+            [
+                f"### {row['market'].upper()} configuration refinement",
+                "",
+                f"- Mean Active Share: {row['mean_active_share']:.4%} "
+                f"(>1% on {row['active_share_gt_1pct']:.1%} of days).",
+                f"- Mean ex-ante volatility change: {row['mean_delta_ex_ante_vol']:.4%}; "
+                f"95% CI [{row['delta_ex_ante_vol_ci_low']:.4%}, "
+                f"{row['delta_ex_ante_vol_ci_high']:.4%}] — **{risk_status}**.",
+                "",
+            ]
+        )
+    for _, row in direct.iterrows():
+        alpha_status = _status_from_interval(
+            row["block_ci_low_bp_day"],
+            row["block_ci_high_bp_day"],
+            "positive",
+        )
+        lines.extend(
+            [
+                f"### {row['market'].upper()} frozen-path direct effect",
+                "",
+                f"- Fair net alpha: {row['mean_net_alpha_bp_day']:.3f} bp/day; "
+                f"95% CI [{row['block_ci_low_bp_day']:.3f}, "
+                f"{row['block_ci_high_bp_day']:.3f}], p={row['nw_p_value']:.4f} "
+                f"— **{alpha_status}**.",
+                "",
+            ]
+        )
+    for market in closed["market"].unique():
+        sub = closed[closed["market"] == market].set_index("metric")
+        total = sub.loc["total_return"]
+        mdd = sub.loc["max_drawdown"]
+        total_status = _status_from_interval(total["ci_low"], total["ci_high"], "positive")
+        mdd_status = _status_from_interval(mdd["ci_low"], mdd["ci_high"], "negative")
+        lines.extend(
+            [
+                f"### {market.upper()} closed-loop contribution",
+                "",
+                f"- Total-return difference: {total['difference']:.2%}; "
+                f"95% CI [{total['ci_low']:.2%}, {total['ci_high']:.2%}] "
+                f"— **{total_status}**.",
+                f"- MDD difference: {mdd['difference']:.2%}; "
+                f"95% CI [{mdd['ci_low']:.2%}, {mdd['ci_high']:.2%}] "
+                f"— **{mdd_status}**.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Interpretation boundary",
+            "",
+            "A non-significant frozen-path alpha is reported as a null result. "
+            "A positive closed-loop difference is interpreted as a system-level "
+            "complementary contribution, not as proof of standalone daily alpha.",
+            "",
+            "Placebo results are available in `tables/placebo_analysis.csv`.",
+        ]
+    )
+    (Path(output_dir) / "INNER_OUTER_STATISTICAL_VALIDATION.md").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--results_root", required=True)
+    parser.add_argument("--full_actions_root", required=True)
+    parser.add_argument(
+        "--prices_root",
+        default=str(Path(__file__).resolve().parents[1] / "DeepAries" / "data"),
+    )
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--markets", nargs="+", default=["nas", "sh"])
+    parser.add_argument("--seeds", nargs="+", default=["nas:49", "sh:90"])
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--transaction_cost_pct", type=float, default=0.00005)
+    parser.add_argument("--risk_windows", nargs="+", type=int, default=[60, 20])
+    parser.add_argument("--block_length", type=int, default=20)
+    parser.add_argument("--bootstrap_reps", type=int, default=10000)
+    parser.add_argument("--placebo_reps", type=int, default=5000)
+    parser.add_argument("--force_eval", action="store_true")
+    parser.add_argument("--skip_eval", action="store_true")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    seeds = _parse_seed_specs(args.seeds)
+    output_dir = Path(args.output_dir)
+    tables_dir = output_dir / "tables"
+    metadata_dir = output_dir / "metadata"
+    figures_dir = output_dir / "figures"
+    for directory in [output_dir, tables_dir, metadata_dir, figures_dir]:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    configuration_rows = []
+    direct_rows = []
+    closed_frames = []
+    regime_frames = []
+    placebo_rows = []
+    manifest = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "arguments": vars(args),
+        "markets": {},
+    }
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = "unknown"
+    manifest["code_commit"] = commit
+
+    for market_index, market in enumerate(args.markets):
+        seed = seeds[market]
+        if args.skip_eval:
+            full_bundle = _load_cached_only(
+                output_dir, market, seed, "full_controller"
+            )
+            no_inner_bundle = _load_cached_only(
+                output_dir, market, seed, "controller_outer"
+            )
+        else:
+            full_bundle = ensure_closed_loop_trace(
+                results_root=Path(args.results_root),
+                output_dir=output_dir,
+                market=market,
+                seed=seed,
+                scenario="full_controller",
+                device=args.device,
+                force_eval=args.force_eval,
+            )
+            no_inner_bundle = ensure_closed_loop_trace(
+                results_root=Path(args.results_root),
+                output_dir=output_dir,
+                market=market,
+                seed=seed,
+                scenario="controller_outer",
+                device=args.device,
+                force_eval=args.force_eval,
+            )
+
+        action_path = (
+            Path(args.full_actions_root)
+            / f"{market}_seed{seed}_full_controller_inner_base_actions.csv"
+        )
+        actions = pd.read_csv(action_path) if action_path.exists() else full_bundle["actions"]
+        weight_trace = parse_weight_trace(actions)
+        invariants = validate_weight_invariants(weight_trace)
+        prices = _load_prices(Path(args.prices_root), market, weight_trace.base.columns)
+        asset_returns = prices.pct_change(fill_method=None)
+        market_return = asset_returns.mean(axis=1)
+        daily = configuration_shape_metrics(weight_trace.base, weight_trace.executed)
+        for risk_window in args.risk_windows:
+            risk = ex_ante_risk_metrics(
+                weight_trace.base,
+                weight_trace.executed,
+                asset_returns,
+                lookback=risk_window,
+            ).add_suffix(f"_{risk_window}d")
+            daily = daily.join(risk)
+        daily, regime_cuts = attach_market_volatility_regime(
+            daily,
+            market_return,
+            lookback=20,
+        )
+        daily.to_csv(tables_dir / f"{market}_configuration_daily.csv", index_label="date")
+        configuration = summarize_configuration(
+            daily,
+            primary_risk_window=int(args.risk_windows[0]),
+            block_length=args.block_length,
+            bootstrap_reps=args.bootstrap_reps,
+            seed=1000 + seed,
+        )
+        configuration_rows.append({"market": market, "seed": seed, **configuration})
+        regime = (
+            daily.groupby("volatility_regime", observed=False)
+            .agg(
+                days=("active_share", "size"),
+                mean_active_share=("active_share", "mean"),
+                mean_delta_hhi=("delta_hhi", "mean"),
+                mean_delta_ex_ante_vol=(
+                    f"delta_ex_ante_vol_{int(args.risk_windows[0])}d",
+                    "mean",
+                ),
+            )
+            .reset_index()
+        )
+        regime.insert(0, "market", market)
+        regime_frames.append(regime)
+
+        direct_daily = frozen_path_direct_effect(
+            weight_trace.base,
+            weight_trace.executed,
+            prices,
+            transaction_cost_pct=args.transaction_cost_pct,
+        )
+        direct_daily.to_csv(tables_dir / f"{market}_frozen_path_daily.csv", index_label="date")
+        direct = summarize_frozen_path(
+            direct_daily,
+            block_length=args.block_length,
+            bootstrap_reps=args.bootstrap_reps,
+            seed=2000 + seed,
+        )
+        direct_rows.append({"market": market, "seed": seed, **direct})
+
+        paired = align_closed_loop_returns(
+            full_bundle["portfolio"],
+            no_inner_bundle["portfolio"],
+        )
+        paired.to_csv(tables_dir / f"{market}_closed_loop_daily.csv", index_label="date")
+        closed, bootstrap = summarize_closed_loop(
+            paired,
+            block_length=args.block_length,
+            bootstrap_reps=args.bootstrap_reps,
+            seed=3000 + seed,
+        )
+        closed.insert(0, "seed", seed)
+        closed.insert(0, "market", market)
+        closed_frames.append(closed)
+        bootstrap.to_csv(
+            tables_dir / f"{market}_closed_loop_bootstrap.csv",
+            index=False,
+        )
+
+        if args.placebo_reps > 0:
+            placebo = run_placebo_analysis(
+                weight_trace.base,
+                weight_trace.tilt,
+                prices,
+                transaction_cost_pct=args.transaction_cost_pct,
+                reps=args.placebo_reps,
+                seed=4000 + seed,
+                observed=direct,
+            )
+        else:
+            placebo = {"placebo_reps": 0}
+        placebo_rows.append({"market": market, "seed": seed, **placebo})
+        _plot_market(
+            market,
+            daily,
+            paired,
+            figures_dir,
+            int(args.risk_windows[0]),
+        )
+        manifest["markets"][market] = {
+            "seed": seed,
+            "action_trace": str(action_path),
+            "action_trace_sha256": sha256_file(action_path),
+            "price_file_sha256": sha256_file(
+                Path(args.prices_root) / market / f"{market}_data.csv"
+            ),
+            "invariants": invariants,
+            "regime_cuts": regime_cuts,
+        }
+
+    configuration_table = pd.DataFrame(configuration_rows)
+    direct_table = pd.DataFrame(direct_rows)
+    closed_table = pd.concat(closed_frames, ignore_index=True)
+    regime_table = pd.concat(regime_frames, ignore_index=True)
+    placebo_table = pd.DataFrame(placebo_rows)
+    configuration_table.to_csv(tables_dir / "configuration_refinement.csv", index=False)
+    direct_table.to_csv(tables_dir / "frozen_path_direct_effect.csv", index=False)
+    closed_table.to_csv(tables_dir / "closed_loop_effect.csv", index=False)
+    regime_table.to_csv(tables_dir / "regime_analysis.csv", index=False)
+    placebo_table.to_csv(tables_dir / "placebo_analysis.csv", index=False)
+    (metadata_dir / "run_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _write_report(
+        output_dir,
+        configuration_table,
+        direct_table,
+        closed_table,
+        placebo_table,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
