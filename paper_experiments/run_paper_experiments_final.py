@@ -940,14 +940,21 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
         raise ValueError(f"empty counterfactual curve for {market} controller case at step {key_step}")
     hold_curve = hold_curve[:curve_len]
     switch_curve = switch_curve[:curve_len]
-    days = np.arange(curve_len)
     realized_horizon = curve_len - 1
 
     keep_color = "#C65D4B"
     switch_color = CONTROLLER_COLOR
     key_date = parse_dates(pd.Series([case["date"]])).iloc[0]
-    key_date_label = key_date.strftime("%Y/%m/%d") if pd.notna(key_date) else str(case.get("date", ""))
     exit_prob = float(case.get("exit_prob", np.nan))
+    portfolio_window = portfolio.copy()
+    portfolio_window["_step"] = pd.to_numeric(portfolio_window["step"], errors="coerce")
+    portfolio_window["_date"] = parse_dates(portfolio_window["date"])
+    portfolio_window = portfolio_window[portfolio_window["_step"] >= key_step].sort_values("_step")
+    plot_dates = pd.DatetimeIndex(portfolio_window["_date"].dropna().iloc[:curve_len])
+    if len(plot_dates) != curve_len:
+        fallback_start = key_date if pd.notna(key_date) else pd.Timestamp.today().normalize()
+        plot_dates = pd.bdate_range(start=fallback_start, periods=curve_len)
+    x_values = plot_dates.to_pydatetime()
 
     hold_return = float(hold_curve[-1] - 1.0)
     switch_return = float(switch_curve[-1] - 1.0)
@@ -989,20 +996,11 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
         fontweight="semibold",
         color="#1F2937",
     )
-    fig.text(
-        0.055,
-        0.952,
-        f"Key decision {key_date_label} | p(switch)={exit_prob:.2f} | frozen {realized_horizon}-trading-day counterfactual",
-        ha="left",
-        va="top",
-        fontsize=9.4,
-        color="#526071",
-    )
 
-    ax0.plot(days, hold_ret_path, color=keep_color, lw=2.5, label="No-controller keep")
-    ax0.plot(days, switch_ret_path, color=switch_color, lw=2.8, label="Controller switch")
+    ax0.plot(x_values, hold_ret_path, color=keep_color, lw=2.5, label="No-controller keep")
+    ax0.plot(x_values, switch_ret_path, color=switch_color, lw=2.8, label="Controller switch")
     ax0.fill_between(
-        days,
+        x_values,
         hold_ret_path,
         switch_ret_path,
         where=switch_ret_path >= hold_ret_path,
@@ -1011,13 +1009,13 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
         interpolate=True,
         label="Switch advantage area",
     )
-    ax0.fill_between(days, hold_ret_path, switch_ret_path, where=switch_ret_path < hold_ret_path, color="#F4C7BE", alpha=0.32, interpolate=True)
+    ax0.fill_between(x_values, hold_ret_path, switch_ret_path, where=switch_ret_path < hold_ret_path, color="#F4C7BE", alpha=0.32, interpolate=True)
     ax0.axhline(0, color="#CBD2DD", lw=1.0)
-    ax0.scatter([realized_horizon], [hold_ret_path[-1]], color=keep_color, s=48, zorder=4, edgecolor="white", linewidth=0.8)
-    ax0.scatter([realized_horizon], [switch_ret_path[-1]], color=switch_color, s=48, zorder=4, edgecolor="white", linewidth=0.8)
+    ax0.scatter([x_values[-1]], [hold_ret_path[-1]], color=keep_color, s=48, zorder=4, edgecolor="white", linewidth=0.8)
+    ax0.scatter([x_values[-1]], [switch_ret_path[-1]], color=switch_color, s=48, zorder=4, edgecolor="white", linewidth=0.8)
     ax0.annotate(
         f"keep {hold_return * 100:+.2f}%",
-        xy=(realized_horizon, hold_ret_path[-1]),
+        xy=(x_values[-1], hold_ret_path[-1]),
         xytext=(-66, -14 if hold_ret_path[-1] <= switch_ret_path[-1] else 12),
         textcoords="offset points",
         fontsize=9.0,
@@ -1025,7 +1023,7 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     )
     ax0.annotate(
         f"switch {switch_return * 100:+.2f}%",
-        xy=(realized_horizon, switch_ret_path[-1]),
+        xy=(x_values[-1], switch_ret_path[-1]),
         xytext=(-76, 10 if hold_ret_path[-1] <= switch_ret_path[-1] else -16),
         textcoords="offset points",
         fontsize=9.0,
@@ -1035,24 +1033,32 @@ def plot_controller_case(market: str, case_id: int, case: pd.Series, portfolio: 
     ax0.text(0.02, 0.06, f"Return gap: {ret_gain * 100:+.2f} pp", transform=ax0.transAxes, ha="left", va="bottom", fontsize=10.0, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
     ax0.set_title("A. Future return after the switch decision", loc="left", fontsize=11.0, pad=6)
     ax0.set_ylabel("Return (%)")
-    ax0.set_xlim(0, realized_horizon)
+    ax0.set_xlim(x_values[0], x_values[-1])
     clean_axis(ax0)
     ax0.grid(True, axis="both", alpha=0.60)
 
-    ax1.plot(days, hold_dd_path, color=keep_color, lw=2.3, label="No-controller keep")
-    ax1.plot(days, switch_dd_path, color=switch_color, lw=2.6, label="Controller switch")
-    ax1.fill_between(days, switch_dd_path, hold_dd_path, where=hold_dd_path >= switch_dd_path, color="#F1B7AB", alpha=0.40, interpolate=True, label="Avoided drawdown")
+    ax1.plot(x_values, hold_dd_path, color=keep_color, lw=2.3, label="No-controller keep")
+    ax1.plot(x_values, switch_dd_path, color=switch_color, lw=2.6, label="Controller switch")
+    ax1.fill_between(x_values, switch_dd_path, hold_dd_path, where=hold_dd_path >= switch_dd_path, color="#F1B7AB", alpha=0.40, interpolate=True, label="Avoided drawdown")
     hold_mdd_day = int(np.nanargmax(hold_dd_path)) if len(hold_dd_path) else realized_horizon
     switch_mdd_day = int(np.nanargmax(switch_dd_path)) if len(switch_dd_path) else realized_horizon
-    ax1.scatter([hold_mdd_day], [hold_dd_path[hold_mdd_day]], color=keep_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
-    ax1.scatter([switch_mdd_day], [switch_dd_path[switch_mdd_day]], color=switch_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
+    ax1.scatter([x_values[hold_mdd_day]], [hold_dd_path[hold_mdd_day]], color=keep_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
+    ax1.scatter([x_values[switch_mdd_day]], [switch_dd_path[switch_mdd_day]], color=switch_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
     ax1.text(0.02, 0.84, f"Max DD dots: {hold_mdd * 100:.2f}% -> {switch_mdd * 100:.2f}%\nReduction: {mdd_gain * 100:+.2f} pp", transform=ax1.transAxes, ha="left", va="top", fontsize=9.5, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
     ax1.set_title("B. Future drawdown under the same frozen window", loc="left", fontsize=11.0, pad=6)
     ax1.set_ylabel("Drawdown (%)")
-    ax1.set_xlim(0, realized_horizon)
+    ax1.set_xlim(x_values[0], x_values[-1])
     ax1.set_ylim(bottom=0)
     clean_axis(ax1)
     ax1.grid(True, axis="both", alpha=0.60)
+    tick_indices = np.unique(np.linspace(0, curve_len - 1, num=min(4, curve_len), dtype=int))
+    tick_dates = [x_values[index] for index in tick_indices]
+    for axis in (ax0, ax1):
+        axis.set_xticks(tick_dates)
+        axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        axis.tick_params(axis="x", labelrotation=20)
+        for label in axis.get_xticklabels():
+            label.set_horizontalalignment("right")
 
     legend_items = {}
     for axis in (ax0, ax1):

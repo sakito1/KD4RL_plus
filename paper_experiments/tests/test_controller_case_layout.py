@@ -14,7 +14,7 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
     case = pd.Series(
         {
             "step": 20,
-            "date": "2024-01-02",
+            "date": "2021-07-07",
             "exit_prob": 0.72,
             "hold_curve_30": json.dumps(curve),
             "switch_curve_30": json.dumps([value + 0.0005 * day for day, value in enumerate(curve)]),
@@ -32,12 +32,18 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
     )
     captured = {}
     monkeypatch.setattr(figures, "save_figure", lambda fig, path: captured.setdefault("fig", fig))
+    portfolio = pd.DataFrame(
+        {
+            "step": range(61),
+            "date": pd.bdate_range("2021-06-09", periods=61),
+        }
+    )
 
     figures.plot_controller_case(
         "nas",
         1,
         case,
-        pd.DataFrame({"step": range(61)}),
+        portfolio,
         actions,
         tmp_path,
     )
@@ -57,5 +63,21 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
             "Switch advantage area",
             "Avoided drawdown",
         ]
+        assert len(fig.texts) == 1
+        fig.canvas.draw()
+        expected_dates = set(
+            portfolio.loc[portfolio["step"].between(20, 50), "date"].dt.strftime("%Y-%m-%d")
+        )
+        for axis in fig.axes:
+            date_labels = [label.get_text() for label in axis.get_xticklabels() if label.get_text()]
+            assert date_labels
+            assert all(
+                len(label) == 10
+                and label[4] == "-"
+                and label[7] == "-"
+                and label.replace("-", "").isdigit()
+                for label in date_labels
+            )
+            assert set(date_labels).issubset(expected_dates)
     finally:
         plt.close(fig)
