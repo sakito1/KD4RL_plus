@@ -1073,23 +1073,6 @@ def draw_controller_case_panels(
     ax0.axhline(0, color="#CBD2DD", lw=1.0)
     ax0.scatter([realized_horizon], [hold_ret_plot[-1]], color=keep_color, s=48, zorder=4, edgecolor="white", linewidth=0.8)
     ax0.scatter([realized_horizon], [switch_ret_plot[-1]], color=switch_color, s=48, zorder=4, edgecolor="white", linewidth=0.8)
-    ax0.annotate(
-        f"retain {hold_return * 100:+.2f}%",
-        xy=(realized_horizon, hold_ret_plot[-1]),
-        xytext=(-66 - 8 * font_delta, -14 if hold_ret_plot[-1] <= switch_ret_plot[-1] else 12),
-        textcoords="offset points",
-        fontsize=9.0 + font_delta,
-        color=keep_color,
-    )
-    ax0.annotate(
-        f"reconstruct {switch_return * 100:+.2f}%",
-        xy=(realized_horizon, switch_ret_plot[-1]),
-        xytext=(-76 - 24 * font_delta, 10 if hold_ret_plot[-1] <= switch_ret_plot[-1] else -16),
-        textcoords="offset points",
-        fontsize=9.0 + font_delta,
-        color=switch_color,
-        fontweight="semibold",
-    )
     ax0.text(0.02, 0.96, f"Return uplift: {ret_gain * 100:+.2f} pp", transform=ax0.transAxes, ha="left", va="top", fontsize=10.0 + font_delta, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
     ax0.set_ylabel("Return (%)", fontsize=10.0 + font_delta)
     ax0.set_xlim(1, realized_horizon)
@@ -1133,7 +1116,7 @@ def draw_controller_case_panels(
             data["date_range_label"],
             fontsize=9.2 + font_delta,
             color="#526071",
-            labelpad=8 - 4 * font_delta,
+            labelpad=max(4, 8 - 2 * font_delta),
         )
         if show_panel_titles:
             axis.text(
@@ -1190,6 +1173,71 @@ def controller_case_combinations(sh_cases, nas_cases):
     ]
 
 
+def build_controller_case_values_markdown(
+    selected_cases: Dict[str, list],
+    selected_inputs: Dict[str, tuple],
+) -> str:
+    lines = [
+        "# Controller Case Line Values",
+        "",
+        "The plotted line values below are percentages relative to the switch-day "
+        "portfolio value. Day 1 is the first trading day after the Controller decision.",
+        "",
+    ]
+    if "sh" in selected_cases and "nas" in selected_cases:
+        lines.extend(
+            [
+                "## Combined figure mapping",
+                "",
+                "| Figure | CSI-300 case | Nasdaq-100 case |",
+                "|---|---:|---:|",
+            ]
+        )
+        for sh_case_id, _, nas_case_id, _ in controller_case_combinations(
+            selected_cases["sh"], selected_cases["nas"]
+        ):
+            lines.append(
+                f"| `controller_case_combined_sh{sh_case_id:02d}_nas{nas_case_id:02d}` "
+                f"| {sh_case_id} | {nas_case_id} |"
+            )
+        lines.append("")
+
+    for market in ("sh", "nas"):
+        if market not in selected_cases or market not in selected_inputs:
+            continue
+        portfolio, actions = selected_inputs[market]
+        for case_id, case in selected_cases[market]:
+            data = prepare_controller_case_plot_data(
+                market, case_id, case, portfolio, actions
+            )
+            lines.extend(
+                [
+                    f"## {MARKET_LABELS[market]} — Case {case_id}",
+                    "",
+                    f"- Decision date: `{case['date']}`",
+                    f"- Plotted date range: `{data['date_range_label']}`",
+                    "",
+                    "| Day | Retain return (%) | Reconstruct return (%) "
+                    "| Retain drawdown (%) | Reconstruct drawdown (%) |",
+                    "|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for day, retain_ret, reconstruct_ret, retain_dd, reconstruct_dd in zip(
+                data["plot_days"],
+                data["hold_ret_plot"],
+                data["switch_ret_plot"],
+                data["hold_dd_plot"],
+                data["switch_dd_plot"],
+            ):
+                lines.append(
+                    f"| {int(day)} | {float(retain_ret):.2f} "
+                    f"| {float(reconstruct_ret):.2f} | {float(retain_dd):.2f} "
+                    f"| {float(reconstruct_dd):.2f} |"
+                )
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def plot_combined_controller_case(
     *,
     sh_case_id: int,
@@ -1215,10 +1263,10 @@ def plot_combined_controller_case(
         gridspec_kw={"width_ratios": [1.0, 1.0], "height_ratios": [1.0, 1.0]},
     )
     sh_legend = draw_controller_case_panels(
-        axes[0, 0], axes[0, 1], sh_data, show_panel_titles=False, font_delta=1.0
+        axes[0, 0], axes[0, 1], sh_data, show_panel_titles=False, font_delta=2.0
     )
     nas_legend = draw_controller_case_panels(
-        axes[1, 0], axes[1, 1], nas_data, show_panel_titles=False, font_delta=1.0
+        axes[1, 0], axes[1, 1], nas_data, show_panel_titles=False, font_delta=2.0
     )
     legend_items = {**sh_legend, **nas_legend}
     fig.legend(
@@ -1228,7 +1276,7 @@ def plot_combined_controller_case(
         bbox_to_anchor=(0.53, 0.985),
         ncol=len(legend_items),
         frameon=False,
-        fontsize=9.8,
+        fontsize=10.8,
     )
     fig.text(
         0.285,
@@ -1236,7 +1284,7 @@ def plot_combined_controller_case(
         "A. Frozen portfolio return",
         ha="center",
         va="bottom",
-        fontsize=12.0,
+        fontsize=13.0,
         fontweight="semibold",
         color="#1F2937",
     )
@@ -1246,7 +1294,7 @@ def plot_combined_controller_case(
         "B. Frozen portfolio drawdown",
         ha="center",
         va="bottom",
-        fontsize=12.0,
+        fontsize=13.0,
         fontweight="semibold",
         color="#1F2937",
     )
@@ -1264,7 +1312,7 @@ def plot_combined_controller_case(
         "rotation": 90,
         "ha": "center",
         "va": "center",
-        "fontsize": 13.0,
+        "fontsize": 14.0,
         "fontweight": "semibold",
         "color": "#1F2937",
     }
@@ -1778,6 +1826,10 @@ def controller_experiment(
                 nas_actions=nas_actions,
                 out_dir=dirs["controller"],
             )
+    write_text(
+        dirs["controller"] / "CONTROLLER_CASE_LINE_VALUES.md",
+        build_controller_case_values_markdown(selected_cases, selected_inputs),
+    )
     case_df = pd.DataFrame(case_rows)
     summary_df = pd.DataFrame(summary_rows)
     remaining_summary_df = pd.DataFrame(remaining_rows)

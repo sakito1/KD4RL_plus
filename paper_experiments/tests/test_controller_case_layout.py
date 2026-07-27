@@ -107,8 +107,8 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
             assert axis.get_xlabel() == "2021-07-08—2021-08-18"
             assert panel_title in [text.get_text() for text in axis.texts]
         annotation_text = [text.get_text() for axis in fig.axes for text in axis.texts]
-        assert any(text.startswith("retain ") for text in annotation_text)
-        assert any(text.startswith("reconstruct ") for text in annotation_text)
+        assert not any(text.startswith("retain ") for text in annotation_text)
+        assert not any(text.startswith("reconstruct ") for text in annotation_text)
         assert any(text.startswith("Return uplift:") for text in annotation_text)
         assert any(text.startswith("MDD reduction:") for text in annotation_text)
         return_box = next(
@@ -127,6 +127,34 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
             assert (line_max - ymin) / (ymax - ymin) <= 0.82
     finally:
         plt.close(fig)
+
+
+def test_controller_case_values_markdown_lists_combinations_and_daily_lines() -> None:
+    sh_case, sh_portfolio, sh_actions = controller_case_fixture("2021-07-07")
+    nas_case, nas_portfolio, nas_actions = controller_case_fixture(
+        "2021-08-02", slope=0.0008
+    )
+
+    markdown = figures.build_controller_case_values_markdown(
+        {
+            "sh": [(1, sh_case), (2, sh_case)],
+            "nas": [(1, nas_case), (2, nas_case)],
+        },
+        {
+            "sh": (sh_portfolio, sh_actions),
+            "nas": (nas_portfolio, nas_actions),
+        },
+    )
+
+    assert "controller_case_combined_sh01_nas01" in markdown
+    assert "controller_case_combined_sh02_nas02" in markdown
+    assert "## CSI-300 — Case 1" in markdown
+    assert "## Nasdaq-100 — Case 2" in markdown
+    assert (
+        "| Day | Retain return (%) | Reconstruct return (%) "
+        "| Retain drawdown (%) | Reconstruct drawdown (%) |"
+    ) in markdown
+    assert "| 30 | 3.00 | 4.50 | 0.00 | 0.00 |" in markdown
 
 
 def test_controller_case_combinations_are_cartesian_product() -> None:
@@ -211,9 +239,9 @@ def test_combined_controller_case_uses_two_by_two_layout(
             "Drawdown difference",
         ]
         assert fig.get_size_inches() == pytest.approx([10.24, 6.3])
-        assert fig.legends[0].get_texts()[0].get_fontsize() == pytest.approx(9.8)
-        assert top_left.xaxis.label.get_fontsize() == pytest.approx(10.2)
-        assert top_left.yaxis.label.get_fontsize() == pytest.approx(11.0)
+        assert fig.legends[0].get_texts()[0].get_fontsize() == pytest.approx(10.8)
+        assert top_left.xaxis.label.get_fontsize() == pytest.approx(11.2)
+        assert top_left.yaxis.label.get_fontsize() == pytest.approx(12.0)
         assert captured["path"].name == "controller_case_combined_sh01_nas02"
         assert captured["save_kwargs"] == {"pad_inches": 0.0}
         assert top_left.get_position().x0 == pytest.approx(0.065)
