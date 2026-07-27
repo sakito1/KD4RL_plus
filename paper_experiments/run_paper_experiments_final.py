@@ -1056,7 +1056,7 @@ def draw_controller_case_panels(
     switch_mdd = float(data["switch_mdd"])
     mdd_gain = float(data["mdd_gain"])
 
-    ax0.plot(plot_days, hold_ret_plot, color=keep_color, lw=2.5, label="No-controller keep")
+    ax0.plot(plot_days, hold_ret_plot, color=keep_color, lw=2.5, label="Controller retain")
     ax0.plot(plot_days, switch_ret_plot, color=switch_color, lw=2.8, label="Controller reconstruct")
     ax0.fill_between(
         plot_days,
@@ -1066,14 +1066,14 @@ def draw_controller_case_panels(
         color="#BFE6DD",
         alpha=0.58,
         interpolate=True,
-        label="Switch advantage area",
+        label="Counterfactual switch advantage",
     )
     ax0.fill_between(plot_days, hold_ret_plot, switch_ret_plot, where=switch_ret_plot < hold_ret_plot, color="#F4C7BE", alpha=0.32, interpolate=True)
     ax0.axhline(0, color="#CBD2DD", lw=1.0)
     ax0.scatter([realized_horizon], [hold_ret_plot[-1]], color=keep_color, s=48, zorder=4, edgecolor="white", linewidth=0.8)
     ax0.scatter([realized_horizon], [switch_ret_plot[-1]], color=switch_color, s=48, zorder=4, edgecolor="white", linewidth=0.8)
     ax0.annotate(
-        f"keep {hold_return * 100:+.2f}%",
+        f"retain {hold_return * 100:+.2f}%",
         xy=(realized_horizon, hold_ret_plot[-1]),
         xytext=(-66, -14 if hold_ret_plot[-1] <= switch_ret_plot[-1] else 12),
         textcoords="offset points",
@@ -1081,7 +1081,7 @@ def draw_controller_case_panels(
         color=keep_color,
     )
     ax0.annotate(
-        f"switch {switch_return * 100:+.2f}%",
+        f"reconstruct {switch_return * 100:+.2f}%",
         xy=(realized_horizon, switch_ret_plot[-1]),
         xytext=(-76, 10 if hold_ret_plot[-1] <= switch_ret_plot[-1] else -16),
         textcoords="offset points",
@@ -1089,22 +1089,22 @@ def draw_controller_case_panels(
         color=switch_color,
         fontweight="semibold",
     )
-    ax0.text(0.02, 0.06, f"Return gap: {ret_gain * 100:+.2f} pp", transform=ax0.transAxes, ha="left", va="bottom", fontsize=10.0, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
+    ax0.text(0.02, 0.06, f"Return uplift: {ret_gain * 100:+.2f} pp", transform=ax0.transAxes, ha="left", va="bottom", fontsize=10.0, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
     ax0.set_ylabel("Return (%)")
     ax0.set_xlim(1, realized_horizon)
     clean_axis(ax0)
     ax0.grid(True, axis="both", alpha=0.60)
 
-    ax1.plot(plot_days, hold_dd_plot, color=keep_color, lw=2.3, label="No-controller keep")
+    ax1.plot(plot_days, hold_dd_plot, color=keep_color, lw=2.3, label="Controller retain")
     ax1.plot(plot_days, switch_dd_plot, color=switch_color, lw=2.6, label="Controller reconstruct")
-    ax1.fill_between(plot_days, switch_dd_plot, hold_dd_plot, where=hold_dd_plot >= switch_dd_plot, color="#F1B7AB", alpha=0.40, interpolate=True, label="Avoided drawdown")
+    ax1.fill_between(plot_days, switch_dd_plot, hold_dd_plot, where=hold_dd_plot >= switch_dd_plot, color="#F1B7AB", alpha=0.40, interpolate=True, label="MDD reduction")
     hold_mdd_index = int(np.nanargmax(hold_dd_plot))
     switch_mdd_index = int(np.nanargmax(switch_dd_plot))
     hold_mdd_day = int(plot_days[hold_mdd_index])
     switch_mdd_day = int(plot_days[switch_mdd_index])
     ax1.scatter([hold_mdd_day], [hold_dd_plot[hold_mdd_index]], color=keep_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
     ax1.scatter([switch_mdd_day], [switch_dd_plot[switch_mdd_index]], color=switch_color, s=44, zorder=4, edgecolor="white", linewidth=0.8)
-    ax1.text(0.02, 0.84, f"Max DD dots: {hold_mdd * 100:.2f}% -> {switch_mdd * 100:.2f}%\nReduction: {mdd_gain * 100:+.2f} pp", transform=ax1.transAxes, ha="left", va="top", fontsize=9.5, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
+    ax1.text(0.02, 0.84, f"MDD reduction: {mdd_gain * 100:+.2f} pp", transform=ax1.transAxes, ha="left", va="top", fontsize=9.5, color="#1F2937", bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": "#D9DEE7", "alpha": 0.96})
     ax1.set_ylabel("Drawdown (%)")
     ax1.set_xlim(1, realized_horizon)
     ax1.set_ylim(bottom=0)
@@ -1114,8 +1114,8 @@ def draw_controller_case_panels(
     if tick_days[-1] != realized_horizon:
         tick_days.append(realized_horizon)
     panel_titles = [
-        "A. Future return after the switch decision",
-        "B. Future drawdown under the same frozen window",
+        "A. Frozen portfolio return",
+        "B. Frozen portfolio drawdown",
     ]
     for axis, panel_title in zip((ax0, ax1), panel_titles):
         axis.set_xticks(tick_days)
@@ -1218,7 +1218,7 @@ def plot_combined_controller_case(
     fig.text(
         0.285,
         0.025,
-        "A. Future return after the switch decision",
+        "A. Frozen portfolio return",
         ha="center",
         va="bottom",
         fontsize=11.0,
@@ -1228,7 +1228,7 @@ def plot_combined_controller_case(
     fig.text(
         0.755,
         0.025,
-        "B. Future drawdown under the same frozen window",
+        "B. Frozen portfolio drawdown",
         ha="center",
         va="bottom",
         fontsize=11.0,

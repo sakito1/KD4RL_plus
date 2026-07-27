@@ -90,15 +90,15 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
         assert len(fig.legends) == 1
         labels = [text.get_text() for text in fig.legends[0].get_texts()]
         assert labels == [
-            "No-controller keep",
+            "Controller retain",
             "Controller reconstruct",
-            "Switch advantage area",
-            "Avoided drawdown",
+            "Counterfactual switch advantage",
+            "MDD reduction",
         ]
         assert len(fig.texts) == 0
         expected_panel_titles = [
-            "A. Future return after the switch decision",
-            "B. Future drawdown under the same frozen window",
+            "A. Frozen portfolio return",
+            "B. Frozen portfolio drawdown",
         ]
         for axis, panel_title in zip(fig.axes, expected_panel_titles):
             assert axis.get_title() == ""
@@ -106,6 +106,11 @@ def test_controller_case_uses_two_equal_side_by_side_panels_and_shared_legend(
             assert list(axis.get_xticks()) == pytest.approx([1, 5, 10, 15, 20, 25, 30])
             assert axis.get_xlabel() == "2021-07-08—2021-08-18"
             assert panel_title in [text.get_text() for text in axis.texts]
+        annotation_text = [text.get_text() for axis in fig.axes for text in axis.texts]
+        assert any(text.startswith("retain ") for text in annotation_text)
+        assert any(text.startswith("reconstruct ") for text in annotation_text)
+        assert any(text.startswith("Return uplift:") for text in annotation_text)
+        assert any(text.startswith("MDD reduction:") for text in annotation_text)
     finally:
         plt.close(fig)
 
@@ -173,18 +178,18 @@ def test_combined_controller_case_uses_two_by_two_layout(
         assert figure_labels.count("CSI-300") == 1
         assert figure_labels.count("Nasdaq-100") == 1
         assert figure_labels.count(
-            "A. Future return after the switch decision"
+            "A. Frozen portfolio return"
         ) == 1
         assert figure_labels.count(
-            "B. Future drawdown under the same frozen window"
+            "B. Frozen portfolio drawdown"
         ) == 1
         assert len(fig.legends) == 1
         legend_labels = [text.get_text() for text in fig.legends[0].get_texts()]
         assert legend_labels == [
-            "No-controller keep",
+            "Controller retain",
             "Controller reconstruct",
-            "Switch advantage area",
-            "Avoided drawdown",
+            "Counterfactual switch advantage",
+            "MDD reduction",
         ]
         assert captured["path"].name == "controller_case_combined_sh01_nas02"
         row_labels = {
