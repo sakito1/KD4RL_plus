@@ -272,7 +272,7 @@ def plot_combined_market_heatmaps(
         2,
         wspace=0.28,
         hspace=0.64,
-        left=0.115,
+        left=0.095,
         right=0.97,
         top=0.82,
         bottom=0.26,
@@ -353,7 +353,7 @@ def plot_combined_market_heatmaps(
         for column in range(2):
             axis = axes[row, column]
             axis.set_yticks(np.arange(len(assets)))
-            axis.set_yticklabels(assets, fontsize=12)
+            axis.set_yticklabels(assets, fontsize=13)
             day_count = len(idx)
             day_labels = [
                 day
@@ -363,17 +363,17 @@ def plot_combined_market_heatmaps(
             if day_count and day_labels[-1] != day_count:
                 day_labels.append(day_count)
             axis.set_xticks(np.asarray(day_labels) - 1)
-            axis.tick_params(axis="x", labelsize=11)
-            axis.tick_params(axis="y", labelsize=12)
+            axis.tick_params(axis="x", labelsize=12)
+            axis.tick_params(axis="y", labelsize=13)
             axis.set_xticklabels(
                 [str(day) for day in day_labels],
-                fontsize=11,
+                fontsize=12,
             )
             start_date = pd.Timestamp(idx[0]).strftime("%Y-%m-%d")
             end_date = pd.Timestamp(idx[-1]).strftime("%Y-%m-%d")
             axis.set_xlabel(
                 f"{start_date}—{end_date}",
-                fontsize=12,
+                fontsize=13,
                 labelpad=5,
             )
             axis.spines["top"].set_visible(False)
@@ -384,31 +384,18 @@ def plot_combined_market_heatmaps(
         cax=colorbar_axes[0],
         orientation="horizontal",
     )
-    future_colorbar.set_label("Relative return (%)", fontsize=12)
-    future_colorbar.ax.tick_params(labelsize=11)
+    future_colorbar.set_label("Relative return (%)", fontsize=13)
+    future_colorbar.ax.tick_params(labelsize=12)
     future_colorbar.ax.xaxis.set_label_position("top")
     tilt_colorbar = fig.colorbar(
         tilt_image,
         cax=colorbar_axes[1],
         orientation="horizontal",
     )
-    tilt_colorbar.set_label("Refinement tilt (pp)", fontsize=12)
-    tilt_colorbar.ax.tick_params(labelsize=11)
+    tilt_colorbar.set_label("Refinement tilt (pp)", fontsize=13)
+    tilt_colorbar.ax.tick_params(labelsize=12)
     tilt_colorbar.ax.xaxis.set_label_position("top")
 
-    for row, market in enumerate(markets):
-        position = axes[row, 0].get_position()
-        fig.text(
-            0.018,
-            (position.y0 + position.y1) / 2,
-            MARKET_LABELS[market],
-            ha="center",
-            va="center",
-            rotation=90,
-            fontsize=16,
-            fontweight="bold",
-            color="#1F2937",
-        )
     for column, title in enumerate(
         (
             f"A. Future {future_horizon}-day relative return",
@@ -422,7 +409,7 @@ def plot_combined_market_heatmaps(
             title,
             ha="center",
             va="bottom",
-            fontsize=16,
+            fontsize=17,
             fontweight="bold",
             color="#1F2937",
         )

@@ -77,13 +77,21 @@ def test_trader_refinement_matches_controller_style_layout(
         figure_text = [text.get_text() for text in fig.texts]
         assert figure_text.count("A. Future 7-day relative return") == 1
         assert figure_text.count("B. Refinement tilt") == 1
-        assert figure_text.count("CSI-300") == 1
-        assert figure_text.count("Nasdaq-100") == 1
+        assert "CSI-300" not in figure_text
+        assert "Nasdaq-100" not in figure_text
         figure_width, figure_height = fig.get_size_inches()
         assert figure_width <= 14.0
         assert figure_height <= 5.8
-        assert top_left.get_yticklabels()[0].get_fontsize() >= 12
-        assert top_left.get_xticklabels()[0].get_fontsize() >= 11
+        assert top_left.get_position().x0 <= 0.10
+        assert all(
+            axis.get_yticklabels()[0].get_fontsize() >= 13
+            for axis in image_axes
+        )
+        assert all(
+            axis.get_xticklabels()[0].get_fontsize() >= 12
+            for axis in image_axes
+        )
+        assert all(axis.xaxis.label.get_fontsize() >= 13 for axis in image_axes)
         assert [label.get_text() for label in top_left.get_xticklabels()] == [
             "1",
             "5",
@@ -97,36 +105,28 @@ def test_trader_refinement_matches_controller_style_layout(
             axis.get_xlabel() == "2021-01-04—2021-02-12"
             for axis in image_axes
         )
-        market_labels = {
-            text.get_text(): text
-            for text in fig.texts
-            if text.get_text() in {"CSI-300", "Nasdaq-100"}
-        }
         bottom_titles = [
             text
             for text in fig.texts
             if text.get_text().startswith(("A.", "B."))
         ]
-        assert all(text.get_fontsize() >= 16 for text in market_labels.values())
-        assert all(text.get_fontsize() >= 16 for text in bottom_titles)
+        assert all(text.get_fontsize() >= 17 for text in bottom_titles)
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
-        assert (
-            market_labels["CSI-300"].get_window_extent(renderer).x1 + 4
-            < min(
-                label.get_window_extent(renderer).x0
-                for label in top_left.get_yticklabels()
-            )
-        )
-        assert (
-            market_labels["Nasdaq-100"].get_window_extent(renderer).x1 + 4
-            < min(
-                label.get_window_extent(renderer).x0
-                for label in bottom_left.get_yticklabels()
-            )
+        assert all(
+            label.get_window_extent(renderer).x0 >= fig.bbox.x0
+            for axis in image_axes
+            for label in axis.get_yticklabels()
         )
         assert len(fig.axes) == 6
         colorbar_axes = [axis for axis in fig.axes if not axis.images]
+        assert all(
+            axis.xaxis.label.get_fontsize() >= 13 for axis in colorbar_axes
+        )
+        assert all(
+            axis.get_xticklabels()[0].get_fontsize() >= 12
+            for axis in colorbar_axes
+        )
         assert colorbar_axes[0].get_position().y0 > top_left.get_position().y1
         assert colorbar_axes[1].get_position().y0 > top_right.get_position().y1
         assert colorbar_axes[0].get_position().x0 == pytest.approx(
