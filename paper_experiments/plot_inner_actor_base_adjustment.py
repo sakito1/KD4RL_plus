@@ -352,8 +352,13 @@ def plot_combined_market_heatmaps(
         )
         for column in range(2):
             axis = axes[row, column]
-            axis.set_yticks(np.arange(len(assets)))
-            axis.set_yticklabels(assets, fontsize=13)
+            if column == 0:
+                axis.set_yticks(np.arange(len(assets)))
+                axis.set_yticklabels(assets, fontsize=13)
+                axis.tick_params(axis="y", labelsize=13)
+            else:
+                axis.set_yticks([])
+                axis.tick_params(axis="y", left=False, labelleft=False)
             day_count = len(idx)
             day_labels = [
                 day
@@ -364,7 +369,6 @@ def plot_combined_market_heatmaps(
                 day_labels.append(day_count)
             axis.set_xticks(np.asarray(day_labels) - 1)
             axis.tick_params(axis="x", labelsize=12)
-            axis.tick_params(axis="y", labelsize=13)
             axis.set_xticklabels(
                 [str(day) for day in day_labels],
                 fontsize=12,

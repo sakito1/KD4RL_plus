@@ -85,8 +85,12 @@ def test_trader_refinement_matches_controller_style_layout(
         assert top_left.get_position().x0 <= 0.10
         assert all(
             axis.get_yticklabels()[0].get_fontsize() >= 13
-            for axis in image_axes
+            for axis in (top_left, bottom_left)
         )
+        assert not top_right.get_yticks().size
+        assert not bottom_right.get_yticks().size
+        assert not top_right.get_yticklabels()
+        assert not bottom_right.get_yticklabels()
         assert all(
             axis.get_xticklabels()[0].get_fontsize() >= 12
             for axis in image_axes
@@ -115,7 +119,7 @@ def test_trader_refinement_matches_controller_style_layout(
         renderer = fig.canvas.get_renderer()
         assert all(
             label.get_window_extent(renderer).x0 >= fig.bbox.x0
-            for axis in image_axes
+            for axis in (top_left, bottom_left)
             for label in axis.get_yticklabels()
         )
         assert len(fig.axes) == 6
