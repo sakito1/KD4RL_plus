@@ -55,6 +55,7 @@ def test_trader_refinement_matches_controller_style_layout(
         assert len(image_axes) == 4
         top_left, top_right, bottom_left, bottom_right = image_axes
         assert top_left.get_position().x0 < top_right.get_position().x0
+        assert top_right.get_position().x0 - top_left.get_position().x1 <= 0.06
         assert top_left.get_position().y0 > bottom_left.get_position().y0
         assert bottom_left.get_position().x0 < bottom_right.get_position().x0
         assert not any(axis.get_title() for axis in image_axes)
@@ -84,7 +85,7 @@ def test_trader_refinement_matches_controller_style_layout(
         assert figure_height <= 5.8
         assert top_left.get_position().x0 <= 0.10
         assert all(
-            axis.get_yticklabels()[0].get_fontsize() >= 13
+            axis.get_yticklabels()[0].get_fontsize() >= 14
             for axis in (top_left, bottom_left)
         )
         assert not top_right.get_yticks().size
@@ -92,10 +93,10 @@ def test_trader_refinement_matches_controller_style_layout(
         assert not top_right.get_yticklabels()
         assert not bottom_right.get_yticklabels()
         assert all(
-            axis.get_xticklabels()[0].get_fontsize() >= 12
+            axis.get_xticklabels()[0].get_fontsize() >= 13
             for axis in image_axes
         )
-        assert all(axis.xaxis.label.get_fontsize() >= 13 for axis in image_axes)
+        assert all(axis.xaxis.label.get_fontsize() >= 14 for axis in image_axes)
         assert [label.get_text() for label in top_left.get_xticklabels()] == [
             "1",
             "5",
@@ -114,7 +115,7 @@ def test_trader_refinement_matches_controller_style_layout(
             for text in fig.texts
             if text.get_text().startswith(("A.", "B."))
         ]
-        assert all(text.get_fontsize() >= 17 for text in bottom_titles)
+        assert all(text.get_fontsize() >= 18 for text in bottom_titles)
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
         assert all(
@@ -125,10 +126,10 @@ def test_trader_refinement_matches_controller_style_layout(
         assert len(fig.axes) == 6
         colorbar_axes = [axis for axis in fig.axes if not axis.images]
         assert all(
-            axis.xaxis.label.get_fontsize() >= 13 for axis in colorbar_axes
+            axis.xaxis.label.get_fontsize() >= 14 for axis in colorbar_axes
         )
         assert all(
-            axis.get_xticklabels()[0].get_fontsize() >= 12
+            axis.get_xticklabels()[0].get_fontsize() >= 13
             for axis in colorbar_axes
         )
         assert colorbar_axes[0].get_position().y0 > top_left.get_position().y1
