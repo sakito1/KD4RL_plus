@@ -181,7 +181,12 @@ def select_window(tilt: pd.DataFrame, fut_rel: pd.DataFrame, *, windows=(30, 40,
             t = tilt.iloc[start : start + win]
             f = fut_rel.iloc[start : start + win]
             contribution = t * f
-            active = (t.abs().mean() * f.abs().mean()).sort_values(ascending=False).head(6).index
+            active = (
+                (t.abs().mean() * f.abs().mean())
+                .sort_values(ascending=False)
+                .head(10)
+                .index
+            )
             t_sel = t[active]
             f_sel = f[active]
             corr = mean_corr(t_sel, f_sel)
@@ -266,16 +271,16 @@ def plot_combined_market_heatmaps(
     if len(markets) != 2:
         return
 
-    fig = plt.figure(figsize=(13.6, 5.7))
+    fig = plt.figure(figsize=(13.6, 7.8))
     grid = fig.add_gridspec(
         2,
         2,
         wspace=0.10,
-        hspace=0.64,
+        hspace=0.35,
         left=0.095,
         right=0.97,
         top=0.82,
-        bottom=0.26,
+        bottom=0.18,
     )
     axes = np.asarray(
         [

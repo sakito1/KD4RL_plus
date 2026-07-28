@@ -6,19 +6,23 @@ import pytest
 from paper_experiments import plot_inner_actor_base_adjustment as trader
 
 
-def panel_data(scale: float, periods: int = 30) -> dict:
+def panel_data(scale: float, periods: int = 30, asset_count: int = 3) -> dict:
     dates = pd.bdate_range("2021-01-04", periods=periods)
-    assets = ["AAA.O", "BBB.O", "CCC.O"]
+    assets = [f"ASSET_{index:02d}" for index in range(asset_count)]
     return {
         "assets": assets,
         "idx": dates,
         "fut_pct": pd.DataFrame(
-            np.arange(3 * periods, dtype=float).reshape(3, periods) * scale,
+            np.arange(asset_count * periods, dtype=float)
+            .reshape(asset_count, periods)
+            * scale,
             index=assets,
             columns=dates,
         ),
         "tilt_pct": pd.DataFrame(
-            np.linspace(-1, 1, 3 * periods).reshape(3, periods) * scale,
+            np.linspace(-1, 1, asset_count * periods)
+            .reshape(asset_count, periods)
+            * scale,
             index=assets,
             columns=dates,
         ),
@@ -82,7 +86,7 @@ def test_trader_refinement_matches_controller_style_layout(
         assert "Nasdaq-100" not in figure_text
         figure_width, figure_height = fig.get_size_inches()
         assert figure_width <= 14.0
-        assert figure_height <= 5.8
+        assert figure_height <= 7.9
         assert top_left.get_position().x0 <= 0.10
         assert all(
             axis.get_yticklabels()[0].get_fontsize() >= 14
@@ -196,6 +200,45 @@ def test_trader_refinement_caps_combined_heatmaps_at_30_days(
         plt.close(fig)
 
 
+def test_ten_asset_labels_do_not_overlap(monkeypatch, tmp_path) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        trader,
+        "save_figure",
+        lambda fig, path, **kwargs: captured.setdefault("fig", fig),
+    )
+
+    trader.plot_combined_market_heatmaps(
+        {
+            "nas": panel_data(0.1, asset_count=10),
+            "sh": panel_data(0.2, asset_count=10),
+        },
+        tmp_path,
+        future_horizon=5,
+    )
+
+    fig = captured["fig"]
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        left_axes = [axis for axis in fig.axes if axis.images][:4:2]
+        for axis in left_axes:
+            bounds = sorted(
+                (
+                    label.get_window_extent(renderer)
+                    for label in axis.get_yticklabels()
+                ),
+                key=lambda bound: bound.y0,
+            )
+            assert len(bounds) == 10
+            assert all(
+                lower.y1 <= upper.y0
+                for lower, upper in zip(bounds, bounds[1:])
+            )
+    finally:
+        plt.close(fig)
+
+
 def test_select_window_accepts_exactly_30_valid_days() -> None:
     index = pd.bdate_range("2021-01-04", periods=30)
     tilt = pd.DataFrame(
@@ -218,6 +261,22 @@ def test_select_window_accepts_exactly_30_valid_days() -> None:
     assert selected["start"] == 0
     assert selected["end"] == 29
     assert selected["window"] == 30
+
+
+def test_select_window_returns_ten_active_assets() -> None:
+    index = pd.bdate_range("2021-01-04", periods=30)
+    assets = [f"ASSET_{index:02d}" for index in range(12)]
+    rng = np.random.default_rng(7)
+    tilt = pd.DataFrame(rng.normal(size=(30, 12)), index=index, columns=assets)
+    future = pd.DataFrame(
+        rng.normal(size=(30, 12)),
+        index=index,
+        columns=assets,
+    )
+
+    selected = trader.select_window(tilt, future, windows=(30,))
+
+    assert len(selected["assets"]) == 10
 
 
 def test_trader_figure_is_saved_at_paper_resolution(monkeypatch, tmp_path) -> None:
