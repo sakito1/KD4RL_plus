@@ -203,6 +203,7 @@ if [[ "$TEST_SKIP_FIXED_SCENARIOS" == "1" ]]; then
 fi
 
 echo "Run name: $RUN_NAME"
+echo "Repository root: $REPO_ROOT"
 echo "Output root: $OUTPUT_ROOT"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo "Markets: $MARKETS"
