@@ -12,5 +12,6 @@ runs/
 results/
 ckpts/
 checkpoints/
+.worktrees/
 __pycache__/
 *.xlsx.lock
