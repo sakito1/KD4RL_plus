@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/tongwenxuan/KD4RL_plus
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 is_protected_result_path() {
   local path="${1%/}"
@@ -57,6 +59,8 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-results/end_to_end_hrl_controller_joint_nas49_sh90}"
 RUN_NAME="${RUN_NAME:-lookback60_hold30_e2e_hrl_controller_joint_nas49_sh90}"
 GPU_ID="${GPU_ID:-0}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-300}"
+TRADE_NUM="${TRADE_NUM:-10}"
+MARKETS="${MARKETS:-sh nas}"
 
 NAS_SEEDS="${NAS_SEEDS:-49}"
 SH_SEEDS="${SH_SEEDS:-90}"
@@ -201,6 +205,8 @@ fi
 echo "Run name: $RUN_NAME"
 echo "Output root: $OUTPUT_ROOT"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo "Markets: $MARKETS"
+echo "Top-K assets: $TRADE_NUM"
 echo "SH seeds: $SH_SEEDS"
 echo "NAS seeds: $NAS_SEEDS"
 echo "Schedule: HRL warmup -> fixed HRL joint -> controller PG -> controller-active HRL joint"
@@ -225,6 +231,7 @@ run_market() {
     --output_root "$OUTPUT_ROOT" \
     --run_name "$RUN_NAME" \
     --device cuda \
+    --trade_num "$TRADE_NUM" \
     --outer_window "$OUTER_WINDOW" \
     --min_hold "$MIN_HOLD" \
     --max_hold "$MAX_HOLD" \
@@ -320,7 +327,19 @@ run_market() {
     2>&1 | tee "$log_file"
 }
 
-run_market sh "$SH_SEEDS"
-run_market nas "$NAS_SEEDS"
+for market in $MARKETS; do
+  case "$market" in
+    nas)
+      run_market nas "$NAS_SEEDS"
+      ;;
+    sh)
+      run_market sh "$SH_SEEDS"
+      ;;
+    *)
+      echo "Unsupported market in MARKETS: $market" >&2
+      exit 2
+      ;;
+  esac
+done
 
 echo "End-to-end HRL/controller joint runs finished: $OUTPUT_ROOT/$RUN_NAME"
