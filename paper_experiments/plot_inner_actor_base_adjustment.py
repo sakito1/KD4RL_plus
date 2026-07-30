@@ -43,11 +43,26 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot inner tilt versus future relative return.")
     parser.add_argument("--results_root", default=str(ROOT / "results" / "end"))
     parser.add_argument("--output_dir", default=str(ROOT / "paper_experiments_outputs" / "paper_experiments_final"))
+    parser.add_argument(
+        "--prices_root",
+        default=str(ROOT / "DeepAries" / "data"),
+        help="Directory containing <market>/<market>_data.csv.",
+    )
     parser.add_argument("--markets", nargs="+", default=["nas", "sh"], choices=["nas", "sh"])
     parser.add_argument("--seeds", nargs="*", default=["nas:49", "sh:90"])
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--future_horizon", type=int, default=5)
     parser.add_argument("--force_eval", action="store_true")
+    parser.add_argument(
+        "--actions_root",
+        default=None,
+        help="Optional directory containing precomputed *_actions.csv traces.",
+    )
+    parser.add_argument(
+        "--case_manifest",
+        default=None,
+        help="Optional JSON mapping markets to exact start/end dates and assets.",
+    )
     return parser.parse_args()
 
 
@@ -83,6 +98,17 @@ def parse_seed_specs(specs: Sequence[str]) -> Dict[str, int]:
     return out
 
 
+def load_case_manifest(args: argparse.Namespace) -> Dict[str, dict]:
+    path_value = getattr(args, "case_manifest", None)
+    if not path_value:
+        return {}
+    path = Path(path_value)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("case manifest must be a JSON object keyed by market")
+    return payload
+
+
 def cache_paths(root: Path, market: str, seed: int) -> Dict[str, Path]:
     cache = root / "_cache" / "inner_base_adjustment"
     cache.mkdir(parents=True, exist_ok=True)
@@ -95,6 +121,28 @@ def cache_paths(root: Path, market: str, seed: int) -> Dict[str, Path]:
 
 
 def ensure_trace(args: argparse.Namespace, output_root: Path, market: str, seed: int) -> pd.DataFrame:
+    explicit_root = getattr(args, "actions_root", None)
+    if explicit_root:
+        explicit_path = (
+            Path(explicit_root)
+            / f"{market}_seed{seed}_full_controller_inner_base_actions.csv"
+        )
+        if not explicit_path.is_file():
+            raise FileNotFoundError(f"explicit action trace not found: {explicit_path}")
+        cols = pd.read_csv(explicit_path, nrows=1).columns
+        needed = {
+            "asset_names_json",
+            "base_weights_json",
+            "exec_weights_json",
+            "inner_tilt_json",
+        }
+        missing = sorted(needed.difference(cols))
+        if missing:
+            raise ValueError(
+                f"explicit action trace is missing columns: {missing}"
+            )
+        return pd.read_csv(explicit_path)
+
     paths = cache_paths(output_root, market, seed)
     if not args.force_eval and paths["actions"].exists():
         try:
@@ -145,8 +193,14 @@ def parse_matrix(actions: pd.DataFrame, column: str) -> pd.DataFrame:
     return out
 
 
-def load_prices(market: str, assets: Sequence[str]) -> pd.DataFrame:
-    price_path = ROOT / "DeepAries" / "data" / market / f"{market}_data.csv"
+def load_prices(
+    market: str,
+    assets: Sequence[str],
+    *,
+    prices_root: Path | str | None = None,
+) -> pd.DataFrame:
+    root = Path(prices_root) if prices_root is not None else ROOT / "DeepAries" / "data"
+    price_path = root / market / f"{market}_data.csv"
     prices = pd.read_csv(price_path, usecols=["date", "tic", "adjclose"])
     prices["date"] = pd.to_datetime(prices["date"])
     wide = prices.pivot(index="date", columns="tic", values="adjclose").sort_index()
@@ -219,6 +273,46 @@ def select_window(tilt: pd.DataFrame, fut_rel: pd.DataFrame, *, windows=(30, 40,
     return max(candidates, key=lambda x: x["score"])
 
 
+def resolve_case_window(
+    tilt: pd.DataFrame,
+    fut_rel: pd.DataFrame,
+    case: dict,
+) -> dict:
+    """Resolve one paper-fixed case without changing its dates or asset order."""
+
+    required = {"start_date", "end_date", "assets"}
+    missing = required.difference(case)
+    if missing:
+        raise ValueError(f"case manifest is missing fields: {sorted(missing)}")
+    if not tilt.index.equals(fut_rel.index):
+        raise ValueError("tilt and future-return frames must use identical dates")
+    start_date = pd.Timestamp(case["start_date"])
+    end_date = pd.Timestamp(case["end_date"])
+    if start_date not in tilt.index:
+        raise ValueError(f"case start_date is unavailable: {start_date.date()}")
+    if end_date not in tilt.index:
+        raise ValueError(f"case end_date is unavailable: {end_date.date()}")
+    start = int(tilt.index.get_loc(start_date))
+    end = int(tilt.index.get_loc(end_date))
+    if start > end:
+        raise ValueError("case start_date must not be after end_date")
+    assets = [str(asset) for asset in case["assets"]]
+    unavailable = [
+        asset
+        for asset in assets
+        if asset not in tilt.columns or asset not in fut_rel.columns
+    ]
+    if unavailable:
+        raise ValueError(f"case assets are unavailable: {unavailable}")
+    return {
+        "start": start,
+        "end": end,
+        "window": end - start + 1,
+        "assets": assets,
+        "idx": tilt.index[start : end + 1],
+    }
+
+
 def date_ticks(index: pd.Index, max_ticks: int = 6) -> tuple[np.ndarray, list[str]]:
     if len(index) <= max_ticks:
         locs = np.arange(len(index))
@@ -239,14 +333,20 @@ def prepare_market_heatmap_data(
     actions: pd.DataFrame,
     *,
     future_horizon: int,
+    case: dict | None = None,
+    prices_root: Path | str | None = None,
 ) -> dict:
     tilt = parse_matrix(actions, "inner_tilt_json")
-    prices = load_prices(market, tilt.columns)
+    prices = load_prices(market, tilt.columns, prices_root=prices_root)
     fut_rel = future_relative_return(prices, tilt.index, future_horizon)
     common = tilt.index.intersection(fut_rel.dropna(how="all").index)
     tilt = tilt.loc[common]
     fut_rel = fut_rel.loc[common, tilt.columns]
-    window = select_window(tilt, fut_rel, windows=(30,))
+    window = (
+        resolve_case_window(tilt, fut_rel, case)
+        if case is not None
+        else select_window(tilt, fut_rel, windows=(30,))
+    )
     sl = slice(window["start"], window["end"] + 1)
     assets = window["assets"]
     idx = tilt.iloc[sl].index
@@ -436,11 +536,13 @@ def plot_market(
     output_root: Path,
     *,
     future_horizon: int,
+    case: dict | None = None,
+    prices_root: Path | str | None = None,
 ) -> dict:
     base = parse_matrix(actions, "base_weights_json")
     exec_w = parse_matrix(actions, "exec_weights_json")
     tilt = parse_matrix(actions, "inner_tilt_json")
-    prices = load_prices(market, tilt.columns)
+    prices = load_prices(market, tilt.columns, prices_root=prices_root)
     fut_rel = future_relative_return(prices, tilt.index, future_horizon)
     common = tilt.index.intersection(fut_rel.dropna(how="all").index)
     tilt = tilt.loc[common]
@@ -448,7 +550,11 @@ def plot_market(
     exec_w = exec_w.loc[common]
     fut_rel = fut_rel.loc[common, tilt.columns]
 
-    window = select_window(tilt, fut_rel)
+    window = (
+        resolve_case_window(tilt, fut_rel, case)
+        if case is not None
+        else select_window(tilt, fut_rel)
+    )
     sl = slice(window["start"], window["end"] + 1)
     assets = window["assets"]
     idx = tilt.iloc[sl].index
@@ -567,12 +673,22 @@ def main() -> None:
     setup_style()
     output_root = Path(args.output_dir)
     seed_map = parse_seed_specs(args.seeds)
+    case_manifest = load_case_manifest(args)
     rows = []
     actions_by_market = {}
     for market in args.markets:
         actions = ensure_trace(args, output_root, market, seed_map[market])
         actions_by_market[market] = actions
-        rows.append(plot_market(market, actions, output_root, future_horizon=args.future_horizon))
+        rows.append(
+            plot_market(
+                market,
+                actions,
+                output_root,
+                future_horizon=args.future_horizon,
+                case=case_manifest.get(market),
+                prices_root=args.prices_root,
+            )
+        )
     summary = pd.DataFrame(rows)
     out_dir = output_root / "04_inner_actor_interpretability"
     tables_dir = output_root / "tables"
@@ -590,6 +706,8 @@ def main() -> None:
             market,
             actions,
             future_horizon=args.future_horizon,
+            case=case_manifest.get(market),
+            prices_root=args.prices_root,
         )
         for market, actions in actions_by_market.items()
     }

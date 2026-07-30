@@ -1,6 +1,6 @@
 # Controller Interpretability
 
-这个目录解释 controller 到底在什么情况下 switch。`controller_case_*.png` 是自动筛选出的关键 free switch：第一行固定切点后 30 个交易日，比较“继续旧基础组合（无 controller）”和“切到新基础组合（controller）”的反事实收益；第二行比较同一冻结窗口下的未来回撤；第三行展示切点前后的 exit probability 与反事实切仓优势。这样可以避免真实路径后续多次切仓污染单个 switch 的比较。
+这个目录解释 controller 到底在什么情况下 switch。`controller_case_*.png` 是自动筛选出的关键 free switch：左侧固定切点后 30 个交易日，比较“继续旧基础组合（无 controller）”和“切到新基础组合（controller）”的反事实收益；右侧比较同一冻结窗口下的未来回撤；顶部共享图例，决策日期和 exit probability 保留在副标题中。这样可以避免真实路径后续多次切仓污染单个 switch 的比较。
 
 `switch_counterfactual_distribution_*.png` 比较所有实际 free switch 点之后 20 日的 switch/hold 反事实收益分布；`switch_remaining_horizon_counterfactual_distribution_*.png` 进一步比较每个实际 switch 在“切仓前组合原本剩余持仓期”内的 switch/hold 冻结反事实收益分布，避免真实路径后续多次切仓污染比较。`fixed_window_comparison_*.png` 比较 learned controller 与 5/10/20/30/60 日固定持仓窗口；`controller_probability_resonance_*.png` 展示 exit probability 是否和未来切仓优势同向变化。
 

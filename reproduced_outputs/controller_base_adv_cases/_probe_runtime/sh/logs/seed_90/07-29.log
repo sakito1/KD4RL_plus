@@ -1,0 +1,6 @@
+2026-07-29 03:00:07,470 INFO: Global Random Seed set to: 90 
+2026-07-29 03:00:07,470 INFO: 正在加载全量数据以保证边界连续性... 
+2026-07-29 03:00:09,903 INFO: Mode TEST. Sequential. 
+2026-07-29 03:04:44,171 INFO: Global Random Seed set to: 90 
+2026-07-29 03:04:44,171 INFO: 正在加载全量数据以保证边界连续性... 
+2026-07-29 03:04:46,575 INFO: Mode TEST. Sequential. 

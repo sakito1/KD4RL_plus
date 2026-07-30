@@ -1,6 +1,6 @@
 # Paper Experiments Final
 
-本目录汇总 eval-only 论文实验图，覆盖 Nasdaq-100、CSI-300 两个市场。所有图同时保存为 PNG 和 PDF；图中文字使用 DejaVu Sans 并设置 TrueType PDF 字体嵌入，避免 PDF 字体乱码。
+本目录汇总 eval-only 论文实验图，覆盖 CSI-300、Nasdaq-100 两个市场。所有图同时保存为 PNG 和 PDF；图中文字使用 DejaVu Sans 并设置 TrueType PDF 字体嵌入，避免 PDF 字体乱码。
 
 目录：
 - `EXPERIMENT_REQUIREMENT_AUDIT.md`：逐条复核用户要求与当前输出文件的对应关系。
