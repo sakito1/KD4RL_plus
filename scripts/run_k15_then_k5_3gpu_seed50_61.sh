@@ -11,7 +11,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-results/k15_then_k5_3gpu_seed50_61}"
 RUN_PREFIX="${RUN_PREFIX:-e2e_k15_then_k5_seed50_61}"
 GPU_IDS="${GPU_IDS:-0 1 2}"
 SEEDS="${SEEDS:-50 51 52 53 54 55 56 57 58 59 60 61}"
-MARKETS="${MARKETS:-nas sh}"
+MARKETS="${MARKETS:-sh}"
 DRY_RUN="${DRY_RUN:-0}"
 
 die() {
